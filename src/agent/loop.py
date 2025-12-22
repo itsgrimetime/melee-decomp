@@ -12,8 +12,6 @@ import asyncio
 from pathlib import Path
 from typing import Optional
 
-from anthropic import APIError
-
 from .models import MatchResult, MatchAttempt, MatchingContext
 from .strategies import get_strategies_for_diff, Strategy
 from .prompts import (
@@ -262,13 +260,9 @@ async def run_matching_agent(
                 print("Could not extract code from LLM response")
                 # Still continue - maybe try again with different strategy
 
-        except APIError as e:
-            print(f"LLM API error: {e}")
-            # On API error, we can't continue effectively
-            if "rate_limit" in str(e).lower():
-                print("Rate limit hit - stopping iterations")
-                break
-            # For other API errors, try to continue
+        except RuntimeError as e:
+            print(f"LLM CLI error: {e}")
+            # CLI errors might be recoverable, try to continue
             continue
         except Exception as e:
             print(f"Unexpected error during LLM call: {e}")

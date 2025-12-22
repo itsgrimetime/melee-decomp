@@ -1,49 +1,41 @@
 """
 LLM client for decompilation agent.
 
-This module provides an async interface to Claude API for generating
-and refining decompiled C code.
+This module provides an async interface to Claude via the `claude` CLI
+for generating and refining decompiled C code.
 """
 
 import asyncio
-import os
+import shutil
 from typing import Optional
-
-from anthropic import AsyncAnthropic, APIError, RateLimitError, APITimeoutError
-from anthropic.types import Message
 
 from .prompts import SYSTEM_PROMPT
 
 
 class LLMClient:
-    """Async client for calling Claude API."""
+    """Async client for calling Claude via CLI."""
 
     def __init__(
         self,
-        api_key: Optional[str] = None,
-        model: str = "claude-sonnet-4-5-20250929",
-        max_tokens: int = 4096,
-        temperature: float = 1.0,
+        model: Optional[str] = None,
+        max_tokens: int = 16000,
     ):
         """Initialize the LLM client.
 
         Args:
-            api_key: Anthropic API key (or None to use ANTHROPIC_API_KEY env var)
-            model: Claude model to use
+            model: Model to use (optional, uses CLI default if not set)
             max_tokens: Maximum tokens in response
-            temperature: Sampling temperature (0.0 to 1.0)
         """
-        self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
-        if not self.api_key:
-            raise ValueError(
-                "ANTHROPIC_API_KEY environment variable not set. "
-                "Please set it or pass api_key parameter."
-            )
-
-        self.model = model
+        self.model = model or "default"
         self.max_tokens = max_tokens
-        self.temperature = temperature
-        self.client = AsyncAnthropic(api_key=self.api_key)
+
+        # Verify claude CLI is available
+        self.claude_path = shutil.which("claude")
+        if not self.claude_path:
+            raise ValueError(
+                "claude CLI not found in PATH. "
+                "Please install Claude Code: https://claude.ai/code"
+            )
 
     async def generate_code(
         self,
@@ -51,7 +43,7 @@ class LLMClient:
         retry_count: int = 3,
         retry_delay: float = 1.0,
     ) -> Optional[str]:
-        """Generate code using Claude API.
+        """Generate code using Claude CLI.
 
         Args:
             prompt: The prompt to send to Claude
@@ -60,108 +52,68 @@ class LLMClient:
 
         Returns:
             The generated response text, or None on failure
-
-        Raises:
-            ValueError: If API key is not set
-            APIError: On unrecoverable API errors
         """
+        # Combine system prompt with user prompt
+        full_prompt = f"{SYSTEM_PROMPT}\n\n---\n\n{prompt}"
+
         for attempt in range(retry_count):
             try:
-                message = await self._call_api(prompt)
-                return self._extract_text(message)
-
-            except RateLimitError as e:
-                # Rate limit - use exponential backoff
-                if attempt < retry_count - 1:
-                    wait_time = retry_delay * (2**attempt)
-                    print(
-                        f"Rate limit hit, retrying in {wait_time:.1f}s "
-                        f"(attempt {attempt + 1}/{retry_count})"
-                    )
-                    await asyncio.sleep(wait_time)
-                else:
-                    print(f"Rate limit error after {retry_count} attempts: {e}")
-                    raise
-
-            except APITimeoutError as e:
-                # Timeout - retry with backoff
-                if attempt < retry_count - 1:
-                    wait_time = retry_delay * (2**attempt)
-                    print(
-                        f"Request timeout, retrying in {wait_time:.1f}s "
-                        f"(attempt {attempt + 1}/{retry_count})"
-                    )
-                    await asyncio.sleep(wait_time)
-                else:
-                    print(f"Timeout error after {retry_count} attempts: {e}")
-                    raise
-
-            except APIError as e:
-                # Other API errors - check if retryable
-                if e.status_code and e.status_code >= 500:
-                    # Server error - retry
-                    if attempt < retry_count - 1:
-                        wait_time = retry_delay * (2**attempt)
-                        print(
-                            f"Server error {e.status_code}, retrying in {wait_time:.1f}s "
-                            f"(attempt {attempt + 1}/{retry_count})"
-                        )
-                        await asyncio.sleep(wait_time)
-                    else:
-                        print(f"Server error after {retry_count} attempts: {e}")
-                        raise
-                else:
-                    # Client error - don't retry
-                    print(f"API error (not retrying): {e}")
-                    raise
+                result = await self._call_cli(full_prompt)
+                if result:
+                    return result
 
             except Exception as e:
-                # Unexpected error
-                print(f"Unexpected error calling Claude API: {e}")
-                raise
+                if attempt < retry_count - 1:
+                    wait_time = retry_delay * (2 ** attempt)
+                    print(
+                        f"CLI error, retrying in {wait_time:.1f}s "
+                        f"(attempt {attempt + 1}/{retry_count}): {e}"
+                    )
+                    await asyncio.sleep(wait_time)
+                else:
+                    print(f"CLI error after {retry_count} attempts: {e}")
+                    raise
 
         return None
 
-    async def _call_api(self, prompt: str) -> Message:
-        """Make the actual API call.
+    async def _call_cli(self, prompt: str) -> str:
+        """Make the actual CLI call.
 
         Args:
-            prompt: The user prompt
+            prompt: The full prompt (system + user)
 
         Returns:
-            The API response message
+            The CLI response text
         """
-        message = await self.client.messages.create(
-            model=self.model,
-            max_tokens=self.max_tokens,
-            temperature=self.temperature,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": prompt}],
+        # Build command
+        cmd = [
+            self.claude_path,
+            "-p", prompt,
+            "--output-format", "text",
+        ]
+
+        # Add model if specified
+        if self.model and self.model != "default":
+            cmd.extend(["--model", self.model])
+
+        # Run the CLI command
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
-        return message
 
-    def _extract_text(self, message: Message) -> str:
-        """Extract text content from API response.
+        stdout, stderr = await process.communicate()
 
-        Args:
-            message: The API response
+        if process.returncode != 0:
+            error_msg = stderr.decode().strip() if stderr else "Unknown error"
+            raise RuntimeError(f"claude CLI failed: {error_msg}")
 
-        Returns:
-            The text content
-        """
-        # Handle content blocks
-        if message.content:
-            # Concatenate all text blocks
-            text_parts = []
-            for block in message.content:
-                if hasattr(block, "text"):
-                    text_parts.append(block.text)
-            return "".join(text_parts)
-        return ""
+        return stdout.decode().strip()
 
     async def close(self):
-        """Close the HTTP client."""
-        await self.client.close()
+        """Close the client (no-op for CLI-based client)."""
+        pass
 
     async def __aenter__(self):
         """Async context manager entry."""
