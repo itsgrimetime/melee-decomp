@@ -74,26 +74,39 @@ async def run_matching_agent(
             )
     else:
         # Auto-select a good candidate
+        print("Scanning for unmatched functions...")
         result = await extract_unmatched_functions(
             melee_root=melee_root,
             include_asm=True,
             include_context=True,
         )
-        # Filter by size and match criteria
+        print(f"Found {len(result.functions)} unmatched functions")
+
+        # Filter by size - prefer medium-sized functions
         functions = [
             f for f in result.functions
             if 50 <= f.size_bytes <= 500
-            and 0.3 <= f.current_match <= 0.99
+            and f.asm is not None  # Must have ASM available
         ]
+        print(f"After filtering by size (50-500 bytes) and ASM availability: {len(functions)}")
+
+        # Prefer functions with partial matches if available
+        partial_matches = [f for f in functions if 0.3 <= f.current_match <= 0.99]
+        if partial_matches:
+            functions = partial_matches
+            print(f"Found {len(functions)} with partial matches (30-99%)")
+
         if not functions:
             return MatchResult(
                 function_name="",
                 matched=False,
                 best_match=0.0,
-                error="No suitable unmatched functions found",
+                error="No suitable unmatched functions found. Make sure the melee project is built to generate ASM files.",
             )
-        # Pick the one with highest partial match
-        func_info = max(functions, key=lambda f: f.current_match)
+
+        # Pick the best candidate
+        # Prioritize: partial match > smaller size (easier to match)
+        func_info = max(functions, key=lambda f: (f.current_match, -f.size_bytes))
 
     # Create matching context
     ctx = MatchingContext(
@@ -113,13 +126,14 @@ async def run_matching_agent(
 
     # Create scratch on decomp.me
     try:
-        scratch = await client.create_scratch(
+        from src.client import ScratchCreate
+        scratch = await client.create_scratch(ScratchCreate(
             name=ctx.function_name,
-            target_asm=ctx.asm,
-            context=ctx.context,
+            target_asm=ctx.asm or "",
+            context=ctx.context or "",
             source_code="// Initial placeholder\n",
             diff_label=ctx.function_name,
-        )
+        ))
         ctx.scratch_slug = scratch.slug
         print(f"Created scratch: {api_url}/scratch/{scratch.slug}")
     except Exception as e:
@@ -150,7 +164,12 @@ async def run_matching_agent(
 
         # Update scratch with current code
         try:
-            await client.update_scratch(scratch.slug, source_code=current_code)
+            from src.client import ScratchUpdate
+            await client.update_scratch(
+                scratch.slug,
+                ScratchUpdate(source_code=current_code),
+                claim_token=scratch.claim_token,
+            )
         except Exception as e:
             print(f"Failed to update scratch: {e}")
             continue

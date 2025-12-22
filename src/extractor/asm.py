@@ -76,21 +76,28 @@ class AsmExtractor:
         lines = asm_content.split("\n")
         function_lines = []
         in_function = False
-        indent_level = 0
 
         # Patterns for function start and end
-        # Function typically starts with:
-        # .global function_name
-        # function_name:
+        # DTK format: .fn function_name, global
+        # Traditional format: .global function_name / function_name:
+        fn_pattern = re.compile(rf"^\s*\.fn\s+{re.escape(function_name)}(?:,\s*\w+)?\s*$")
         global_pattern = re.compile(rf"^\s*\.(?:global|globl)\s+{re.escape(function_name)}\s*$")
         label_pattern = re.compile(rf"^{re.escape(function_name)}:\s*$")
 
-        # Function typically ends with another global function or section directive
-        next_function_pattern = re.compile(r"^\s*\.(?:global|globl)\s+\w+\s*$")
+        # Function end patterns
+        endfn_pattern = re.compile(rf"^\s*\.endfn\s+{re.escape(function_name)}\s*$")
+        next_fn_pattern = re.compile(r"^\s*\.fn\s+\w+")
+        next_global_pattern = re.compile(r"^\s*\.(?:global|globl)\s+\w+\s*$")
         section_pattern = re.compile(r"^\s*\.(text|data|rodata|bss|section)")
 
         for i, line in enumerate(lines):
-            # Check if we're starting the function
+            # Check if we're starting the function (DTK format)
+            if fn_pattern.match(line):
+                in_function = True
+                function_lines.append(line)
+                continue
+
+            # Check if we're starting the function (traditional format)
             if global_pattern.match(line):
                 in_function = True
                 function_lines.append(line)
@@ -102,24 +109,23 @@ class AsmExtractor:
                     function_lines.append(line)
                     continue
 
-                # Check if we've reached the end of the function
-                if next_function_pattern.match(line) or (
-                    section_pattern.match(line) and function_lines
-                ):
-                    # End of function
+                # Check for .endfn marker (DTK format)
+                if endfn_pattern.match(line):
+                    function_lines.append(line)
                     break
 
-                # Check for function end markers
+                # Check if we've reached the next function
+                if next_fn_pattern.match(line) or next_global_pattern.match(line):
+                    break
+
+                # Check for section change
+                if section_pattern.match(line) and function_lines:
+                    break
+
+                # Check for .size marker (traditional format)
                 if line.strip().startswith(".size") and function_name in line:
                     function_lines.append(line)
                     break
-
-                # Check for blr (branch to link register - function return)
-                # This is a heuristic and might not always work
-                if line.strip() == "blr":
-                    function_lines.append(line)
-                    # Keep going in case there's more after blr
-                    continue
 
                 # Add line to function
                 function_lines.append(line)
@@ -156,10 +162,18 @@ class AsmExtractor:
             return []
 
         functions = []
-        # Look for .global directives followed by function labels
+        # Look for .fn directives (DTK format) or .global directives (traditional)
+        fn_pattern = re.compile(r"^\s*\.fn\s+(\w+)(?:,\s*\w+)?\s*$")
         global_pattern = re.compile(r"^\s*\.(?:global|globl)\s+(\w+)\s*$")
 
         for line in asm_content.split("\n"):
+            # Try DTK format first
+            match = fn_pattern.match(line)
+            if match:
+                functions.append(match.group(1))
+                continue
+
+            # Try traditional format
             match = global_pattern.match(line)
             if match:
                 func_name = match.group(1)

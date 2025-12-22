@@ -259,9 +259,15 @@ def agent_run(
     auto_commit: Annotated[
         bool, typer.Option("--auto-commit", help="Automatically commit matches")
     ] = False,
+    verbose: Annotated[
+        bool, typer.Option("--verbose", "-v", help="Show detailed progress")
+    ] = True,
 ):
     """Run the agent loop to match a function."""
     from src.agent import run_matching_agent
+
+    if verbose:
+        console.print("[cyan]Starting agent...[/cyan]")
 
     result = asyncio.run(
         run_matching_agent(
@@ -273,14 +279,21 @@ def agent_run(
         )
     )
 
+    if result.error:
+        console.print(f"[red]Error: {result.error}[/red]")
+        raise typer.Exit(1)
+
     if result.matched:
         console.print(f"[bold green]Matched {result.function_name}![/bold green]")
         console.print(f"Scratch: {api_url}/scratch/{result.scratch_slug}")
         if result.pr_url:
             console.print(f"PR: {result.pr_url}")
     else:
-        console.print(f"[yellow]Could not achieve 100% match[/yellow]")
+        console.print(f"[yellow]Could not achieve 100% match for {result.function_name}[/yellow]")
         console.print(f"Best: {result.best_match * 100:.1f}%")
+        if result.scratch_slug:
+            console.print(f"Scratch: {api_url}/scratch/{result.scratch_slug}")
+        console.print(f"Iterations: {result.iterations}")
 
 
 # ============================================================================

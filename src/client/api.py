@@ -136,12 +136,15 @@ class DecompMeAPIClient:
         data = self._handle_response(response)
         return Scratch.model_validate(data)
 
-    async def update_scratch(self, slug: str, updates: ScratchUpdate) -> Scratch:
+    async def update_scratch(
+        self, slug: str, updates: ScratchUpdate, claim_token: str | None = None
+    ) -> Scratch:
         """Update an existing scratch.
 
         Args:
             slug: Scratch slug/ID
             updates: Fields to update
+            claim_token: Claim token for anonymous scratch updates
 
         Returns:
             Updated scratch
@@ -150,9 +153,13 @@ class DecompMeAPIClient:
             DecompMeAPIError: If update fails (e.g., permission denied)
         """
         logger.info(f"Updating scratch: {slug}")
+        cookies = {}
+        if claim_token:
+            cookies[f"scratch_{slug}"] = claim_token
         response = await self._client.put(
             f"/api/scratch/{slug}",
             json=updates.model_dump(exclude_none=True, mode="json"),
+            cookies=cookies,
         )
         data = self._handle_response(response)
         return Scratch.model_validate(data)
