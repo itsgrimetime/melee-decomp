@@ -114,11 +114,17 @@ def extract_get(
     console.print(f"Size: {func.size_bytes} bytes")
     console.print(f"Match: {func.current_match * 100:.1f}%")
     console.print("\n[bold]Assembly:[/bold]")
-    console.print(func.asm[:2000] + ("..." if len(func.asm) > 2000 else ""))
+    if func.asm:
+        console.print(func.asm[:2000] + ("..." if len(func.asm) > 2000 else ""))
+    else:
+        console.print("[yellow]ASM not available (project needs to be built first)[/yellow]")
 
     if output:
-        output.write_text(func.asm)
-        console.print(f"\n[green]ASM written to {output}[/green]")
+        if func.asm:
+            output.write_text(func.asm)
+            console.print(f"\n[green]ASM written to {output}[/green]")
+        else:
+            console.print("[red]Cannot write output - ASM not available[/red]")
 
 
 # ============================================================================
