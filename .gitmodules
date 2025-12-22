@@ -1,0 +1,6 @@
+[submodule "melee"]
+	path = melee
+	url = git@github.com:doldecomp/melee.git
+[submodule "decomp.me"]
+	path = decomp.me
+	url = git@github.com:decompme/decomp.me.git

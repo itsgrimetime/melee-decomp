@@ -1,0 +1,118 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:17
+    container_name: decompme_postgres_${INSTANCE_ID:-default}
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-decompme}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-decompme}
+      POSTGRES_DB: ${POSTGRES_DB:-decompme}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-decompme}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - decompme
+
+  backend:
+    build:
+      context: ../decomp.me/backend
+      target: dev
+    container_name: decompme_backend_${INSTANCE_ID:-default}
+    cap_drop:
+      - all
+    cap_add:
+      - setuid
+      - setgid
+      - setfcap
+    environment:
+      - ENABLE_SWITCH_SUPPORT=NO
+      - ENABLE_GC_WII_SUPPORT=YES
+    env_file:
+      - decomp.me.env
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+      - "${DEBUGGER_PORT:-5678}:5678"
+    security_opt:
+      - apparmor=unconfined
+      - seccomp=unconfined
+    volumes:
+      - ../decomp.me/backend:/backend
+    tmpfs:
+      # Use a separate tmpfs to prevent a rogue jailed process
+      # from filling /tmp on the parent container
+      - /sandbox/tmp:exec,uid=1000,gid=1000,size=64M,mode=0700
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/api/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - decompme
+
+  frontend:
+    build:
+      context: ../decomp.me/frontend
+      target: dev
+    container_name: decompme_frontend_${INSTANCE_ID:-default}
+    environment:
+      API_BASE: /api
+      INTERNAL_API_BASE: http://backend:8000/api
+    ports:
+      - "${FRONTEND_PORT:-8080}:8080"
+    volumes:
+      - ../decomp.me/frontend:/frontend
+      - ../decomp.me/.env:/.env
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - decompme
+
+  nginx:
+    image: nginx:1.28-alpine
+    container_name: decompme_nginx_${INSTANCE_ID:-default}
+    ports:
+      - "${NGINX_PORT:-80}:80"
+    volumes:
+      - ../decomp.me/nginx/development.conf:/etc/nginx/conf.d/default.conf:ro
+      - ../decomp.me/nginx/geo.conf:/etc/nginx/conf.d/geo.conf:ro
+      - ../decomp.me/frontend/down.html:/var/www/down.html:ro
+      - ../decomp.me/backend/media:/media
+    depends_on:
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:80/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - decompme
+
+networks:
+  decompme:
+    driver: bridge
+    name: decompme_network_${INSTANCE_ID:-default}
+
+volumes:
+  postgres_data:
+    name: decompme_postgres_data_${INSTANCE_ID:-default}

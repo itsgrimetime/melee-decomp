@@ -1,0 +1,27 @@
+# Override file for running parallel instances
+# Usage: INSTANCE_ID=worker1 NGINX_PORT=8001 BACKEND_PORT=9001 FRONTEND_PORT=9101 POSTGRES_PORT=5433 docker-compose -f docker-compose.yml -f docker-compose.parallel.yml up
+#
+# This file ensures each parallel instance:
+# - Has unique container names
+# - Uses unique ports
+# - Has isolated networks and volumes
+# - Can run alongside other instances
+
+version: '3.8'
+
+# All services inherit from docker-compose.yml
+# The INSTANCE_ID, NGINX_PORT, BACKEND_PORT, FRONTEND_PORT, and POSTGRES_PORT
+# environment variables will be used to make each instance unique
+
+# Additional configuration for parallel instances
+services:
+  backend:
+    # Increase timeout for parallel instances
+    healthcheck:
+      start_period: 60s
+      retries: 15
+
+  frontend:
+    healthcheck:
+      start_period: 60s
+      retries: 15

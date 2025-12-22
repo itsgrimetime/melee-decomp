@@ -1,0 +1,11 @@
+# Log files from workers
+worker*.log
+
+# Local environment overrides (if any)
+.env.local
+docker-compose.override.yml
+
+# Temporary files
+*.tmp
+*.swp
+*~
