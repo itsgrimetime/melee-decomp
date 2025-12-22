@@ -234,15 +234,16 @@ def scratch_update(
 
 
 # ============================================================================
-# Match Commands
+# Agent/Match Commands
 # ============================================================================
 
-match_app = typer.Typer(help="Run the decompilation matching agent")
-app.add_typer(match_app, name="match")
+agent_app = typer.Typer(help="Run the decompilation matching agent")
+app.add_typer(agent_app, name="agent")
+app.add_typer(agent_app, name="match")  # alias
 
 
-@match_app.command("run")
-def match_run(
+@agent_app.command("run")
+def agent_run(
     function_name: Annotated[
         Optional[str], typer.Argument(help="Specific function to match")
     ] = None,
