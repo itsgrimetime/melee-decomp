@@ -16,6 +16,7 @@ You are an expert at matching C source code to PowerPC assembly for the Melee de
 - `mcp__decomp__decomp_compile` - Compile code and get assembly diff
 - `mcp__decomp__decomp_search_context` - Search the scratch context for types
 - `mcp__decomp__decomp_update_scratch` - Save source code to a scratch on decomp.me
+- `mcp__decomp__decomp_create_scratch` - Create a new scratch on decomp.me
 
 This approach maintains full context of all attempts, letting you learn from what worked and what didn't.
 
@@ -28,18 +29,20 @@ This approach maintains full context of all attempts, letting you learn from wha
 **If user asks to "work on something new":** Find an unmatched function from the melee project:
 
 ```bash
-# List unmatched functions with partial progress (good candidates)
-python -m src.cli extract list --min-match 0.3 --max-match 0.99 --limit 20
+# List unmatched functions - prioritize low-hanging fruit (0-50% match)
+python -m src.cli extract list --min-match 0 --max-match 0.50 --limit 20
 ```
 
-Good candidates are:
-- **30-99% match** - Already have partial code, easier to complete
+**Prioritization strategy:**
+- **0-50% match** (PREFERRED) - Fresh functions with room to improve, not already optimized by others
 - **50-500 bytes** - Not too simple, not too complex
 - **In well-understood modules** - ft/, lb/, gr/ have good patterns
 
+**AVOID 95-99% matches** - These have likely been worked on extensively by humans. The remaining differences are often due to context/header mismatches that are hard to fix.
+
 Once you pick a function, proceed to Step 1.
 
-### Step 1: Get Function Info and Create Scratch
+### Step 1: Get Function Info and Find/Create Scratch
 
 First, get the function's assembly and metadata:
 
@@ -47,14 +50,16 @@ First, get the function's assembly and metadata:
 python -m src.cli extract get <function_name>
 ```
 
-Then check if a scratch already exists on decomp.me:
+Then check if a scratch already exists on decomp.me (search without match filter):
 ```
-mcp__decomp__decomp_search(query="<function_name>", min_match_percent=50)
+mcp__decomp__decomp_search(query="<function_name>", platform="gc_wii")
 ```
 
-If a good scratch exists (80%+), use it. Otherwise create a new one:
-```bash
-python -m src.cli scratch create <function_name>
+**If a scratch exists:** Use it regardless of current match percentage. Even 0% scratches have the correct target assembly and context set up.
+
+**If no scratch exists:** Create one using MCP with the assembly from the extract command:
+```
+mcp__decomp__decomp_create_scratch(name="<function_name>", target_asm="<assembly from extract>")
 ```
 
 **Note the scratch slug** - you'll need it for compilation.
@@ -215,40 +220,45 @@ void my_function(void) {
 
 User: `/decomp` (no function specified)
 
-**Step 0:** Find a good candidate
+**Step 0:** Find a good candidate (prioritize low-match functions)
 ```bash
-python -m src.cli extract list --min-match 0.5 --max-match 0.99 --limit 10
+python -m src.cli extract list --min-match 0 --max-match 0.50 --limit 10
 ```
-→ Pick `fn_80393C14` at 99% match, 280 bytes
+→ Pick `lbColl_80008440` at 0% match, 180 bytes (fresh function, not worked on)
 
-**Step 1:** Get function info and create scratch
+**Step 1:** Get function info and find/create scratch
 ```bash
-python -m src.cli extract get fn_80393C14
-python -m src.cli scratch create fn_80393C14
+python -m src.cli extract get lbColl_80008440
 ```
-→ Created scratch `Ivxsr`
+```
+mcp__decomp__decomp_search(query="lbColl_80008440", platform="gc_wii")
+```
+→ No existing scratch, create one:
+```
+mcp__decomp__decomp_create_scratch(name="lbColl_80008440", target_asm="<asm from extract>")
+```
+→ Created scratch `xYz12`
 
 **Step 2:** Read the project source
 ```
-Read: melee/src/sysdolphin/baselib/particle.c
+Read: melee/src/lb/lbcoll.c
 ```
-→ Find the function and the local struct before it
+→ Find the function and any local structs before it
 
 **Step 3:** Compile with the existing source (including local struct)
 ```
-mcp__decomp__decomp_compile(url_or_slug="Ivxsr", source_code="static struct {...} hsd_804CF7E8; void fn_80393C14(...) {...}")
+mcp__decomp__decomp_compile(url_or_slug="xYz12", source_code="void lbColl_80008440(...) {...}")
 ```
-→ 96.4% match
+→ 45% match
 
-**Step 4:** Analyze diff - see register mismatches, try reordering variables
+**Step 4:** Analyze diff - fix types, reorder variables, iterate
 
 **Step 5:** Save progress after each improvement
 ```
-mcp__decomp__decomp_update_scratch(url_or_slug="Ivxsr", source_code="...")
+mcp__decomp__decomp_update_scratch(url_or_slug="xYz12", source_code="...")
 ```
 
-**Step 6:** After several attempts, stuck at 96.4% with only r6/r8 register swap
-→ Determine this is a context limitation, code is functionally correct
+**Step 6:** Continue iterating until 100% match or stuck at 96%+
 
 ## What NOT to Do
 
