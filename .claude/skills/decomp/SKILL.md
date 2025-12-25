@@ -11,7 +11,7 @@ You are an expert at matching C source code to PowerPC assembly for the Melee de
 
 **IMPORTANT:** Work on decompilation in a SINGLE conversation session using the MCP tools directly. Do NOT spawn subprocesses or call external agents. You have all the tools you need:
 
-- `mcp__decomp__decomp_search` - Search for existing scratches
+- `mcp__decomp__decomp_search` - Search for existing scratches on decomp.me
 - `mcp__decomp__decomp_get_scratch` - Get scratch details and source code
 - `mcp__decomp__decomp_compile` - Compile code and get assembly diff
 - `mcp__decomp__decomp_search_context` - Search the scratch context for types
@@ -20,27 +20,43 @@ This approach maintains full context of all attempts, letting you learn from wha
 
 ## Workflow
 
-### Step 1: Find or Create a Scratch
+### Step 0: Choose a Function
 
-First, check if there's an existing scratch with a high match:
+**If user specifies a function name:** Skip to Step 1.
 
-```
-mcp__decomp__decomp_search(query="<function_name>", min_match_percent=80)
-```
-
-Starting from a 90%+ scratch is much faster than starting from zero.
-
-If no good scratch exists, you'll need to create one. Get the function info first:
+**If user asks to "work on something new":** Find an unmatched function from the melee project:
 
 ```bash
-# Get function ASM and metadata
+# List unmatched functions with partial progress (good candidates)
+python -m src.cli extract list --min-match 0.3 --max-match 0.99 --limit 20
+```
+
+Good candidates are:
+- **30-99% match** - Already have partial code, easier to complete
+- **50-500 bytes** - Not too simple, not too complex
+- **In well-understood modules** - ft/, lb/, gr/ have good patterns
+
+Once you pick a function, proceed to Step 1.
+
+### Step 1: Get Function Info and Create Scratch
+
+First, get the function's assembly and metadata:
+
+```bash
 python -m src.cli extract get <function_name>
 ```
 
-Then create a scratch:
+Then check if a scratch already exists on decomp.me:
+```
+mcp__decomp__decomp_search(query="<function_name>", min_match_percent=50)
+```
+
+If a good scratch exists (80%+), use it. Otherwise create a new one:
 ```bash
 python -m src.cli scratch create <function_name>
 ```
+
+**Note the scratch slug** - you'll need it for compilation.
 
 ### Step 2: Get Existing Source Code
 
@@ -55,7 +71,7 @@ Then use the Read tool to get the full source file and understand the context.
 
 **Key things to look for:**
 - The function signature (parameter types, return type)
-- Local struct definitions before the function
+- **Local struct definitions BEFORE the function** (these must be included!)
 - Nearby functions for coding patterns
 - Header includes for type definitions
 
@@ -95,7 +111,23 @@ Make targeted changes based on the diff:
 - Inline expressions vs use temp variables
 - Change `if/else` to `switch` or vice versa
 
-### Step 5: Know When to Stop
+### Step 5: Save Progress to Scratch
+
+**IMPORTANT:** After each successful compilation that improves the match, update the scratch source code so progress is saved:
+
+```bash
+# Save your current best code to a temp file, then:
+python -m src.cli scratch update <slug> /path/to/code.c
+```
+
+Or if the PATCH endpoint works on the server, you can update directly via the API.
+
+This ensures:
+- Your progress is visible on the decomp.me web UI
+- Others can see and continue your work
+- You have a record of what you've tried
+
+### Step 6: Know When to Stop
 
 **You've achieved a match when:** score = 0
 
@@ -116,7 +148,7 @@ Options:
 3. Check if an inline function in context differs from the project
 ```
 
-### Step 6: Apply Matched Code
+### Step 7: Apply Matched Code
 
 Once you achieve 100% match (or determine code is correct despite context differences):
 
@@ -180,39 +212,48 @@ void my_function(void) {
 
 ## Example Session
 
-User: `/decomp fn_80393C14`
+User: `/decomp` (no function specified)
 
-**Step 1:** Search for existing scratches
+**Step 0:** Find a good candidate
+```bash
+python -m src.cli extract list --min-match 0.5 --max-match 0.99 --limit 10
 ```
-mcp__decomp__decomp_search(query="fn_80393C14", min_match_percent=50)
-```
+→ Pick `fn_80393C14` at 99% match, 280 bytes
 
-**Step 2:** Found scratch at 96% - get it
+**Step 1:** Get function info and create scratch
+```bash
+python -m src.cli extract get fn_80393C14
+python -m src.cli scratch create fn_80393C14
 ```
-mcp__decomp__decomp_get_scratch(url_or_slug="Ivxsr")
-```
+→ Created scratch `Ivxsr`
 
-**Step 3:** Read the project source
+**Step 2:** Read the project source
 ```
 Read: melee/src/sysdolphin/baselib/particle.c
 ```
+→ Find the function and the local struct before it
 
-**Step 4:** Compile with the existing source (including local struct)
+**Step 3:** Compile with the existing source (including local struct)
 ```
 mcp__decomp__decomp_compile(url_or_slug="Ivxsr", source_code="static struct {...} hsd_804CF7E8; void fn_80393C14(...) {...}")
 ```
+→ 96.4% match
 
-**Step 5:** Analyze diff - see register mismatches, try reordering variables
+**Step 4:** Analyze diff - see register mismatches, try reordering variables
+
+**Step 5:** Save progress after each improvement
 
 **Step 6:** After several attempts, stuck at 96.4% with only r6/r8 register swap
 → Determine this is a context limitation, code is functionally correct
 
 ## What NOT to Do
 
-1. **Don't spawn Python agents** that call `claude` CLI multiple times - use MCP tools directly
-2. **Don't give up at 90%** - often small changes get you to 99%+
-3. **Don't ignore file-local types** - they must be included in source_code
-4. **Don't keep trying the same changes** - if reordering doesn't help after 3-4 attempts, the issue is likely context-related
+1. **Don't search decomp.me first when starting fresh** - find functions from the melee repo
+2. **Don't spawn Python agents** that call `claude` CLI multiple times - use MCP tools directly
+3. **Don't give up at 90%** - often small changes get you to 99%+
+4. **Don't ignore file-local types** - they must be included in source_code
+5. **Don't forget to save progress** - update the scratch after improvements
+6. **Don't keep trying the same changes** - if reordering doesn't help after 3-4 attempts, the issue is likely context-related
 
 ## Troubleshooting
 
