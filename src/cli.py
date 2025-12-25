@@ -24,7 +24,7 @@ console = Console()
 
 # Default paths
 DEFAULT_MELEE_ROOT = Path(__file__).parent.parent / "melee"
-DEFAULT_DECOMP_ME_URL = "http://localhost:8000"
+DEFAULT_DECOMP_ME_URL = "https://decomp.me"
 
 
 # ============================================================================
@@ -156,12 +156,20 @@ def scratch_create(
             raise typer.Exit(1)
 
         async with DecompMeAPIClient(base_url=api_url) as client:
+            # Fetch Melee preset context from a reference scratch
+            # (preset alone doesn't include the context needed for compilation)
+            console.print("[dim]Fetching Melee preset context...[/dim]")
+            reference = await client.get_scratch("TnPVM")
+            melee_context = reference.context
+
             from src.client import ScratchCreate
             scratch = await client.create_scratch(
                 ScratchCreate(
                     name=func.name,
                     target_asm=func.asm,
-                    context=func.context,
+                    context=melee_context,
+                    compiler="mwcc_233_163n",
+                    compiler_flags="-O4,p -nodefaults -fp hard -Cpp_exceptions off -enum int -fp_contract on -inline auto",
                     source_code="// TODO: Decompile this function\n",
                     diff_label=func.name,
                 )
@@ -234,10 +242,10 @@ def scratch_update(
 
 
 # ============================================================================
-# Agent/Match Commands
+# Agent/Match Commands (DEPRECATED - use /decomp skill in Claude Code instead)
 # ============================================================================
 
-agent_app = typer.Typer(help="Run the decompilation matching agent")
+agent_app = typer.Typer(help="[DEPRECATED] Run the decompilation matching agent. Use /decomp skill instead.")
 app.add_typer(agent_app, name="agent")
 app.add_typer(agent_app, name="match")  # alias
 
@@ -259,15 +267,34 @@ def agent_run(
     auto_commit: Annotated[
         bool, typer.Option("--auto-commit", help="Automatically commit matches")
     ] = False,
+    local_compile: Annotated[
+        bool, typer.Option("--local/--remote", help="Use local wine+mwcc or decomp.me for compilation")
+    ] = True,
     verbose: Annotated[
         bool, typer.Option("--verbose", "-v", help="Show detailed progress")
     ] = True,
 ):
-    """Run the agent loop to match a function."""
+    """[DEPRECATED] Run the agent loop to match a function.
+
+    This command is deprecated. For better results, use the /decomp skill
+    in Claude Code which uses MCP tools directly with full context.
+
+    Example: /decomp fn_80393C14
+    """
     from src.agent import run_matching_agent
+
+    # Show deprecation warning
+    console.print("[yellow]⚠️  DEPRECATED: This command uses a multi-call approach that loses context.[/yellow]")
+    console.print("[yellow]   For better results, use the /decomp skill in Claude Code:[/yellow]")
+    console.print("[yellow]   /decomp " + (function_name or "<function_name>") + "[/yellow]")
+    console.print()
 
     if verbose:
         console.print("[cyan]Starting agent...[/cyan]")
+        if local_compile:
+            console.print("[dim]Using local compilation (wine + mwcc)[/dim]")
+        else:
+            console.print("[dim]Using decomp.me remote compilation[/dim]")
 
     result = asyncio.run(
         run_matching_agent(
@@ -276,6 +303,7 @@ def agent_run(
             api_url=api_url,
             max_iterations=max_iterations,
             auto_commit=auto_commit,
+            use_local_compiler=local_compile,
         )
     )
 
@@ -317,10 +345,18 @@ def commit_apply(
     create_pr: Annotated[
         bool, typer.Option("--pr", help="Create a PR after committing")
     ] = False,
+    full_code: Annotated[
+        bool, typer.Option("--full-code", help="Use full scratch code (including struct defs)")
+    ] = False,
 ):
-    """Apply a matched function to the melee project."""
+    """Apply a matched function to the melee project.
+
+    By default, extracts just the function body from the scratch code,
+    discarding any helper struct definitions. Use --full-code to include
+    the complete scratch code (useful when new types are needed).
+    """
     from src.client import DecompMeAPIClient
-    from src.commit import CommitWorkflow
+    from src.commit import auto_detect_and_commit
 
     async def apply():
         async with DecompMeAPIClient(base_url=api_url) as client:
@@ -331,23 +367,25 @@ def commit_apply(
                 console.print("[red]Scratch is not a 100% match[/red]")
                 raise typer.Exit(1)
 
-            workflow = CommitWorkflow(melee_root)
-            result = await workflow.apply_matched_function(
+            scratch_url = f"{api_url}/scratch/{scratch_slug}"
+            pr_url = await auto_detect_and_commit(
                 function_name=function_name,
-                source_code=scratch.source_code,
+                new_code=scratch.source_code,
                 scratch_id=scratch_slug,
-                create_pr=create_pr,
+                scratch_url=scratch_url,
+                melee_root=melee_root,
+                author="agent",
+                create_pull_request=create_pr,
+                extract_function_only=not full_code,
             )
-            return result
+            return pr_url
 
-    result = asyncio.run(apply())
+    pr_url = asyncio.run(apply())
 
     console.print(f"[green]Applied {function_name}[/green]")
-    for f in result.files_changed:
-        console.print(f"  Modified: {f}")
 
-    if result.pr_url:
-        console.print(f"\n[bold]PR created:[/bold] {result.pr_url}")
+    if pr_url:
+        console.print(f"\n[bold]PR created:[/bold] {pr_url}")
 
 
 @commit_app.command("format")

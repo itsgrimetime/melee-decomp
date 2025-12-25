@@ -76,19 +76,19 @@ class LLMClient:
 
         return None
 
-    async def _call_cli(self, prompt: str) -> str:
+    async def _call_cli(self, prompt: str, timeout: float = 600.0) -> str:
         """Make the actual CLI call.
 
         Args:
             prompt: The full prompt (system + user)
+            timeout: Maximum time to wait for response (seconds)
 
         Returns:
             The CLI response text
         """
-        # Build command
+        # Build command - use stdin instead of -p flag to avoid shell escaping issues
         cmd = [
             self.claude_path,
-            "-p", prompt,
             "--output-format", "text",
         ]
 
@@ -96,20 +96,35 @@ class LLMClient:
         if self.model and self.model != "default":
             cmd.extend(["--model", self.model])
 
-        # Run the CLI command
+        print(f"DEBUG LLM: Running claude CLI with prompt len={len(prompt)}", flush=True)
+
+        # Run the CLI command with prompt on stdin
         process = await asyncio.create_subprocess_exec(
             *cmd,
+            stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
 
-        stdout, stderr = await process.communicate()
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(input=prompt.encode()),
+                timeout=timeout
+            )
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+            raise RuntimeError(f"claude CLI timed out after {timeout}s")
+
+        print(f"DEBUG LLM: CLI returned, returncode={process.returncode}", flush=True)
 
         if process.returncode != 0:
             error_msg = stderr.decode().strip() if stderr else "Unknown error"
             raise RuntimeError(f"claude CLI failed: {error_msg}")
 
-        return stdout.decode().strip()
+        result = stdout.decode().strip()
+        print(f"DEBUG LLM: Response len={len(result)}", flush=True)
+        return result
 
     async def close(self):
         """Close the client (no-op for CLI-based client)."""

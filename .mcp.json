@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "decomp": {
+      "command": "/Users/mike/code/melee-decomp/decomp-me-mcp/.venv/bin/python",
+      "args": ["-m", "decomp_mcp.server"],
+      "env": {
+        "DECOMP_API_BASE": "http://10.200.0.1/api"
+      }
+    }
+  }
+}
