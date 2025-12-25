@@ -17,6 +17,9 @@ You are an expert at matching C source code to PowerPC assembly for the Melee de
 - `mcp__decomp__decomp_search_context` - Search the scratch context for types
 - `mcp__decomp__decomp_update_scratch` - Save source code to a scratch on decomp.me
 - `mcp__decomp__decomp_create_scratch` - Create a new scratch on decomp.me
+- `mcp__decomp__decomp_claim_function` - Claim a function (for parallel agents)
+- `mcp__decomp__decomp_release_function` - Release a claimed function
+- `mcp__decomp__decomp_list_claims` - List currently claimed functions
 
 This approach maintains full context of all attempts, letting you learn from what worked and what didn't.
 
@@ -40,7 +43,12 @@ python -m src.cli extract list --min-match 0 --max-match 0.50 --limit 20
 
 **AVOID 95-99% matches** - These have likely been worked on extensively by humans. The remaining differences are often due to context/header mismatches that are hard to fix.
 
-Once you pick a function, proceed to Step 1.
+Once you pick a function, **claim it before proceeding**:
+```
+mcp__decomp__decomp_claim_function(function_name="<function_name>")
+```
+
+If the claim fails (another agent is working on it), pick a different function. Claims expire after 1 hour.
 
 ### Step 1: Get Function Info and Find/Create Scratch
 
@@ -156,12 +164,17 @@ Options:
 3. Check if an inline function in context differs from the project
 ```
 
-### Step 7: Apply Matched Code
+### Step 7: Apply Matched Code and Release Claim
 
 Once you achieve 100% match (or determine code is correct despite context differences):
 
 ```bash
 python -m src.cli commit apply <function_name> <scratch_slug>
+```
+
+**Always release the claim when done** (whether matched or giving up):
+```
+mcp__decomp__decomp_release_function(function_name="<function_name>")
 ```
 
 ## Type and Context Tips
@@ -227,6 +240,11 @@ User: `/decomp` (no function specified)
 python -m src.cli extract list --min-match 0 --max-match 0.50 --limit 10
 ```
 → Pick `lbColl_80008440` at 0% match, 180 bytes (fresh function, not worked on)
+→ Claim it:
+```
+mcp__decomp__decomp_claim_function(function_name="lbColl_80008440")
+```
+→ ✅ Claimed successfully
 
 **Step 1:** Get function info and find/create scratch
 ```bash
@@ -265,6 +283,11 @@ mcp__decomp__decomp_update_scratch(url_or_slug="xYz12", source_code="...")
 ```
 
 **Step 6:** Continue iterating until 100% match or stuck at 96%+
+
+**Step 7:** Release the claim when done
+```
+mcp__decomp__decomp_release_function(function_name="lbColl_80008440")
+```
 
 ## What NOT to Do
 
