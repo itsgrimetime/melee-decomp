@@ -55,12 +55,14 @@ Then check if a scratch already exists on decomp.me (search without match filter
 mcp__decomp__decomp_search(query="<function_name>", platform="gc_wii")
 ```
 
-**If a scratch exists:** Use it regardless of current match percentage. Even 0% scratches have the correct target assembly and context set up.
+**If a scratch exists with context:** Use it. Check with `decomp_get_scratch` - if the source code section shows actual code (not just a placeholder), it likely has context.
 
-**If no scratch exists:** Create one using MCP with the assembly from the extract command:
+**If no scratch exists OR existing scratch has no context:** Create a new one. The `decomp_create_scratch` tool automatically loads the full Melee context (~1.8MB of headers) from the local context file.
 ```
 mcp__decomp__decomp_create_scratch(name="<function_name>", target_asm="<assembly from extract>")
 ```
+
+**To check if a scratch has context:** Use `decomp_search_context` - if it returns "No context found", create a new scratch instead.
 
 **Note the scratch slug** - you'll need it for compilation.
 
@@ -233,11 +235,15 @@ python -m src.cli extract get lbColl_80008440
 ```
 mcp__decomp__decomp_search(query="lbColl_80008440", platform="gc_wii")
 ```
-→ No existing scratch, create one:
+→ Found existing scratch `abc12`, but check if it has context:
+```
+mcp__decomp__decomp_search_context(url_or_slug="abc12", pattern="HSD_GObj")
+```
+→ "No context found" - create a new scratch instead (auto-loads context):
 ```
 mcp__decomp__decomp_create_scratch(name="lbColl_80008440", target_asm="<asm from extract>")
 ```
-→ Created scratch `xYz12`
+→ Created scratch `xYz12` with full Melee context
 
 **Step 2:** Read the project source
 ```
