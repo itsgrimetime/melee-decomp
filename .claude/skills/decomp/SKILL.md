@@ -15,6 +15,7 @@ You are an expert at matching C source code to PowerPC assembly for the Melee de
 - `mcp__decomp__decomp_get_scratch` - Get scratch details and source code
 - `mcp__decomp__decomp_compile` - Compile code and get assembly diff
 - `mcp__decomp__decomp_search_context` - Search the scratch context for types
+- `mcp__decomp__decomp_update_scratch` - Save source code to a scratch on decomp.me
 
 This approach maintains full context of all attempts, letting you learn from what worked and what didn't.
 
@@ -111,21 +112,21 @@ Make targeted changes based on the diff:
 - Inline expressions vs use temp variables
 - Change `if/else` to `switch` or vice versa
 
-### Step 5: Save Progress to Scratch
+### Step 5: Save Progress to decomp.me
 
-**IMPORTANT:** After each successful compilation that improves the match, update the scratch source code so progress is saved:
+**IMPORTANT:** After each successful compilation that improves the match, update the scratch on decomp.me so progress is saved:
 
-```bash
-# Save your current best code to a temp file, then:
-python -m src.cli scratch update <slug> /path/to/code.c
+```
+mcp__decomp__decomp_update_scratch(url_or_slug="<slug>", source_code="<your code>")
 ```
 
-Or if the PATCH endpoint works on the server, you can update directly via the API.
-
-This ensures:
+This updates the scratch on **decomp.me** (not the local repo). Benefits:
 - Your progress is visible on the decomp.me web UI
 - Others can see and continue your work
+- Partial matches are catalogued for future reference
 - You have a record of what you've tried
+
+**Note:** Only commit to the **melee repo** when you achieve 100% match (Step 7).
 
 ### Step 6: Know When to Stop
 
@@ -242,6 +243,9 @@ mcp__decomp__decomp_compile(url_or_slug="Ivxsr", source_code="static struct {...
 **Step 4:** Analyze diff - see register mismatches, try reordering variables
 
 **Step 5:** Save progress after each improvement
+```
+mcp__decomp__decomp_update_scratch(url_or_slug="Ivxsr", source_code="...")
+```
 
 **Step 6:** After several attempts, stuck at 96.4% with only r6/r8 register swap
 → Determine this is a context limitation, code is functionally correct
@@ -252,8 +256,9 @@ mcp__decomp__decomp_compile(url_or_slug="Ivxsr", source_code="static struct {...
 2. **Don't spawn Python agents** that call `claude` CLI multiple times - use MCP tools directly
 3. **Don't give up at 90%** - often small changes get you to 99%+
 4. **Don't ignore file-local types** - they must be included in source_code
-5. **Don't forget to save progress** - update the scratch after improvements
-6. **Don't keep trying the same changes** - if reordering doesn't help after 3-4 attempts, the issue is likely context-related
+5. **Don't forget to save progress to decomp.me** - update the scratch after improvements (catalogues partial matches)
+6. **Don't commit to repo until 100% match** - only Step 7 touches the melee repo
+7. **Don't keep trying the same changes** - if reordering doesn't help after 3-4 attempts, the issue is likely context-related
 
 ## Troubleshooting
 
