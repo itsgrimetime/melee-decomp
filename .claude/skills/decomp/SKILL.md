@@ -20,6 +20,8 @@ You are an expert at matching C source code to PowerPC assembly for the Melee de
 - `mcp__decomp__decomp_claim_function` - Claim a function (for parallel agents)
 - `mcp__decomp__decomp_release_function` - Release a claimed function
 - `mcp__decomp__decomp_list_claims` - List currently claimed functions
+- `mcp__decomp__decomp_complete_function` - Mark function as done (persists across sessions)
+- `mcp__decomp__decomp_list_completed` - List all completed functions
 
 This approach maintains full context of all attempts, letting you learn from what worked and what didn't.
 
@@ -143,41 +145,38 @@ This updates the scratch on **decomp.me** (not the local repo). Benefits:
 - Partial matches are catalogued for future reference
 - You have a record of what you've tried
 
-**Note:** Only commit to the **melee repo** when you achieve 100% match (Step 7).
+**Note:** Commit to the **melee repo** at 95%+ match with only register/offset differences (Step 7).
 
 ### Step 6: Know When to Stop
 
 **You've achieved a match when:** score = 0
 
 **Stop iterating when:**
-1. **Stuck at 96-99% with only register differences** - The decomp.me context may differ from the original project. The code is likely correct.
+1. **Stuck at 95-99% with only register/offset differences** - The code is likely correct
 2. **Same changes keep oscillating** - You've explored the search space
-3. **Only `i` (offset) differences remain** - These are address differences, not code differences
+3. **Only `r` (register) or `i` (offset) differences remain** - These don't affect behavior
 
-**When stuck at 96-99%:**
-```
-The code appears functionally correct but has persistent register allocation
-differences. This typically indicates the decomp.me context differs from the
-original build environment.
+### Step 7: Commit and Complete
 
-Options:
-1. Verify locally: python -m src.cli agent run --local <function_name>
-2. Accept the code as correct if logic matches
-3. Check if an inline function in context differs from the project
-```
+**Commit threshold: 95%+ with only register/offset differences**
 
-### Step 7: Apply Matched Code and Release Claim
-
-Once you achieve 100% match (or determine code is correct despite context differences):
-
+At 95%+ match with only `r` or `i` markers in the diff:
 ```bash
-python -m src.cli commit apply <function_name> <scratch_slug>
+python -m src.cli commit apply <function_name> <scratch_slug> --api-url http://10.200.0.1
 ```
 
-**Always release the claim when done** (whether matched or giving up):
+**Always mark as completed when done** (this prevents other agents from re-picking it):
 ```
-mcp__decomp__decomp_release_function(function_name="<function_name>")
+mcp__decomp__decomp_complete_function(
+    function_name="<function_name>",
+    match_percent=<final_percent>,
+    scratch_slug="<slug>",
+    committed=true,  # or false if not committed
+    notes="register diffs only"  # optional
+)
 ```
+
+This automatically releases the claim and persists across sessions.
 
 ## Type and Context Tips
 
@@ -277,11 +276,20 @@ mcp__decomp__decomp_compile(url_or_slug="xYz12", source_code="void lbColl_800084
 mcp__decomp__decomp_update_scratch(url_or_slug="xYz12", source_code="...")
 ```
 
-**Step 6:** Continue iterating until 100% match or stuck at 96%+
+**Step 6:** Continue iterating until 100% match or stuck at 95%+
 
-**Step 7:** Release the claim when done
+**Step 7:** At 97% with only register diffs, commit and mark complete:
+```bash
+python -m src.cli commit apply lbColl_80008440 xYz12 --api-url http://10.200.0.1
 ```
-mcp__decomp__decomp_release_function(function_name="lbColl_80008440")
+```
+mcp__decomp__decomp_complete_function(
+    function_name="lbColl_80008440",
+    match_percent=97.0,
+    scratch_slug="xYz12",
+    committed=true,
+    notes="register diffs only"
+)
 ```
 
 ## What NOT to Do
