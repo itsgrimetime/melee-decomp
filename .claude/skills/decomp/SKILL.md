@@ -63,14 +63,16 @@ Then check if a scratch already exists on decomp.me (search without match filter
 mcp__decomp__decomp_search(query="<function_name>", platform="gc_wii")
 ```
 
-**If a scratch exists with context:** Use it. Check with `decomp_get_scratch` - if the source code section shows actual code (not just a placeholder), it likely has context.
+**If a scratch exists with context:** You can use it for reference, but you may not be able to update it (403 error) if you don't own it.
 
-**If no scratch exists OR existing scratch has no context:** Create a new one. The `decomp_create_scratch` tool automatically loads the full Melee context (~1.8MB of headers) from the local context file.
+**Best practice: Always create a new scratch.** The `decomp_create_scratch` tool:
+- Automatically loads the full Melee context (~1.8MB of headers)
+- Saves the claim token so you can update it later
 ```
 mcp__decomp__decomp_create_scratch(name="<function_name>", target_asm="<assembly from extract>")
 ```
 
-**To check if a scratch has context:** Use `decomp_search_context` - if it returns "No context found", create a new scratch instead.
+**If you get a 403 when updating:** The scratch is owned by someone else. Create a new scratch instead - you can always update scratches you create.
 
 **Note the scratch slug** - you'll need it for compilation.
 
@@ -246,22 +248,15 @@ mcp__decomp__decomp_claim_function(function_name="lbColl_80008440")
 ```
 → ✅ Claimed successfully
 
-**Step 1:** Get function info and find/create scratch
+**Step 1:** Get function info and create scratch
 ```bash
 python -m src.cli extract get lbColl_80008440
 ```
-```
-mcp__decomp__decomp_search(query="lbColl_80008440", platform="gc_wii")
-```
-→ Found existing scratch `abc12`, but check if it has context:
-```
-mcp__decomp__decomp_search_context(url_or_slug="abc12", pattern="HSD_GObj")
-```
-→ "No context found" - create a new scratch instead (auto-loads context):
+→ Always create a new scratch (ensures you own it and have context):
 ```
 mcp__decomp__decomp_create_scratch(name="lbColl_80008440", target_asm="<asm from extract>")
 ```
-→ Created scratch `xYz12` with full Melee context
+→ Created scratch `xYz12` with full Melee context (claim token saved)
 
 **Step 2:** Read the project source
 ```
