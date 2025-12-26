@@ -4,6 +4,7 @@ This module provides a high-level workflow that orchestrates all the steps
 needed to commit a matched function and create a PR.
 """
 
+import asyncio
 from pathlib import Path
 from typing import Optional
 
@@ -40,10 +41,12 @@ class CommitWorkflow:
 
         This performs all necessary steps:
         1. Update the source file with new code
-        2. Update configure.py to mark as Matching
-        3. Update scratches.txt with the match info
-        4. Format the changed files
-        5. Create a PR (if requested)
+        2. Verify the file compiles (revert if not)
+        3. Update configure.py to mark as Matching
+        4. Update scratches.txt with the match info
+        5. Format the changed files
+        6. Regenerate progress report
+        7. Create a PR (if requested)
 
         Args:
             function_name: Name of the matched function
@@ -64,7 +67,7 @@ class CommitWorkflow:
         print(f"{'='*60}\n")
 
         # Step 1: Update source file
-        print("[1/6] Updating source file...")
+        print("[1/7] Updating source file...")
         if not await update_source_file(
             file_path, function_name, new_code, self.melee_root,
             extract_function_only=extract_function_only
@@ -74,24 +77,38 @@ class CommitWorkflow:
         self.files_changed.append(f"src/{file_path}")
         print("✓ Source file updated\n")
 
-        # Step 2: Update configure.py
-        print("[2/6] Updating configure.py...")
+        # Step 2: Verify file compiles
+        print("[2/7] Verifying file compiles...")
+        compiles, error_msg = await self._verify_file_compiles(file_path)
+        if not compiles:
+            print(f"❌ File does not compile after update:")
+            print(f"  {error_msg}")
+            print("\n  Reverting changes...")
+            if await self._revert_file(f"src/{file_path}"):
+                print("  ✓ File reverted to original state")
+            else:
+                print("  ⚠ Failed to revert - please run: git checkout HEAD -- src/{file_path}")
+            return None
+        print("✓ File compiles successfully\n")
+
+        # Step 3: Update configure.py
+        print("[3/7] Updating configure.py...")
         if not await update_configure_py(file_path, self.melee_root):
             print("❌ Failed to update configure.py")
             return None
         self.files_changed.append("configure.py")
         print("✓ configure.py updated\n")
 
-        # Step 3: Update scratches.txt
-        print("[3/6] Updating scratches.txt...")
+        # Step 4: Update scratches.txt
+        print("[4/7] Updating scratches.txt...")
         if not await update_scratches_txt(function_name, scratch_id, self.melee_root, author):
             print("❌ Failed to update scratches.txt")
             return None
         self.files_changed.append("config/GALE01/scratches.txt")
         print("✓ scratches.txt updated\n")
 
-        # Step 4: Format files
-        print("[4/6] Formatting changed files...")
+        # Step 5: Format files
+        print("[5/7] Formatting changed files...")
         if not await verify_clang_format_available():
             print("⚠ Warning: git clang-format not available, skipping formatting")
         else:
@@ -105,13 +122,13 @@ class CommitWorkflow:
             else:
                 print("✓ No C files to format\n")
 
-        # Step 5: Regenerate progress report
-        print("[5/6] Regenerating progress report...")
+        # Step 6: Regenerate progress report
+        print("[6/7] Regenerating progress report...")
         await self._regenerate_report()
 
-        # Step 6: Create PR (if requested)
+        # Step 7: Create PR (if requested)
         if create_pull_request:
-            print("[6/6] Creating pull request...")
+            print("[7/7] Creating pull request...")
             pr_url = await create_pr(
                 function_name,
                 scratch_url,
@@ -128,17 +145,85 @@ class CommitWorkflow:
                 print("❌ Failed to create pull request")
                 return None
         else:
-            print("[6/6] Skipping pull request creation (as requested)")
+            print("[7/7] Skipping pull request creation (as requested)")
             print(f"\n{'='*60}")
             print(f"✓ Workflow completed successfully!")
             print(f"Files changed: {', '.join(self.files_changed)}")
             print(f"{'='*60}\n")
             return None
 
+    async def _verify_file_compiles(self, file_path: str) -> tuple[bool, str]:
+        """Verify that a source file compiles successfully.
+
+        Args:
+            file_path: Relative path to the source file (e.g., "melee/lb/lbcommand.c")
+
+        Returns:
+            Tuple of (success, error_message). error_message is empty on success.
+        """
+        # Convert .c to .o for the object file target
+        obj_path = f"build/GALE01/src/{file_path}".replace('.c', '.o')
+
+        try:
+            # First run configure.py to ensure build files are up to date
+            proc = await asyncio.create_subprocess_exec(
+                "python", "configure.py",
+                cwd=self.melee_root,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await proc.communicate()
+
+            # Now compile just the one object file
+            proc = await asyncio.create_subprocess_exec(
+                "ninja", obj_path,
+                cwd=self.melee_root,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await proc.communicate()
+
+            if proc.returncode == 0:
+                return True, ""
+            else:
+                # Extract the actual error message from stderr
+                error_output = stderr.decode() if stderr else stdout.decode() if stdout else "Unknown error"
+                # Look for the actual compiler error
+                lines = error_output.split('\n')
+                error_lines = [l for l in lines if 'Error:' in l or 'error:' in l.lower()]
+                if error_lines:
+                    return False, '\n'.join(error_lines[:5])  # First 5 error lines
+                return False, error_output[:500]  # First 500 chars of output
+
+        except FileNotFoundError:
+            return False, "ninja not found - cannot verify compilation"
+        except Exception as e:
+            return False, f"Compilation check failed: {e}"
+
+    async def _revert_file(self, file_path: str) -> bool:
+        """Revert a file to its state in git HEAD.
+
+        Args:
+            file_path: Path relative to melee_root (e.g., "src/melee/lb/lbcommand.c")
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "git", "checkout", "HEAD", "--", file_path,
+                cwd=self.melee_root,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await proc.communicate()
+            return proc.returncode == 0
+        except Exception as e:
+            print(f"  Failed to revert file: {e}")
+            return False
+
     async def _regenerate_report(self) -> bool:
         """Regenerate the progress report (report.json) via ninja."""
-        import asyncio
-
         try:
             proc = await asyncio.create_subprocess_exec(
                 "ninja", "build/GALE01/report.json",

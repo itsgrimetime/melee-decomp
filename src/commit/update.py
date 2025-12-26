@@ -2,7 +2,77 @@
 
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
+
+
+class CodeValidationError(Exception):
+    """Raised when code validation fails."""
+    pass
+
+
+def validate_function_code(code: str, function_name: str) -> Tuple[bool, str]:
+    """Validate that code represents a complete, well-formed function.
+
+    Checks:
+    1. Braces are balanced
+    2. Code contains the target function
+    3. Code doesn't appear to be mid-statement (starts reasonably)
+    4. Warns if multiple function definitions found
+
+    Args:
+        code: The code to validate
+        function_name: Expected function name
+
+    Returns:
+        Tuple of (is_valid, error_or_warning_message)
+    """
+    code = code.strip()
+
+    if not code:
+        return False, "Code is empty"
+
+    # Check for balanced braces
+    open_braces = code.count('{')
+    close_braces = code.count('}')
+    if open_braces != close_braces:
+        return False, f"Unbalanced braces: {open_braces} '{{' vs {close_braces} '}}'"
+
+    # Check that target function is present
+    func_pattern = re.compile(
+        rf'\b{re.escape(function_name)}\s*\([^)]*\)\s*\{{',
+        re.MULTILINE
+    )
+    if not func_pattern.search(code):
+        return False, f"Function '{function_name}' not found in code"
+
+    # Check for signs of mid-statement insertion
+    # Code shouldn't start with operators, closing braces, or statements like 'case' or 'break'
+    bad_starts = [
+        (r'^\s*[+\-*/&|^%]=', "Code starts with assignment operator"),
+        (r'^\s*\}', "Code starts with closing brace"),
+        (r'^\s*case\s+', "Code starts with 'case' (mid-switch insertion)"),
+        (r'^\s*break\s*;', "Code starts with 'break'"),
+        (r'^\s*default\s*:', "Code starts with 'default' (mid-switch insertion)"),
+        (r'^\s*else\s*[{\n]', "Code starts with 'else' (mid-if insertion)"),
+        (r'^\s*\)', "Code starts with closing parenthesis"),
+    ]
+
+    for pattern, msg in bad_starts:
+        if re.match(pattern, code):
+            return False, msg
+
+    # Count function definitions (rough heuristic)
+    # Pattern: something that looks like "type name(params) {"
+    func_def_pattern = re.compile(
+        r'(?:^|\n)\s*(?:static\s+)?(?:inline\s+)?(?:\w+\s+)+\w+\s*\([^)]*\)\s*\{',
+        re.MULTILINE
+    )
+    func_defs = func_def_pattern.findall(code)
+    if len(func_defs) > 1:
+        # This is a warning, not an error - could be intentional (helper functions)
+        return True, f"Warning: Found {len(func_defs)} function definitions in code"
+
+    return True, ""
 
 
 def _extract_function_from_code(code: str, function_name: str) -> Optional[str]:
@@ -139,6 +209,14 @@ async def update_source_file(
             # This mode is for agent-driven workflows where the agent has already
             # analyzed the target file and decided what to include
             code_to_insert = new_code
+
+        # Validate the code before inserting
+        is_valid, validation_msg = validate_function_code(code_to_insert, function_name)
+        if not is_valid:
+            print(f"Error: Code validation failed: {validation_msg}")
+            return False
+        if validation_msg:  # Warning case
+            print(f"  {validation_msg}")
 
         # Replace the function
         new_content = content[:func_start] + code_to_insert + content[func_end:]

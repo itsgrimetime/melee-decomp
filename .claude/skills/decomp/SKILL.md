@@ -183,7 +183,23 @@ After each successful compilation that improves the match, the scratch is alread
 2. **Same changes keep oscillating** - You've explored the search space
 3. **Only `r` (register) or `i` (offset) differences remain** - These don't affect behavior
 
-### Step 7: Commit and Complete
+### Step 7: Verify Before Committing
+
+**Always use --dry-run first** to verify the code will apply correctly:
+
+```bash
+melee-agent commit apply <function_name> <scratch_slug> --dry-run
+```
+
+This will:
+1. Validate the code structure (balanced braces, no mid-statement insertions)
+2. Show a preview of the code to be inserted
+3. Temporarily apply the code and verify it compiles
+4. Revert all changes
+
+If dry-run passes, proceed with the actual commit.
+
+### Step 8: Commit and Complete
 
 **Commit threshold: 95%+ with only register/offset differences**
 
@@ -191,6 +207,11 @@ At 95%+ match with only `r` or `i` markers in the diff:
 ```bash
 melee-agent commit apply <function_name> <scratch_slug>
 ```
+
+The commit workflow now automatically:
+- Validates the code before insertion
+- Verifies compilation after applying changes
+- Reverts if compilation fails
 
 **Always mark as completed when done** (this prevents other agents from re-picking it):
 ```bash
@@ -328,3 +349,13 @@ melee-agent complete mark lbColl_80008440 xYz12 97.0 --committed --notes "regist
 **Only offset differences (i markers):**
 - These are usually fine - the struct is just at a different address
 - Focus on register (r) and instruction differences
+
+**Commit apply fails with "Code validation failed":**
+- `Unbalanced braces`: The code has mismatched `{` and `}` - check the scratch source
+- `Code starts with 'case'/'break'/'else'`: The function was inserted mid-statement on decomp.me
+- `Function not found in code`: The scratch source doesn't contain the expected function name
+
+**Commit apply fails with "File does not compile":**
+- The matched code references undefined symbols - add missing extern declarations or struct definitions
+- Use `--dry-run` to preview and test before actual commit
+- Check that file-local types are included in your scratch source

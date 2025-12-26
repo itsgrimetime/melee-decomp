@@ -945,6 +945,9 @@ def commit_apply(
     force: Annotated[
         bool, typer.Option("--force", "-f", help="Force commit even if below min-match threshold")
     ] = False,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Show what would be changed without applying")
+    ] = False,
 ):
     """Apply a matched function to the melee project.
 
@@ -954,10 +957,13 @@ def commit_apply(
 
     Use --min-match to adjust the minimum match percentage (default: 95%).
     Use --force to bypass the match check entirely (use with caution).
+    Use --dry-run to preview changes and verify compilation without modifying files.
     """
     _require_api_url(api_url)
     from src.client import DecompMeAPIClient
     from src.commit import auto_detect_and_commit
+    from src.commit.configure import get_file_path_from_function
+    from src.commit.update import validate_function_code, _extract_function_from_code
 
     async def apply():
         async with DecompMeAPIClient(base_url=api_url) as client:
@@ -981,6 +987,97 @@ def commit_apply(
                 else:
                     console.print(f"[yellow]Note: Scratch is {match_pct:.1f}% match (not 100%)[/yellow]")
 
+            # Dry-run mode: preview changes and verify compilation
+            if dry_run:
+                console.print("\n[bold cyan]DRY RUN MODE[/bold cyan] - No files will be modified\n")
+
+                # Find the target file
+                file_path = await get_file_path_from_function(function_name, melee_root)
+                if not file_path:
+                    console.print(f"[red]Could not find file containing function '{function_name}'[/red]")
+                    raise typer.Exit(1)
+
+                console.print(f"[bold]Target file:[/bold] src/{file_path}")
+
+                # Process the code the same way the workflow would
+                source_code = scratch.source_code.strip()
+                if not full_code:
+                    extracted = _extract_function_from_code(source_code, function_name)
+                    if extracted:
+                        source_code = extracted
+
+                # Validate the code
+                is_valid, msg = validate_function_code(source_code, function_name)
+                if not is_valid:
+                    console.print(f"[red]Code validation failed:[/red] {msg}")
+                    raise typer.Exit(1)
+                if msg:
+                    console.print(f"[yellow]{msg}[/yellow]")
+                else:
+                    console.print("[green]✓ Code validation passed[/green]")
+
+                # Show code preview
+                console.print(f"\n[bold]Code to insert ({len(source_code)} chars):[/bold]")
+                preview_lines = source_code.split('\n')
+                if len(preview_lines) > 20:
+                    for line in preview_lines[:10]:
+                        console.print(f"  {line}")
+                    console.print(f"  [dim]... ({len(preview_lines) - 20} more lines) ...[/dim]")
+                    for line in preview_lines[-10:]:
+                        console.print(f"  {line}")
+                else:
+                    for line in preview_lines:
+                        console.print(f"  {line}")
+
+                # Test compilation by temporarily applying and reverting
+                console.print("\n[bold]Testing compilation...[/bold]")
+                full_path = melee_root / "src" / file_path
+                original_content = full_path.read_text(encoding='utf-8')
+
+                try:
+                    # Temporarily apply the change
+                    from src.commit.update import update_source_file
+                    success = await update_source_file(
+                        file_path, function_name, source_code, melee_root,
+                        extract_function_only=False  # Already extracted above
+                    )
+                    if not success:
+                        console.print("[red]Failed to apply code (validation or insertion error)[/red]")
+                        raise typer.Exit(1)
+
+                    # Try to compile
+                    import subprocess
+                    # Run configure.py first
+                    subprocess.run(
+                        ["python", "configure.py"],
+                        cwd=melee_root, capture_output=True
+                    )
+                    # Compile the object file
+                    obj_path = f"build/GALE01/src/{file_path}".replace('.c', '.o')
+                    result = subprocess.run(
+                        ["ninja", obj_path],
+                        cwd=melee_root, capture_output=True, text=True
+                    )
+
+                    if result.returncode == 0:
+                        console.print("[green]✓ Compilation successful[/green]")
+                    else:
+                        console.print("[red]✗ Compilation failed:[/red]")
+                        # Extract error lines
+                        for line in result.stderr.split('\n'):
+                            if 'Error:' in line or 'error:' in line.lower():
+                                console.print(f"  {line}")
+                        raise typer.Exit(1)
+
+                finally:
+                    # Always revert to original
+                    full_path.write_text(original_content, encoding='utf-8')
+                    console.print("[dim]Reverted test changes[/dim]")
+
+                console.print("\n[green bold]Dry run complete - all checks passed![/green bold]")
+                console.print("[dim]Run without --dry-run to apply changes[/dim]")
+                return None
+
             scratch_url = f"{api_url}/scratch/{scratch_slug}"
             pr_url = await auto_detect_and_commit(
                 function_name=function_name,
@@ -995,6 +1092,9 @@ def commit_apply(
             return pr_url
 
     pr_url = asyncio.run(apply())
+
+    if dry_run:
+        return  # Already printed results
 
     console.print(f"[green]Applied {function_name}[/green]")
 
