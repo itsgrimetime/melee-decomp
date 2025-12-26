@@ -156,6 +156,7 @@ def categorize_functions(data: dict, check_pr_status: bool = False) -> dict:
         slug = info.get("scratch_slug", "")
         pr_url = info.get("pr_url", "")
         is_committed = info.get("committed", False)
+        is_merged_upstream = info.get("merged_upstream", False)
         branch = info.get("branch", "")
 
         # Determine status
@@ -168,10 +169,16 @@ def categorize_functions(data: dict, check_pr_status: bool = False) -> dict:
             "local_slug": slug,
             "production_slug": prod_funcs.get(func, ""),
             "committed": is_committed,
+            "merged_upstream": is_merged_upstream,
             "branch": branch,
             "pr_url": pr_url,
             "notes": info.get("notes", ""),
         }
+
+        # Functions already in upstream are merged (done!)
+        if is_merged_upstream:
+            categories["merged"].append(entry)
+            continue
 
         if pct >= 95:
             # Check PR status if we have a PR URL
