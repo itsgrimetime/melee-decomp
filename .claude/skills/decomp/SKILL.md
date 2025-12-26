@@ -48,24 +48,25 @@ melee-agent claim list                            # Show active claims
 
 **Completion tracking:**
 ```bash
-melee-agent complete mark <name> <slug> <pct>     # Record completion
-melee-agent complete list                         # Show completed functions
+melee-agent complete mark <name> <slug> <pct>     # Record completion (auto-detects branch)
+melee-agent complete mark <name> <slug> <pct> --branch feat-xyz  # Explicit branch
+melee-agent complete list                         # Show completed functions with branch info
 ```
 
 **Sync to production decomp.me:**
 ```bash
 melee-agent sync auth                             # Configure cf_clearance cookie
 melee-agent sync status                           # Check auth status
-melee-agent sync list --author <name>             # List scratches to sync
-melee-agent sync production --author <name>       # Sync to production
+melee-agent sync list                             # List functions to sync
+melee-agent sync production                       # Sync to production (searches for existing first)
 melee-agent sync slugs                            # Show local→production mapping
-melee-agent sync replace-author <from> <to>       # Bulk rename author
 ```
 
 **Function extraction:**
 ```bash
 melee-agent extract list --min-match 0 --max-match 0.50  # Find candidates
 melee-agent extract get <function_name>                   # Get ASM + metadata
+melee-agent extract get <function_name> --create-scratch  # Get ASM + create scratch in one step
 ```
 
 **Audit & tracking:**
@@ -120,28 +121,25 @@ If the claim fails (another agent is working on it), pick a different function. 
 
 ### Step 1: Get Function Info and Create Scratch
 
-Get the function's assembly and metadata:
+Get the function's assembly and create a scratch in one step:
 
 ```bash
-melee-agent extract get <function_name>
-```
-
-Check if a scratch already exists (for reference):
-```bash
-melee-agent scratch search "<function_name>" --platform gc_wii
-```
-
-**Best practice: Always create a new scratch.** This ensures you own it and can update it:
-```bash
-melee-agent scratch create <function_name>
+melee-agent extract get <function_name> --create-scratch
 ```
 
 This automatically:
 - Extracts ASM from the melee build
 - Loads full Melee context (~1.8MB headers)
+- Creates a scratch on decomp.me
 - Saves claim token for updates
 
 **Note the scratch slug** from the output.
+
+Alternatively, if you just want to inspect the function first:
+```bash
+melee-agent extract get <function_name>        # View ASM only
+melee-agent scratch create <function_name>     # Then create scratch separately
+```
 
 ### Step 2: Get Existing Source Code
 
@@ -330,10 +328,9 @@ melee-agent claim add lbColl_80008440
 ```
 → Claimed successfully
 
-**Step 1:** Get function info and create scratch
+**Step 1:** Get function info and create scratch in one step
 ```bash
-melee-agent extract get lbColl_80008440
-melee-agent scratch create lbColl_80008440
+melee-agent extract get lbColl_80008440 --create-scratch
 ```
 → Created scratch `xYz12` with full Melee context
 
@@ -424,8 +421,8 @@ Multiple agents work simultaneously:
 After accumulating matches on local decomp.me:
 
 1. **Authenticate**: `melee-agent sync auth` (needs cf_clearance cookie from browser)
-2. **List pending**: `melee-agent sync list --author agent`
-3. **Push to prod**: `melee-agent sync production --author agent`
+2. **List pending**: `melee-agent sync list`
+3. **Push to prod**: `melee-agent sync production` (auto-links to existing scratches if found)
 4. **Update file**: `melee-agent audit recover --add-to-file`
 
 ### Phase 3: PR Preparation (every ~10-15 matches)
@@ -453,10 +450,10 @@ Each function progresses through these states:
 |-------|--------------|-------------|
 | Claimed | `/tmp/decomp_claims.json` | Work on it (expires 1hr) |
 | Local scratch | local decomp.me | Continue improving |
-| 95%+ match | `completed_functions.json` | Sync to production |
+| 95%+ match | `completed_functions.json` (with branch) | Sync to production |
 | Synced | `scratches_slug_map.json` | Add to scratches.txt |
 | In scratches.txt | `melee/config/.../scratches.txt` | Include in PR |
-| PR linked | `completed_functions.json` (pr_url) | Wait for review |
+| PR linked | `completed_functions.json` (pr_url, branch) | Wait for review |
 | PR approved | GitHub | Merge PR |
 | Merged | doldecomp/melee | Done! |
 
