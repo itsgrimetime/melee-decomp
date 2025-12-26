@@ -23,6 +23,9 @@ def audit_status(
     melee_root: Annotated[
         Path, typer.Option("--melee-root", "-m", help="Path to melee submodule")
     ] = DEFAULT_MELEE_ROOT,
+    check_prs: Annotated[
+        bool, typer.Option("--check", "-c", help="Check live PR status via gh CLI")
+    ] = False,
     verbose: Annotated[
         bool, typer.Option("--verbose", "-v", help="Show all entries")
     ] = False,
@@ -32,14 +35,21 @@ def audit_status(
 ):
     """Show unified status of all tracked work.
 
-    Categories:
-    - Complete: Synced to production AND in scratches.txt
-    - Synced but missing: Synced to production but not in scratches.txt (needs re-add)
-    - Lost: 95%+ match but not synced or tracked (needs recovery)
-    - Work in progress: <95% match, still being worked on
+    Categories (95%+ matches):
+    - Merged: PR merged (done!)
+    - In Review: PR is open, awaiting review
+    - Committed: Committed to repo but no PR yet
+    - Ready: Synced + in scratches.txt, ready to include in PR
+
+    Issues needing attention:
+    - Synced, not in file: Needs re-add to scratches.txt
+    - In file, not synced: Local slug, needs sync to production
+    - Lost: 95%+ but not tracked (needs recovery)
+
+    Use --check to query live PR status from GitHub.
     """
     data = load_all_tracking_data(melee_root)
-    categories = categorize_functions(data)
+    categories = categorize_functions(data, check_pr_status=check_prs)
 
     if output_json:
         # Convert sets to lists for JSON serialization
@@ -51,46 +61,89 @@ def audit_status(
 
     console.print("[bold]Tracking Audit Summary[/bold]\n")
 
-    table = Table(title="Status Overview")
+    # Progress section
+    table = Table(title="Progress")
     table.add_column("Status", style="bold")
     table.add_column("Count", justify="right")
-    table.add_column("Action Needed")
+    table.add_column("Description")
 
     table.add_row(
-        "[green]Complete[/green]",
-        str(len(categories["complete"])),
-        "None - ready for PR"
+        "[green]Merged[/green]",
+        str(len(categories["merged"])),
+        "PR merged - done!"
     )
     table.add_row(
-        "[yellow]Synced, not in file[/yellow]",
-        str(len(categories["synced_not_in_file"])),
-        "Run: audit recover --add-to-file"
+        "[cyan]In Review[/cyan]",
+        str(len(categories["in_review"])),
+        "PR open, awaiting review"
     )
     table.add_row(
-        "[yellow]In file, not synced[/yellow]",
-        str(len(categories["in_file_not_synced"])),
-        "Run: sync production"
+        "[blue]Committed[/blue]",
+        str(len(categories["committed"])),
+        "Committed locally, needs PR"
     )
     table.add_row(
-        "[red]Lost (95%+)[/red]",
-        str(len(categories["lost_high_match"])),
-        "Run: audit recover --sync-lost, then sync production"
+        "[green]Ready[/green]",
+        str(len(categories["ready"])),
+        "Synced + in file, ready for PR"
     )
     table.add_row(
         "[dim]Work in progress[/dim]",
         str(len(categories["work_in_progress"])),
-        "Continue matching"
+        "< 95% match"
     )
 
     console.print(table)
 
-    if verbose or len(categories["lost_high_match"]) > 0:
+    # Issues section
+    issues_count = (len(categories["synced_not_in_file"]) +
+                   len(categories["in_file_not_synced"]) +
+                   len(categories["lost_high_match"]))
+
+    if issues_count > 0:
+        console.print()
+        issues_table = Table(title="Issues Needing Attention")
+        issues_table.add_column("Issue", style="bold")
+        issues_table.add_column("Count", justify="right")
+        issues_table.add_column("Fix")
+
+        if categories["synced_not_in_file"]:
+            issues_table.add_row(
+                "[yellow]Synced, not in file[/yellow]",
+                str(len(categories["synced_not_in_file"])),
+                "audit recover --add-to-file"
+            )
+        if categories["in_file_not_synced"]:
+            issues_table.add_row(
+                "[yellow]In file, not synced[/yellow]",
+                str(len(categories["in_file_not_synced"])),
+                "sync production"
+            )
+        if categories["lost_high_match"]:
+            issues_table.add_row(
+                "[red]Lost (95%+)[/red]",
+                str(len(categories["lost_high_match"])),
+                "audit recover --sync-lost"
+            )
+
+        console.print(issues_table)
+
+    # Verbose details
+    if verbose or categories["lost_high_match"]:
         if categories["lost_high_match"]:
             console.print("\n[red bold]Lost matches needing recovery:[/red bold]")
             for entry in categories["lost_high_match"][:10]:
                 console.print(f"  {entry['function']}: {entry['match_percent']}% (local:{entry['local_slug']})")
             if len(categories["lost_high_match"]) > 10:
                 console.print(f"  [dim]... and {len(categories['lost_high_match']) - 10} more[/dim]")
+
+    if verbose and categories["in_review"]:
+        console.print("\n[cyan bold]In Review:[/cyan bold]")
+        for entry in categories["in_review"][:10]:
+            pr_url = entry.get("pr_url", "")
+            console.print(f"  {entry['function']}: {entry['match_percent']}% - {pr_url}")
+        if len(categories["in_review"]) > 10:
+            console.print(f"  [dim]... and {len(categories['in_review']) - 10} more[/dim]")
 
     if verbose and categories["synced_not_in_file"]:
         console.print("\n[yellow bold]Synced but missing from scratches.txt:[/yellow bold]")
@@ -214,7 +267,7 @@ def audit_recover(
 @audit_app.command("list")
 def audit_list(
     category: Annotated[
-        str, typer.Argument(help="Category: complete, synced, lost, wip, all")
+        str, typer.Argument(help="Category: merged, review, committed, ready, synced, lost, wip, all")
     ] = "all",
     melee_root: Annotated[
         Path, typer.Option("--melee-root", "-m", help="Path to melee submodule")
@@ -228,13 +281,24 @@ def audit_list(
 ):
     """List tracked functions by category.
 
-    Categories: complete, synced, lost, wip (work in progress), all
+    Categories:
+    - merged: PR merged (done)
+    - review: PR open, in review
+    - committed: Committed but no PR
+    - ready: Synced + in file, ready for PR
+    - synced: Synced but not in scratches.txt
+    - lost: 95%+ but not tracked
+    - wip: Work in progress (<95%)
+    - all: Everything
     """
     data = load_all_tracking_data(melee_root)
     categories = categorize_functions(data)
 
     cat_map = {
-        "complete": "complete",
+        "merged": "merged",
+        "review": "in_review",
+        "committed": "committed",
+        "ready": "ready",
         "synced": "synced_not_in_file",
         "lost": "lost_high_match",
         "wip": "work_in_progress",
@@ -248,7 +312,7 @@ def audit_list(
         entries = categories[cat_map[category]]
     else:
         console.print(f"[red]Unknown category: {category}[/red]")
-        console.print("Valid: complete, synced, lost, wip, all")
+        console.print("Valid: merged, review, committed, ready, synced, lost, wip, all")
         raise typer.Exit(1)
 
     entries = [e for e in entries if e["match_percent"] >= min_match]

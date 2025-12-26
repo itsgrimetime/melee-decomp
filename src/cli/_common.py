@@ -118,10 +118,26 @@ def load_all_tracking_data(melee_root: Path) -> dict:
     return data
 
 
-def categorize_functions(data: dict) -> dict:
-    """Categorize all tracked functions by their status."""
+def categorize_functions(data: dict, check_pr_status: bool = False) -> dict:
+    """Categorize all tracked functions by their status.
+
+    Categories (for 95%+ matches):
+    - merged: PR merged (done!)
+    - in_review: Has PR that's still open
+    - committed: Committed locally but no PR
+    - ready: Synced + in scratches.txt, ready for PR
+    - synced_not_in_file: Synced but not in scratches.txt
+    - in_file_not_synced: In file but local slug
+    - lost_high_match: 95%+ but not synced or in file
+
+    For <95% matches:
+    - work_in_progress: Still being worked on
+    """
     categories = {
-        "complete": [],           # Synced + in scratches.txt
+        "merged": [],             # PR merged
+        "in_review": [],          # PR open
+        "committed": [],          # Committed but no PR
+        "ready": [],              # Synced + in file, ready for PR
         "synced_not_in_file": [], # Synced but not in scratches.txt
         "in_file_not_synced": [], # In file but local slug
         "lost_high_match": [],    # 95%+ but not synced or in file
@@ -132,9 +148,15 @@ def categorize_functions(data: dict) -> dict:
     prod_funcs = {v.get("function"): k for k, v in data["slug_map"].items()}
     synced_local_slugs = set(data["synced"].keys())
 
+    # Cache PR statuses if checking
+    pr_status_cache = {}
+
     for func, info in data["completed"].items():
         pct = info.get("match_percent", 0)
         slug = info.get("scratch_slug", "")
+        pr_url = info.get("pr_url", "")
+        is_committed = info.get("committed", False)
+        branch = info.get("branch", "")
 
         # Determine status
         in_scratches = func in data["scratches_txt_funcs"] or slug in data["scratches_txt_slugs"]
@@ -145,13 +167,39 @@ def categorize_functions(data: dict) -> dict:
             "match_percent": pct,
             "local_slug": slug,
             "production_slug": prod_funcs.get(func, ""),
-            "committed": info.get("committed", False),
+            "committed": is_committed,
+            "branch": branch,
+            "pr_url": pr_url,
             "notes": info.get("notes", ""),
         }
 
         if pct >= 95:
-            if synced_to_prod and in_scratches:
-                categories["complete"].append(entry)
+            # Check PR status if we have a PR URL
+            if pr_url:
+                pr_state = None
+                if check_pr_status:
+                    if pr_url not in pr_status_cache:
+                        repo, pr_num = extract_pr_info(pr_url)
+                        if repo and pr_num:
+                            pr_status_cache[pr_url] = get_pr_status_from_gh(repo, pr_num)
+                        else:
+                            pr_status_cache[pr_url] = {}
+                    pr_state = pr_status_cache.get(pr_url, {}).get("state")
+
+                entry["pr_state"] = pr_state
+
+                if pr_state == "MERGED":
+                    categories["merged"].append(entry)
+                elif pr_state == "CLOSED":
+                    # PR was closed without merge, treat as committed
+                    categories["committed"].append(entry)
+                else:
+                    # PR is open or we didn't check
+                    categories["in_review"].append(entry)
+            elif is_committed:
+                categories["committed"].append(entry)
+            elif synced_to_prod and in_scratches:
+                categories["ready"].append(entry)
             elif synced_to_prod:
                 categories["synced_not_in_file"].append(entry)
             elif in_scratches:
