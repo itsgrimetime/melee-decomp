@@ -1,0 +1,165 @@
+"""Complete commands - track completed/attempted functions."""
+
+import fcntl
+import json
+import os
+import time
+from pathlib import Path
+from typing import Annotated, Any, Optional
+
+import typer
+from rich.table import Table
+
+from ._common import console
+
+# File paths
+DECOMP_CLAIMS_FILE = os.environ.get("DECOMP_CLAIMS_FILE", "/tmp/decomp_claims.json")
+DECOMP_CLAIM_TIMEOUT = int(os.environ.get("DECOMP_CLAIM_TIMEOUT", "3600"))
+DECOMP_COMPLETED_FILE = os.environ.get(
+    "DECOMP_COMPLETED_FILE",
+    str(Path.home() / ".config" / "decomp-me" / "completed_functions.json")
+)
+
+complete_app = typer.Typer(help="Track completed/attempted functions")
+
+
+def _load_claims() -> dict[str, Any]:
+    """Load claims from file, removing stale entries."""
+    claims_path = Path(DECOMP_CLAIMS_FILE)
+    if not claims_path.exists():
+        return {}
+
+    try:
+        with open(claims_path, 'r') as f:
+            claims = json.load(f)
+    except (json.JSONDecodeError, IOError):
+        return {}
+
+    now = time.time()
+    return {
+        name: info for name, info in claims.items()
+        if now - info.get("timestamp", 0) < DECOMP_CLAIM_TIMEOUT
+    }
+
+
+def _save_claims(claims: dict[str, Any]) -> None:
+    """Save claims to file."""
+    claims_path = Path(DECOMP_CLAIMS_FILE)
+    claims_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(claims_path, 'w') as f:
+        json.dump(claims, f, indent=2)
+
+
+def _load_completed() -> dict[str, Any]:
+    """Load completed functions from file."""
+    completed_path = Path(DECOMP_COMPLETED_FILE)
+    if not completed_path.exists():
+        return {}
+
+    try:
+        with open(completed_path, 'r') as f:
+            return json.load(f)
+    except (json.JSONDecodeError, IOError):
+        return {}
+
+
+def _save_completed(completed: dict[str, Any]) -> None:
+    """Save completed functions to file."""
+    completed_path = Path(DECOMP_COMPLETED_FILE)
+    completed_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(completed_path, 'w') as f:
+        json.dump(completed, f, indent=2)
+
+
+@complete_app.command("mark")
+def complete_mark(
+    function_name: Annotated[str, typer.Argument(help="Function name")],
+    scratch_slug: Annotated[str, typer.Argument(help="Decomp.me scratch slug")],
+    match_percent: Annotated[float, typer.Argument(help="Match percentage achieved")],
+    committed: Annotated[
+        bool, typer.Option("--committed", help="Mark as committed to repo")
+    ] = False,
+    notes: Annotated[
+        Optional[str], typer.Option("--notes", help="Additional notes")
+    ] = None,
+    output_json: Annotated[
+        bool, typer.Option("--json", help="Output as JSON")
+    ] = False,
+):
+    """Mark a function as completed/attempted."""
+    completed = _load_completed()
+    completed[function_name] = {
+        "match_percent": match_percent,
+        "scratch_slug": scratch_slug,
+        "committed": committed,
+        "notes": notes or "",
+        "timestamp": time.time(),
+    }
+    _save_completed(completed)
+
+    # Also release any claim
+    claims_path = Path(DECOMP_CLAIMS_FILE)
+    if claims_path.exists():
+        lock_path = Path(str(claims_path) + ".lock")
+        lock_path.touch(exist_ok=True)
+        with open(lock_path, 'r') as lock_file:
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                claims = _load_claims()
+                if function_name in claims:
+                    del claims[function_name]
+                    _save_claims(claims)
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+    if output_json:
+        print(json.dumps({"success": True, "function": function_name, "match_percent": match_percent}))
+    else:
+        status = "committed" if committed else "recorded"
+        console.print(f"[green]Completed ({status}):[/green] {function_name} at {match_percent:.1f}%")
+
+
+@complete_app.command("list")
+def complete_list(
+    min_match: Annotated[
+        float, typer.Option("--min-match", help="Minimum match percentage")
+    ] = 0.0,
+    output_json: Annotated[
+        bool, typer.Option("--json", help="Output as JSON")
+    ] = False,
+):
+    """List all completed/attempted functions."""
+    completed = _load_completed()
+
+    # Filter by min_match
+    filtered = {
+        name: info for name, info in completed.items()
+        if info.get("match_percent", 0) >= min_match
+    }
+
+    if output_json:
+        print(json.dumps(filtered, indent=2))
+    else:
+        if not filtered:
+            console.print("[dim]No completed functions found[/dim]")
+            return
+
+        table = Table(title="Completed Functions")
+        table.add_column("Function", style="cyan")
+        table.add_column("Match %", justify="right")
+        table.add_column("Scratch")
+        table.add_column("Status")
+        table.add_column("Notes", style="dim")
+
+        sorted_funcs = sorted(filtered.items(), key=lambda x: -x[1].get("match_percent", 0))
+        for name, info in sorted_funcs:
+            status = "[green]✓[/green]" if info.get("committed") else "[yellow]○[/yellow]"
+            table.add_row(
+                name,
+                f"{info.get('match_percent', 0):.1f}%",
+                info.get("scratch_slug", "?"),
+                status,
+                info.get("notes", "")[:30],
+            )
+
+        console.print(table)
