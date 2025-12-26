@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 from pathlib import Path
 from typing import Annotated, Optional
 
@@ -13,6 +14,14 @@ from ._common import (
     DEFAULT_MELEE_ROOT,
     DECOMP_COMPLETED_FILE,
 )
+
+# API URL from environment
+_api_base = os.environ.get("DECOMP_API_BASE", "")
+DEFAULT_DECOMP_ME_URL = _api_base[:-4] if _api_base.endswith("/api") else _api_base
+
+# Context file for scratch creation
+_context_env = os.environ.get("DECOMP_CONTEXT_FILE", "")
+DEFAULT_CONTEXT_FILE = Path(_context_env) if _context_env else DEFAULT_MELEE_ROOT / "build" / "ctx.c"
 
 extract_app = typer.Typer(help="Extract and list unmatched functions")
 
@@ -103,8 +112,17 @@ def extract_get(
     full: Annotated[
         bool, typer.Option("--full", "-f", help="Show full assembly (no truncation)")
     ] = False,
+    create_scratch: Annotated[
+        bool, typer.Option("--create-scratch", "-s", help="Create a decomp.me scratch")
+    ] = False,
+    api_url: Annotated[
+        str, typer.Option("--api-url", help="Decomp.me API URL (for --create-scratch)")
+    ] = DEFAULT_DECOMP_ME_URL,
 ):
-    """Extract a specific function's ASM and context."""
+    """Extract a specific function's ASM and context.
+
+    Use --create-scratch to also create a decomp.me scratch in one step.
+    """
     from src.extractor import extract_function
 
     func = asyncio.run(extract_function(melee_root, function_name))
@@ -133,3 +151,51 @@ def extract_get(
             console.print(f"\n[green]ASM written to {output}[/green]")
         else:
             console.print("[red]Cannot write output - ASM not available[/red]")
+
+    # Create scratch if requested
+    if create_scratch:
+        if not api_url:
+            console.print("[red]Error: DECOMP_API_BASE environment variable required for --create-scratch[/red]")
+            raise typer.Exit(1)
+
+        if not func.asm:
+            console.print("[red]Cannot create scratch - ASM not available[/red]")
+            raise typer.Exit(1)
+
+        ctx_path = DEFAULT_CONTEXT_FILE
+        if not ctx_path.exists():
+            console.print(f"[red]Context file not found: {ctx_path}[/red]")
+            console.print("[dim]Run 'ninja' in melee/ to generate build/ctx.c[/dim]")
+            raise typer.Exit(1)
+
+        melee_context = ctx_path.read_text()
+        console.print(f"\n[dim]Loaded {len(melee_context):,} bytes of context[/dim]")
+
+        async def create():
+            from src.client import DecompMeAPIClient, ScratchCreate
+            async with DecompMeAPIClient(base_url=api_url) as client:
+                scratch = await client.create_scratch(
+                    ScratchCreate(
+                        name=func.name,
+                        target_asm=func.asm,
+                        context=melee_context,
+                        compiler="mwcc_233_163n",
+                        compiler_flags="-O4,p -nodefaults -fp hard -Cpp_exceptions off -enum int -fp_contract on -inline auto",
+                        source_code="// TODO: Decompile this function\n",
+                        diff_label=func.name,
+                    )
+                )
+
+                if scratch.claim_token:
+                    from src.cli.scratch import _save_scratch_token
+                    _save_scratch_token(scratch.slug, scratch.claim_token)
+                    try:
+                        await client.claim_scratch(scratch.slug, scratch.claim_token)
+                        console.print(f"[dim]Claimed ownership of scratch[/dim]")
+                    except Exception as e:
+                        console.print(f"[yellow]Warning: Could not claim scratch: {e}[/yellow]")
+
+                return scratch
+
+        scratch = asyncio.run(create())
+        console.print(f"[green]Created scratch:[/green] {api_url}/scratch/{scratch.slug}")
