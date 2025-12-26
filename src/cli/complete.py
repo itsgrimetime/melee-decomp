@@ -3,6 +3,7 @@
 import fcntl
 import json
 import os
+import subprocess
 import time
 from pathlib import Path
 from typing import Annotated, Any, Optional
@@ -71,6 +72,24 @@ def _save_completed(completed: dict[str, Any]) -> None:
         json.dump(completed, f, indent=2)
 
 
+def _get_current_branch(repo_path: Path | None = None) -> str | None:
+    """Get the current git branch name."""
+    try:
+        cmd = ["git", "rev-parse", "--abbrev-ref", "HEAD"]
+        result = subprocess.run(
+            cmd,
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return None
+
+
 @complete_app.command("mark")
 def complete_mark(
     function_name: Annotated[str, typer.Argument(help="Function name")],
@@ -79,6 +98,9 @@ def complete_mark(
     committed: Annotated[
         bool, typer.Option("--committed", help="Mark as committed to repo")
     ] = False,
+    branch: Annotated[
+        Optional[str], typer.Option("--branch", "-b", help="Git branch (auto-detected if not specified)")
+    ] = None,
     notes: Annotated[
         Optional[str], typer.Option("--notes", help="Additional notes")
     ] = None,
@@ -87,11 +109,16 @@ def complete_mark(
     ] = False,
 ):
     """Mark a function as completed/attempted."""
+    # Auto-detect branch if not specified
+    if branch is None:
+        branch = _get_current_branch()
+
     completed = _load_completed()
     completed[function_name] = {
         "match_percent": match_percent,
         "scratch_slug": scratch_slug,
         "committed": committed,
+        "branch": branch,
         "notes": notes or "",
         "timestamp": time.time(),
     }
@@ -113,10 +140,11 @@ def complete_mark(
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
     if output_json:
-        print(json.dumps({"success": True, "function": function_name, "match_percent": match_percent}))
+        print(json.dumps({"success": True, "function": function_name, "match_percent": match_percent, "branch": branch}))
     else:
         status = "committed" if committed else "recorded"
-        console.print(f"[green]Completed ({status}):[/green] {function_name} at {match_percent:.1f}%")
+        branch_info = f" on {branch}" if branch else ""
+        console.print(f"[green]Completed ({status}):[/green] {function_name} at {match_percent:.1f}%{branch_info}")
 
 
 @complete_app.command("list")
@@ -148,6 +176,7 @@ def complete_list(
         table.add_column("Function", style="cyan")
         table.add_column("Match %", justify="right")
         table.add_column("Scratch")
+        table.add_column("Branch", style="dim")
         table.add_column("Status")
         table.add_column("Notes", style="dim")
 
@@ -158,6 +187,7 @@ def complete_list(
                 name,
                 f"{info.get('match_percent', 0):.1f}%",
                 info.get("scratch_slug", "?"),
+                info.get("branch", "-") or "-",
                 status,
                 info.get("notes", "")[:30],
             )

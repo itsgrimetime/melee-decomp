@@ -5,6 +5,7 @@ import json
 import os
 import re
 import subprocess
+import time
 from pathlib import Path
 from typing import Annotated, Optional
 
@@ -12,6 +13,7 @@ import typer
 from rich.console import Console
 
 from ._common import console, DEFAULT_MELEE_ROOT, DECOMP_CONFIG_DIR
+from .complete import _load_completed, _save_completed, _get_current_branch
 
 # API URL from environment
 _api_base = os.environ.get("DECOMP_API_BASE", "")
@@ -181,7 +183,7 @@ def commit_apply(
 
                 console.print("\n[green bold]Dry run complete - all checks passed![/green bold]")
                 console.print("[dim]Run without --dry-run to apply changes[/dim]")
-                return None
+                return None, match_pct
 
             scratch_url = f"{api_url}/scratch/{scratch_slug}"
             pr_url = await auto_detect_and_commit(
@@ -194,14 +196,30 @@ def commit_apply(
                 create_pull_request=create_pr,
                 extract_function_only=not full_code,
             )
-            return pr_url
+            return pr_url, match_pct
 
-    pr_url = asyncio.run(apply())
+    pr_url, match_pct = asyncio.run(apply())
 
     if dry_run:
         return  # Already printed results
 
     console.print(f"[green]Applied {function_name}[/green]")
+
+    # Auto-mark as completed with branch info
+    branch = _get_current_branch(melee_root)
+    completed = _load_completed()
+    completed[function_name] = {
+        "match_percent": match_pct,
+        "scratch_slug": scratch_slug,
+        "committed": True,
+        "branch": branch,
+        "notes": "committed via commit apply",
+        "timestamp": time.time(),
+    }
+    _save_completed(completed)
+
+    branch_info = f" on {branch}" if branch else ""
+    console.print(f"[dim]Marked as completed{branch_info}[/dim]")
 
     if pr_url:
         console.print(f"\n[bold]PR created:[/bold] {pr_url}")
