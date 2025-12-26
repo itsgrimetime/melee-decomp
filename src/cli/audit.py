@@ -57,27 +57,27 @@ def audit_status(
     table.add_column("Action Needed")
 
     table.add_row(
-        "[green]✅ Complete[/green]",
+        "[green]Complete[/green]",
         str(len(categories["complete"])),
         "None - ready for PR"
     )
     table.add_row(
-        "[yellow]⚠️ Synced but not in file[/yellow]",
+        "[yellow]Synced, not in file[/yellow]",
         str(len(categories["synced_not_in_file"])),
         "Run: audit recover --add-to-file"
     )
     table.add_row(
-        "[yellow]⚠️ In file, not synced[/yellow]",
+        "[yellow]In file, not synced[/yellow]",
         str(len(categories["in_file_not_synced"])),
         "Run: sync production"
     )
     table.add_row(
-        "[red]❌ Lost (95%+)[/red]",
+        "[red]Lost (95%+)[/red]",
         str(len(categories["lost_high_match"])),
         "Run: audit recover --sync-lost"
     )
     table.add_row(
-        "[dim]📝 Work in progress[/dim]",
+        "[dim]Work in progress[/dim]",
         str(len(categories["work_in_progress"])),
         "Continue matching"
     )
