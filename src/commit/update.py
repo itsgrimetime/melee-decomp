@@ -1,6 +1,7 @@
 """Update source files with matched code."""
 
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -283,9 +284,10 @@ async def update_scratches_txt(
             print(f"Error: scratches.txt not found at {scratches_path}")
             return False
 
-        # Create the new entry
-        # Format: FunctionName = 100%:MATCHED; // author:agent id:XXXXX
-        new_entry = f"{function_name} = 100%:MATCHED; // author:{author} id:{scratch_id}\n"
+        # Create the new entry with timestamps
+        # Format: FunctionName = 100%:MATCHED; // author:agent id:XXXXX updated:TIMESTAMP created:TIMESTAMP
+        now = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+        new_entry = f"{function_name} = 100%:MATCHED; // author:{author} id:{scratch_id} updated:{now} created:{now}\n"
 
         # Read existing content
         content = scratches_path.read_text(encoding='utf-8')
