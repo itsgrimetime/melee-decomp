@@ -71,8 +71,9 @@ melee-agent extract get <function_name> --create-scratch  # Get ASM + create scr
 
 **Audit & tracking:**
 ```bash
-melee-agent audit status                          # Unified view of all work
-melee-agent audit list <category>                 # List by: complete, synced, lost, wip
+melee-agent audit status                          # Progress overview (merged/review/committed/ready)
+melee-agent audit status --check                  # Check live PR status from GitHub
+melee-agent audit list <category>                 # List by: merged, review, committed, ready, synced, lost, wip
 melee-agent audit recover --add-to-file           # Add synced funcs to scratches.txt
 melee-agent audit recover --sync-lost             # Recover lost scratches
 ```
@@ -463,10 +464,14 @@ Check current state: `melee-agent audit status` and `melee-agent pr status`
 
 ```bash
 # See overall status
-melee-agent audit status
+melee-agent audit status           # Quick overview
+melee-agent audit status --check   # With live PR status from GitHub
 
 # List functions by category
-melee-agent audit list complete    # Ready for PR
+melee-agent audit list merged      # PRs merged (done!)
+melee-agent audit list review      # PRs open, in review
+melee-agent audit list committed   # Committed but no PR
+melee-agent audit list ready       # Ready for PR
 melee-agent audit list synced      # Synced but missing from file
 melee-agent audit list lost        # 95%+ but not synced
 melee-agent audit list wip         # Work in progress
