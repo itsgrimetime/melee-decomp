@@ -232,6 +232,27 @@ async def update_source_file(
         return False
 
 
+def validate_scratches_entry(function_name: str, scratch_id: str, author: str) -> tuple[bool, str]:
+    """Validate inputs for a scratches.txt entry.
+
+    Returns:
+        Tuple of (is_valid, error_message). error_message is empty if valid.
+    """
+    # Function name: alphanumeric, underscore, no spaces
+    if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', function_name):
+        return False, f"Invalid function name '{function_name}': must be a valid C identifier"
+
+    # Scratch ID: 5 alphanumeric characters (decomp.me format)
+    if not re.match(r'^[a-zA-Z0-9]{5}$', scratch_id):
+        return False, f"Invalid scratch ID '{scratch_id}': must be exactly 5 alphanumeric characters"
+
+    # Author: no spaces or special chars
+    if not re.match(r'^[a-zA-Z0-9_-]+$', author):
+        return False, f"Invalid author '{author}': must be alphanumeric with underscores/dashes"
+
+    return True, ""
+
+
 async def update_scratches_txt(
     function_name: str,
     scratch_id: str,
@@ -250,6 +271,12 @@ async def update_scratches_txt(
         True if successful, False otherwise
     """
     try:
+        # Validate inputs first
+        is_valid, error_msg = validate_scratches_entry(function_name, scratch_id, author)
+        if not is_valid:
+            print(f"Error: {error_msg}")
+            return False
+
         scratches_path = melee_root / "config" / "GALE01" / "scratches.txt"
 
         if not scratches_path.exists():

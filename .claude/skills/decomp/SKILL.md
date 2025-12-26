@@ -12,12 +12,16 @@ You are an expert at matching C source code to PowerPC assembly for the Melee de
 Agent session isolation is **automatic** - no configuration needed. Each Claude Code conversation gets a unique agent ID based on its process ID, creating isolated session files.
 
 **Shared across agents** (for coordination):
-- `/tmp/decomp_claims.json` - function claims (prevents duplicate work)
-- `/tmp/decomp_completed.json` - completion tracking (prevents re-picking)
+- `/tmp/decomp_claims.json` - function claims (ephemeral, 1-hour expiry)
 
-**Per-agent** (session isolation, automatic):
-- `/tmp/decomp_cookies_ppid<N>.json` - decomp.me session
-- `/tmp/decomp_scratch_tokens_ppid<N>.json` - scratch ownership tokens
+**Persistent files** (in `~/.config/decomp-me/`):
+- `completed_functions.json` - completion tracking (prevents re-picking)
+- `cookies*.json` - decomp.me session (per-agent)
+- `scratch_tokens*.json` - scratch ownership tokens (per-agent)
+- `production_cookies.json` - production decomp.me auth
+
+**Project files** (in `melee-decomp/config/`):
+- `scratches_slug_map.json` - local→production slug mapping
 
 For manual override: `export DECOMP_AGENT_ID="agent-1"`
 
@@ -46,6 +50,15 @@ melee-agent claim list                            # Show active claims
 ```bash
 melee-agent complete mark <name> <slug> <pct>     # Record completion
 melee-agent complete list                         # Show completed functions
+```
+
+**Sync to production decomp.me:**
+```bash
+melee-agent sync auth                             # Configure cf_clearance cookie
+melee-agent sync status                           # Check auth status
+melee-agent sync list --author <name>             # List scratches to sync
+melee-agent sync production --author <name>       # Sync to production
+melee-agent sync slugs                            # Show local→production mapping
 ```
 
 **Function extraction:**
@@ -208,10 +221,13 @@ At 95%+ match with only `r` or `i` markers in the diff:
 melee-agent commit apply <function_name> <scratch_slug>
 ```
 
-The commit workflow now automatically:
-- Validates the code before insertion
-- Verifies compilation after applying changes
+The commit workflow automatically:
+- Updates the source file with your code
+- Updates `config/GALE01/scratches.txt` with the match entry
+- Validates and verifies compilation
 - Reverts if compilation fails
+
+**IMPORTANT:** Never manually edit `scratches.txt` - always use `melee-agent commit apply`. The CLI ensures proper formatting.
 
 **Always mark as completed when done** (this prevents other agents from re-picking it):
 ```bash
@@ -359,3 +375,8 @@ melee-agent complete mark lbColl_80008440 xYz12 97.0 --committed --notes "regist
 - The matched code references undefined symbols - add missing extern declarations or struct definitions
 - Use `--dry-run` to preview and test before actual commit
 - Check that file-local types are included in your scratch source
+
+**Malformed scratches.txt entries:**
+- Run `melee-agent commit lint` to validate the file
+- Run `melee-agent commit lint --fix` to remove malformed entries
+- Always use `melee-agent commit apply` instead of manual edits

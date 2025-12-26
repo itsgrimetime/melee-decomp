@@ -9,28 +9,53 @@ from typing import Any
 import httpx
 from pydantic import TypeAdapter
 
+# Persistent config directory
+DECOMP_CONFIG_DIR = Path.home() / ".config" / "decomp-me"
+
 # Persistent cookies file for session management
 # Supports per-agent isolation via DECOMP_AGENT_ID env var
-# Auto-generates ID from parent process ID if not set
+# Auto-generates ID from Claude Code's PID if not set
 def _get_agent_id() -> str:
     """Get or generate a unique agent ID for session isolation.
 
-    Uses parent PID as the automatic identifier because:
-    - Each Claude Code conversation runs as a separate process tree
-    - All CLI invocations within the same conversation share the same ppid
-    - Different Claude windows have different ppids = automatic isolation
+    Walks up the process tree to find Claude Code's PID, which is stable
+    for the entire conversation. Different Claude windows have different
+    PIDs = automatic isolation.
     """
     # Explicit ID takes priority (for manual parallel agent coordination)
     if os.environ.get("DECOMP_AGENT_ID"):
         return os.environ["DECOMP_AGENT_ID"]
 
-    # Use parent PID (Claude Code's PID, stable within a conversation)
-    ppid = os.getppid()
-    return f"ppid{ppid}"
+    # Walk up process tree to find 'claude' process
+    import subprocess
+    pid = os.getpid()
+    for _ in range(10):  # Max 10 levels up
+        try:
+            result = subprocess.run(
+                ['ps', '-p', str(pid), '-o', 'ppid=,comm='],
+                capture_output=True, text=True, timeout=1
+            )
+            if result.returncode != 0:
+                break
+            parts = result.stdout.strip().split(None, 1)
+            if len(parts) < 2:
+                break
+            ppid, comm = int(parts[0]), parts[1]
+            if 'claude' in comm.lower():
+                return f"claude{pid}"  # Use the claude process PID
+            pid = ppid
+        except Exception:
+            break
+
+    # Fallback to immediate parent PID
+    return f"ppid{os.getppid()}"
 
 _agent_id = _get_agent_id()
 _cookies_suffix = f"_{_agent_id}" if _agent_id else ""
-DECOMP_COOKIES_FILE = os.environ.get("DECOMP_COOKIES_FILE", f"/tmp/decomp_cookies{_cookies_suffix}.json")
+DECOMP_COOKIES_FILE = os.environ.get(
+    "DECOMP_COOKIES_FILE",
+    str(DECOMP_CONFIG_DIR / f"cookies{_cookies_suffix}.json")
+)
 
 from .models import (
     CompilationResult,
