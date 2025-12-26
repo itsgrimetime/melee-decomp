@@ -74,7 +74,7 @@ def audit_status(
     table.add_row(
         "[red]Lost (95%+)[/red]",
         str(len(categories["lost_high_match"])),
-        "Run: audit recover --sync-lost"
+        "Run: audit recover --sync-lost, then sync production"
     )
     table.add_row(
         "[dim]Work in progress[/dim]",
@@ -109,7 +109,7 @@ def audit_recover(
         bool, typer.Option("--add-to-file", help="Add synced functions to scratches.txt")
     ] = False,
     sync_lost: Annotated[
-        bool, typer.Option("--sync-lost", help="Sync lost scratches to production")
+        bool, typer.Option("--sync-lost", help="Add lost functions to scratches.txt (with local slugs)")
     ] = False,
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Show what would be done")
@@ -120,8 +120,12 @@ def audit_recover(
 ):
     """Recover lost or missing tracking entries.
 
-    --add-to-file: Add entries for synced functions that are missing from scratches.txt
-    --sync-lost: Sync 95%+ local scratches to production decomp.me
+    --add-to-file: Add entries for functions that are already synced to production
+                   but missing from scratches.txt (uses production slugs)
+
+    --sync-lost: Add entries for "lost" 95%+ functions to scratches.txt using
+                 their LOCAL slugs. After running this, use 'sync production'
+                 to push them to production and update the slugs.
     """
     data = load_all_tracking_data(melee_root)
     categories = categorize_functions(data)
@@ -165,18 +169,42 @@ def audit_recover(
             console.print("[green]No lost scratches to sync[/green]")
             return
 
-        console.print(f"[bold]Found {len(entries)} lost scratches to sync[/bold]\n")
+        console.print(f"[bold]Adding {len(entries)} lost functions to scratches.txt[/bold]\n")
+        console.print("[dim]These have LOCAL slugs - run 'sync production' next to push to production[/dim]\n")
 
-        if dry_run:
-            for entry in entries:
-                console.print(f"  [dim]Would sync:[/dim] {entry['function']} ({entry['match_percent']}%) local:{entry['local_slug']}")
-            console.print(f"\n[cyan]Would sync {len(entries)} scratches (dry run)[/cyan]")
-            console.print("[dim]Run 'melee-agent sync production' after recovery to push to production[/dim]")
+        scratches_file = melee_root / "config" / "GALE01" / "scratches.txt"
+        now = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+
+        lines_to_add = []
+        for entry in entries:
+            local_slug = entry["local_slug"]
+            func = entry["function"]
+            pct = entry["match_percent"]
+
+            if not local_slug:
+                console.print(f"  [yellow]Skipping {func} - no local slug[/yellow]")
+                continue
+
+            pct_str = "100%" if pct == 100 else f"{pct:.1f}%"
+            line = f"{func} = {pct_str}:MATCHED; // author:itsgrimetime id:{local_slug} updated:{now} created:{now}"
+            lines_to_add.append(line)
+
+            if dry_run:
+                console.print(f"  [dim]Would add:[/dim] {func} ({pct_str}) id:{local_slug}")
+            else:
+                console.print(f"  [green]Adding:[/green] {func} ({pct_str}) id:{local_slug}")
+
+        if not lines_to_add:
+            console.print("[yellow]No entries to add[/yellow]")
+            return
+
+        if not dry_run:
+            with open(scratches_file, 'a') as f:
+                f.write("\n" + "\n".join(lines_to_add) + "\n")
+            console.print(f"\n[green]Added {len(lines_to_add)} entries to scratches.txt[/green]")
+            console.print("\n[bold]Next step:[/bold] Run 'melee-agent sync production' to push to production")
         else:
-            console.print("[yellow]Lost scratch recovery requires manual steps:[/yellow]")
-            console.print("1. Verify scratches exist on local instance")
-            console.print("2. Run: melee-agent sync production --author agent")
-            console.print("3. Run: melee-agent audit recover --add-to-file")
+            console.print(f"\n[cyan]Would add {len(lines_to_add)} entries (dry run)[/cyan]")
 
     if not add_to_file and not sync_lost:
         console.print("[yellow]Specify --add-to-file or --sync-lost[/yellow]")
