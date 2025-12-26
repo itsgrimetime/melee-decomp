@@ -1838,6 +1838,92 @@ def sync_slugs(
         console.print(f"\n[dim]{len(slug_map)} mappings stored in {SLUG_MAP_FILE}[/dim]")
 
 
+@sync_app.command("replace-author")
+def sync_replace_author(
+    from_author: Annotated[
+        str, typer.Argument(help="Author name to replace")
+    ],
+    to_author: Annotated[
+        str, typer.Argument(help="New author name")
+    ],
+    melee_root: Annotated[
+        Path, typer.Option("--melee-root", "-m", help="Path to melee submodule")
+    ] = DEFAULT_MELEE_ROOT,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Show what would change without modifying")
+    ] = False,
+):
+    """Bulk replace author names in scratches.txt.
+
+    Example: melee-agent sync replace-author agent itsgrimetime
+    """
+    scratches_file = melee_root / "config" / "GALE01" / "scratches.txt"
+
+    if not scratches_file.exists():
+        console.print(f"[red]scratches.txt not found at {scratches_file}[/red]")
+        raise typer.Exit(1)
+
+    content = scratches_file.read_text(encoding='utf-8')
+
+    # Pattern to match author:FROM_AUTHOR
+    pattern = re.compile(rf'\bauthor:{re.escape(from_author)}\b')
+
+    # Count matches
+    matches = pattern.findall(content)
+    count = len(matches)
+
+    if count == 0:
+        console.print(f"[yellow]No entries found with author:{from_author}[/yellow]")
+        return
+
+    console.print(f"Found [bold]{count}[/bold] entries with author:{from_author}")
+
+    if dry_run:
+        console.print(f"\n[cyan]DRY RUN[/cyan] - Would replace author:{from_author} -> author:{to_author}")
+
+        # Show first few matches
+        lines = content.split('\n')
+        shown = 0
+        for line in lines:
+            if pattern.search(line):
+                # Extract function name
+                func_match = re.match(r'^(\w+)\s*=', line)
+                func_name = func_match.group(1) if func_match else "?"
+                console.print(f"  {func_name}")
+                shown += 1
+                if shown >= 10:
+                    remaining = count - shown
+                    if remaining > 0:
+                        console.print(f"  [dim]... and {remaining} more[/dim]")
+                    break
+        return
+
+    # Perform replacement
+    new_content = pattern.sub(f'author:{to_author}', content)
+
+    # Also update the updated: timestamp for modified entries
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+
+    # Update timestamps on modified lines
+    def update_timestamp(line: str) -> str:
+        if f'author:{to_author}' in line:
+            # Replace existing updated: timestamp or add if missing
+            if 'updated:' in line:
+                line = re.sub(r'updated:\S+', f'updated:{now}', line)
+            else:
+                # Add before any trailing newline
+                line = line.rstrip() + f' updated:{now}'
+        return line
+
+    lines = new_content.split('\n')
+    updated_lines = [update_timestamp(line) for line in lines]
+    new_content = '\n'.join(updated_lines)
+
+    scratches_file.write_text(new_content, encoding='utf-8')
+    console.print(f"[green]Updated {count} entries: author:{from_author} -> author:{to_author}[/green]")
+
+
 @sync_app.command("clear")
 def sync_clear():
     """Clear cached cookies and sync history."""
