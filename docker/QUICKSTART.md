@@ -3,7 +3,7 @@
 ## First Time Setup
 
 ```bash
-cd /Users/mike/code/melee-decomp/docker
+cd docker
 
 # Start default instance
 ./setup.sh

@@ -222,7 +222,7 @@ except DecompMeAPIError as e:
 
 ## Examples
 
-See `/Users/mike/code/melee-decomp/examples/client_usage.py` for comprehensive examples:
+See `examples/client_usage.py` for comprehensive examples:
 
 1. Basic scratch creation and compilation
 2. High-level ScratchManager usage
@@ -232,7 +232,7 @@ See `/Users/mike/code/melee-decomp/examples/client_usage.py` for comprehensive e
 
 ## API Endpoints Reference
 
-Based on decomp.me backend at `/Users/mike/code/melee-decomp/decomp.me/backend/`:
+Based on decomp.me backend at `decomp.me/backend/`:
 
 ### Scratch Operations
 

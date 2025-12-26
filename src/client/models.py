@@ -22,7 +22,7 @@ class Profile(BaseModel):
     is_admin: bool
     username: str
     github_id: int | None = None
-    frog_color: str | None = None
+    frog_color: list[float] | None = None  # HSL color values
 
 
 class ScratchCreate(BaseModel):
@@ -33,7 +33,7 @@ class ScratchCreate(BaseModel):
     platform: str | None = None  # Defaults to compiler's platform
     compiler_flags: str = ""
     diff_flags: list[str] = Field(default_factory=list)
-    preset: str | None = None  # Preset ID
+    preset: str | int | None = None  # Preset ID
     source_code: str | None = None
     target_asm: str = ""
     context: str = ""
@@ -55,7 +55,7 @@ class Scratch(BaseModel):
     platform: str
     compiler_flags: str
     diff_flags: list[str]
-    preset: str | None = None
+    preset: str | int | None = None
     source_code: str
     context: str
     diff_label: str

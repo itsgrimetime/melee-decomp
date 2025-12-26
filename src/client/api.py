@@ -1,10 +1,36 @@
 """Async HTTP client for the decomp.me REST API."""
 
+import json
 import logging
+import os
+from pathlib import Path
 from typing import Any
 
 import httpx
 from pydantic import TypeAdapter
+
+# Persistent cookies file for session management
+# Supports per-agent isolation via DECOMP_AGENT_ID env var
+# Auto-generates ID from parent process ID if not set
+def _get_agent_id() -> str:
+    """Get or generate a unique agent ID for session isolation.
+
+    Uses parent PID as the automatic identifier because:
+    - Each Claude Code conversation runs as a separate process tree
+    - All CLI invocations within the same conversation share the same ppid
+    - Different Claude windows have different ppids = automatic isolation
+    """
+    # Explicit ID takes priority (for manual parallel agent coordination)
+    if os.environ.get("DECOMP_AGENT_ID"):
+        return os.environ["DECOMP_AGENT_ID"]
+
+    # Use parent PID (Claude Code's PID, stable within a conversation)
+    ppid = os.getppid()
+    return f"ppid{ppid}"
+
+_agent_id = _get_agent_id()
+_cookies_suffix = f"_{_agent_id}" if _agent_id else ""
+DECOMP_COOKIES_FILE = os.environ.get("DECOMP_COOKIES_FILE", f"/tmp/decomp_cookies{_cookies_suffix}.json")
 
 from .models import (
     CompilationResult,
@@ -28,11 +54,32 @@ class DecompMeAPIError(Exception):
     pass
 
 
+def _load_cookies() -> dict[str, str]:
+    """Load persistent cookies from file."""
+    cookies_path = Path(DECOMP_COOKIES_FILE)
+    if not cookies_path.exists():
+        return {}
+    try:
+        with open(cookies_path, 'r') as f:
+            return json.load(f)
+    except (json.JSONDecodeError, IOError):
+        return {}
+
+
+def _save_cookies(cookies: dict[str, str]) -> None:
+    """Save cookies to file."""
+    cookies_path = Path(DECOMP_COOKIES_FILE)
+    cookies_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(cookies_path, 'w') as f:
+        json.dump(cookies, f, indent=2)
+
+
 class DecompMeAPIClient:
     """Async HTTP client for decomp.me REST API.
 
     This client wraps the decomp.me backend API endpoints with retry logic
-    and proper error handling.
+    and proper error handling. Session cookies are persisted to disk for
+    ownership across CLI invocations.
 
     Args:
         base_url: Base URL for the API (default: http://localhost:8000)
@@ -50,14 +97,52 @@ class DecompMeAPIClient:
         self.timeout = timeout
         self.max_retries = max_retries
 
-        # Configure retry transport
+        # Configure retry transport with cookie persistence
         transport = httpx.AsyncHTTPTransport(retries=max_retries)
+
+        # Headers matching Firefox browser for Cloudflare bypass
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:146.0) Gecko/20100101 Firefox/146.0",
+            "Accept": "application/json",
+            "Accept-Language": "en-US,en;q=0.5",
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin",
+        }
+
+        # Load persistent cookies from file
+        persistent_cookies = _load_cookies()
+
+        # Build cookies - prefer persistent, fallback to env vars
+        cookies = httpx.Cookies()
+        cf_clearance = persistent_cookies.get("cf_clearance") or os.environ.get("CF_CLEARANCE", "")
+        session_id = persistent_cookies.get("sessionid") or os.environ.get("DECOMP_SESSION_ID", "")
+
+        # Determine domain from base_url (for local vs production)
+        from urllib.parse import urlparse
+        domain = urlparse(self.base_url).hostname or "decomp.me"
+
+        if cf_clearance:
+            cookies.set("cf_clearance", cf_clearance, domain=domain)
+        if session_id:
+            cookies.set("sessionid", session_id, domain=domain)
+
         self._client = httpx.AsyncClient(
             base_url=self.base_url,
             timeout=timeout,
             transport=transport,
             follow_redirects=True,
+            headers=headers,
+            cookies=cookies,
         )
+
+    def _update_cookies_from_response(self, response: httpx.Response) -> None:
+        """Extract and persist session cookies from response."""
+        cookies = _load_cookies()
+        for cookie in response.cookies.jar:
+            if cookie.name in ("sessionid", "csrftoken", "cf_clearance"):
+                cookies[cookie.name] = cookie.value
+        _save_cookies(cookies)
 
     async def __aenter__(self) -> "DecompMeAPIClient":
         """Async context manager entry."""
@@ -116,6 +201,7 @@ class DecompMeAPIClient:
             "/api/scratch",
             json=scratch.model_dump(exclude_none=True, mode="json"),
         )
+        self._update_cookies_from_response(response)
         data = self._handle_response(response)
         return Scratch.model_validate(data)
 
@@ -136,15 +222,37 @@ class DecompMeAPIClient:
         data = self._handle_response(response)
         return Scratch.model_validate(data)
 
-    async def update_scratch(
-        self, slug: str, updates: ScratchUpdate, claim_token: str | None = None
-    ) -> Scratch:
+    async def claim_scratch(self, slug: str, claim_token: str) -> bool:
+        """Claim ownership of a scratch.
+
+        Args:
+            slug: Scratch slug/ID
+            claim_token: Token returned when scratch was created
+
+        Returns:
+            True if claim succeeded
+
+        Raises:
+            DecompMeAPIError: If claim fails
+        """
+        logger.info(f"Claiming scratch: {slug}")
+        response = await self._client.post(
+            f"/api/scratch/{slug}/claim",
+            json={"token": claim_token},
+        )
+        self._update_cookies_from_response(response)
+        data = self._handle_response(response)
+        return data.get("success", False)
+
+    async def update_scratch(self, slug: str, updates: ScratchUpdate) -> Scratch:
         """Update an existing scratch.
+
+        The scratch must be owned by the current session profile (via claim).
+        Session cookies are persisted to disk for ownership across CLI invocations.
 
         Args:
             slug: Scratch slug/ID
             updates: Fields to update
-            claim_token: Claim token for anonymous scratch updates
 
         Returns:
             Updated scratch
@@ -153,14 +261,11 @@ class DecompMeAPIClient:
             DecompMeAPIError: If update fails (e.g., permission denied)
         """
         logger.info(f"Updating scratch: {slug}")
-        cookies = {}
-        if claim_token:
-            cookies[f"scratch_{slug}"] = claim_token
-        response = await self._client.put(
+        response = await self._client.patch(
             f"/api/scratch/{slug}",
             json=updates.model_dump(exclude_none=True, mode="json"),
-            cookies=cookies,
         )
+        self._update_cookies_from_response(response)
         data = self._handle_response(response)
         return Scratch.model_validate(data)
 
@@ -332,27 +437,6 @@ class DecompMeAPIClient:
         data = self._handle_response(response)
         adapter = TypeAdapter(list[TerseScratch])
         return adapter.validate_python(data)
-
-    async def claim_scratch(self, slug: str, token: str) -> bool:
-        """Claim ownership of an anonymous scratch.
-
-        Args:
-            slug: Scratch slug/ID
-            token: Claim token from scratch creation
-
-        Returns:
-            True if claim was successful
-
-        Raises:
-            DecompMeAPIError: If claim fails
-        """
-        logger.info(f"Claiming scratch: {slug}")
-        response = await self._client.post(
-            f"/api/scratch/{slug}/claim",
-            json={"token": token},
-        )
-        data = self._handle_response(response)
-        return data.get("success", False)
 
     # Utilities
 

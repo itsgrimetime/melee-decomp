@@ -7,23 +7,52 @@ description: Match decompiled C code to original PowerPC assembly for Super Smas
 
 You are an expert at matching C source code to PowerPC assembly for the Melee decompilation project. Your goal is to achieve byte-for-byte identical compilation output.
 
-## Core Principle: Single Session with MCP Tools
+## Parallel Agent Setup
 
-**IMPORTANT:** Work on decompilation in a SINGLE conversation session using the MCP tools directly. Do NOT spawn subprocesses or call external agents. You have all the tools you need:
+Agent session isolation is **automatic** - no configuration needed. Each Claude Code conversation gets a unique agent ID based on its process ID, creating isolated session files.
 
-- `mcp__decomp__decomp_search` - Search for existing scratches on decomp.me
-- `mcp__decomp__decomp_get_scratch` - Get scratch details and source code
-- `mcp__decomp__decomp_compile` - Compile code and get assembly diff
-- `mcp__decomp__decomp_search_context` - Search the scratch context for types
-- `mcp__decomp__decomp_update_scratch` - Save source code to a scratch on decomp.me
-- `mcp__decomp__decomp_create_scratch` - Create a new scratch on decomp.me
-- `mcp__decomp__decomp_claim_function` - Claim a function (for parallel agents)
-- `mcp__decomp__decomp_release_function` - Release a claimed function
-- `mcp__decomp__decomp_list_claims` - List currently claimed functions
-- `mcp__decomp__decomp_complete_function` - Mark function as done (persists across sessions)
-- `mcp__decomp__decomp_list_completed` - List all completed functions
+**Shared across agents** (for coordination):
+- `/tmp/decomp_claims.json` - function claims (prevents duplicate work)
+- `/tmp/decomp_completed.json` - completion tracking (prevents re-picking)
 
-This approach maintains full context of all attempts, letting you learn from what worked and what didn't.
+**Per-agent** (session isolation, automatic):
+- `/tmp/decomp_cookies_ppid<N>.json` - decomp.me session
+- `/tmp/decomp_scratch_tokens_ppid<N>.json` - scratch ownership tokens
+
+For manual override: `export DECOMP_AGENT_ID="agent-1"`
+
+## Tools: CLI Commands
+
+All decomp.me operations use the `melee-agent` CLI. Use `--json` for machine-readable output when parsing results.
+
+**Scratch management:**
+```bash
+melee-agent scratch get <slug>                    # Get scratch info + source
+melee-agent scratch create <function_name>        # Create new scratch from melee repo
+melee-agent scratch compile <slug>                # Compile and show diff
+melee-agent scratch update <slug> <file.c>        # Update scratch from file
+melee-agent scratch search [query] --platform gc_wii  # Search scratches
+melee-agent scratch search-context <slug> <pattern>   # Search headers
+```
+
+**Parallel agent coordination:**
+```bash
+melee-agent claim add <function_name>             # Claim before working
+melee-agent claim release <function_name>         # Release when done
+melee-agent claim list                            # Show active claims
+```
+
+**Completion tracking:**
+```bash
+melee-agent complete mark <name> <slug> <pct>     # Record completion
+melee-agent complete list                         # Show completed functions
+```
+
+**Function extraction:**
+```bash
+melee-agent extract list --min-match 0 --max-match 0.50  # Find candidates
+melee-agent extract get <function_name>                   # Get ASM + metadata
+```
 
 ## Workflow
 
@@ -31,59 +60,56 @@ This approach maintains full context of all attempts, letting you learn from wha
 
 **If user specifies a function name:** Skip to Step 1.
 
-**If user asks to "work on something new":** Find an unmatched function from the melee project:
+**If user asks to "work on something new":** Find an unmatched function:
 
 ```bash
-# List unmatched functions - prioritize low-hanging fruit (0-50% match)
-python -m src.cli extract list --min-match 0 --max-match 0.50 --limit 20
+melee-agent extract list --min-match 0 --max-match 0.50 --limit 20
 ```
 
 **Prioritization strategy:**
-- **0-50% match** (PREFERRED) - Fresh functions with room to improve, not already optimized by others
+- **0-50% match** (PREFERRED) - Fresh functions with room to improve
 - **50-500 bytes** - Not too simple, not too complex
 - **In well-understood modules** - ft/, lb/, gr/ have good patterns
 
-**AVOID 95-99% matches** - These have likely been worked on extensively by humans. The remaining differences are often due to context/header mismatches that are hard to fix.
+**AVOID 95-99% matches** - Already optimized, remaining diffs are context issues.
 
 Once you pick a function, **claim it before proceeding**:
-```
-mcp__decomp__decomp_claim_function(function_name="<function_name>")
+```bash
+melee-agent claim add <function_name>
 ```
 
 If the claim fails (another agent is working on it), pick a different function. Claims expire after 1 hour.
 
-### Step 1: Get Function Info and Find/Create Scratch
+### Step 1: Get Function Info and Create Scratch
 
-First, get the function's assembly and metadata:
+Get the function's assembly and metadata:
 
 ```bash
-python -m src.cli extract get <function_name>
+melee-agent extract get <function_name>
 ```
 
-Then check if a scratch already exists on decomp.me (search without match filter):
-```
-mcp__decomp__decomp_search(query="<function_name>", platform="gc_wii")
-```
-
-**If a scratch exists with context:** You can use it for reference, but you may not be able to update it (403 error) if you don't own it.
-
-**Best practice: Always create a new scratch.** The `decomp_create_scratch` tool:
-- Automatically loads the full Melee context (~1.8MB of headers)
-- Saves the claim token so you can update it later
-```
-mcp__decomp__decomp_create_scratch(name="<function_name>", target_asm="<assembly from extract>")
+Check if a scratch already exists (for reference):
+```bash
+melee-agent scratch search "<function_name>" --platform gc_wii
 ```
 
-**If you get a 403 when updating:** The scratch is owned by someone else. Create a new scratch instead - you can always update scratches you create.
+**Best practice: Always create a new scratch.** This ensures you own it and can update it:
+```bash
+melee-agent scratch create <function_name>
+```
 
-**Note the scratch slug** - you'll need it for compilation.
+This automatically:
+- Extracts ASM from the melee build
+- Loads full Melee context (~1.8MB headers)
+- Saves claim token for updates
+
+**Note the scratch slug** from the output.
 
 ### Step 2: Get Existing Source Code
 
 Read the current implementation from the melee project:
 
 ```bash
-# Find where the function is defined
 grep -rn "<function_name>" melee/src/
 ```
 
@@ -91,19 +117,29 @@ Then use the Read tool to get the full source file and understand the context.
 
 **Key things to look for:**
 - The function signature (parameter types, return type)
-- **Local struct definitions BEFORE the function** (these must be included!)
+- **Local struct definitions BEFORE the function** (must be included!)
 - Nearby functions for coding patterns
 - Header includes for type definitions
 
 ### Step 3: Compile and Analyze
 
-Use the MCP compile tool with your source code:
+Write your source code to a temp file, then compile:
 
-```
-mcp__decomp__decomp_compile(url_or_slug="<slug>", source_code="<your code>")
+```bash
+# Write code to temp file
+cat > /tmp/decomp_test.c << 'EOF'
+// Your source code here
+void function_name(...) {
+    ...
+}
+EOF
+
+# Update scratch and compile
+melee-agent scratch update <slug> /tmp/decomp_test.c
+melee-agent scratch compile <slug>
 ```
 
-**CRITICAL:** Include any file-local type definitions (structs, enums) in your source_code. The scratch context only has headers, not .c file local definitions.
+**CRITICAL:** Include any file-local type definitions (structs, enums) in your source. The scratch context only has headers, not .c file local definitions.
 
 Analyze the diff output:
 - `r` = register mismatch (try reordering variable declarations)
@@ -131,21 +167,12 @@ Make targeted changes based on the diff:
 - Inline expressions vs use temp variables
 - Change `if/else` to `switch` or vice versa
 
-### Step 5: Save Progress to decomp.me
+### Step 5: Save Progress
 
-**IMPORTANT:** After each successful compilation that improves the match, update the scratch on decomp.me so progress is saved:
-
-```
-mcp__decomp__decomp_update_scratch(url_or_slug="<slug>", source_code="<your code>")
-```
-
-This updates the scratch on **decomp.me** (not the local repo). Benefits:
+After each successful compilation that improves the match, the scratch is already updated on decomp.me (from the `scratch update` command). Benefits:
 - Your progress is visible on the decomp.me web UI
 - Others can see and continue your work
 - Partial matches are catalogued for future reference
-- You have a record of what you've tried
-
-**Note:** Commit to the **melee repo** at 95%+ match with only register/offset differences (Step 7).
 
 ### Step 6: Know When to Stop
 
@@ -162,18 +189,12 @@ This updates the scratch on **decomp.me** (not the local repo). Benefits:
 
 At 95%+ match with only `r` or `i` markers in the diff:
 ```bash
-python -m src.cli commit apply <function_name> <scratch_slug> --api-url http://10.200.0.1
+melee-agent commit apply <function_name> <scratch_slug>
 ```
 
 **Always mark as completed when done** (this prevents other agents from re-picking it):
-```
-mcp__decomp__decomp_complete_function(
-    function_name="<function_name>",
-    match_percent=<final_percent>,
-    scratch_slug="<slug>",
-    committed=true,  # or false if not committed
-    notes="register diffs only"  # optional
-)
+```bash
+melee-agent complete mark <function_name> <scratch_slug> <match_percent> --committed --notes "register diffs only"
 ```
 
 This automatically releases the claim and persists across sessions.
@@ -182,10 +203,10 @@ This automatically releases the claim and persists across sessions.
 
 ### Finding Types in Context
 
-Use the context search tool:
-```
-mcp__decomp__decomp_search_context(url_or_slug="<slug>", pattern="Fighter")
-mcp__decomp__decomp_search_context(url_or_slug="<slug>", pattern="struct.*attr")
+Use the context search command:
+```bash
+melee-agent scratch search-context <slug> "Fighter"
+melee-agent scratch search-context <slug> "struct.*attr"
 ```
 
 ### Common Type Mappings
@@ -198,7 +219,7 @@ mcp__decomp__decomp_search_context(url_or_slug="<slug>", pattern="struct.*attr")
 
 ### File-Local Definitions
 
-If a function uses a `static struct` defined in the .c file, you MUST include it in your source_code:
+If a function uses a `static struct` defined in the .c file, you MUST include it in your source:
 
 ```c
 // Include this!
@@ -238,24 +259,21 @@ User: `/decomp` (no function specified)
 
 **Step 0:** Find a good candidate (prioritize low-match functions)
 ```bash
-python -m src.cli extract list --min-match 0 --max-match 0.50 --limit 10
+melee-agent extract list --min-match 0 --max-match 0.50 --limit 10
 ```
 → Pick `lbColl_80008440` at 0% match, 180 bytes (fresh function, not worked on)
 → Claim it:
+```bash
+melee-agent claim add lbColl_80008440
 ```
-mcp__decomp__decomp_claim_function(function_name="lbColl_80008440")
-```
-→ ✅ Claimed successfully
+→ Claimed successfully
 
 **Step 1:** Get function info and create scratch
 ```bash
-python -m src.cli extract get lbColl_80008440
+melee-agent extract get lbColl_80008440
+melee-agent scratch create lbColl_80008440
 ```
-→ Always create a new scratch (ensures you own it and have context):
-```
-mcp__decomp__decomp_create_scratch(name="lbColl_80008440", target_asm="<asm from extract>")
-```
-→ Created scratch `xYz12` with full Melee context (claim token saved)
+→ Created scratch `xYz12` with full Melee context
 
 **Step 2:** Read the project source
 ```
@@ -263,49 +281,40 @@ Read: melee/src/lb/lbcoll.c
 ```
 → Find the function and any local structs before it
 
-**Step 3:** Compile with the existing source (including local struct)
-```
-mcp__decomp__decomp_compile(url_or_slug="xYz12", source_code="void lbColl_80008440(...) {...}")
+**Step 3:** Write and compile
+```bash
+cat > /tmp/decomp_test.c << 'EOF'
+void lbColl_80008440(...) {...}
+EOF
+melee-agent scratch update xYz12 /tmp/decomp_test.c
+melee-agent scratch compile xYz12
 ```
 → 45% match
 
 **Step 4:** Analyze diff - fix types, reorder variables, iterate
 
-**Step 5:** Save progress after each improvement
-```
-mcp__decomp__decomp_update_scratch(url_or_slug="xYz12", source_code="...")
-```
+**Step 5:** Progress is auto-saved with each `scratch update`
 
 **Step 6:** Continue iterating until 100% match or stuck at 95%+
 
 **Step 7:** At 97% with only register diffs, commit and mark complete:
 ```bash
-python -m src.cli commit apply lbColl_80008440 xYz12 --api-url http://10.200.0.1
-```
-```
-mcp__decomp__decomp_complete_function(
-    function_name="lbColl_80008440",
-    match_percent=97.0,
-    scratch_slug="xYz12",
-    committed=true,
-    notes="register diffs only"
-)
+melee-agent commit apply lbColl_80008440 xYz12
+melee-agent complete mark lbColl_80008440 xYz12 97.0 --committed --notes "register diffs only"
 ```
 
 ## What NOT to Do
 
 1. **Don't search decomp.me first when starting fresh** - find functions from the melee repo
-2. **Don't spawn Python agents** that call `claude` CLI multiple times - use MCP tools directly
-3. **Don't give up at 90%** - often small changes get you to 99%+
-4. **Don't ignore file-local types** - they must be included in source_code
-5. **Don't forget to save progress to decomp.me** - update the scratch after improvements (catalogues partial matches)
-6. **Don't commit to repo until 100% match** - only Step 7 touches the melee repo
-7. **Don't keep trying the same changes** - if reordering doesn't help after 3-4 attempts, the issue is likely context-related
+2. **Don't give up at 90%** - often small changes get you to 99%+
+3. **Don't ignore file-local types** - they must be included in source
+4. **Don't commit to repo until 95%+ match** - only Step 7 touches the melee repo
+5. **Don't keep trying the same changes** - if reordering doesn't help after 3-4 attempts, the issue is likely context-related
 
 ## Troubleshooting
 
 **Compilation fails with undefined identifier:**
-- Search the context: `mcp__decomp__decomp_search_context(slug, "identifier_name")`
+- Search the context: `melee-agent scratch search-context <slug> "identifier_name"`
 - Check if it's a file-local definition you need to include
 
 **Score drops dramatically after a change:**

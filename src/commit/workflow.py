@@ -33,7 +33,8 @@ class CommitWorkflow:
         scratch_id: str,
         scratch_url: str,
         author: str = "agent",
-        create_pull_request: bool = True
+        create_pull_request: bool = True,
+        extract_function_only: bool = False,
     ) -> Optional[str]:
         """Execute the complete workflow to commit a matched function.
 
@@ -52,6 +53,8 @@ class CommitWorkflow:
             scratch_url: Full URL to the decomp.me scratch
             author: Author name for the scratches.txt entry
             create_pull_request: Whether to create a PR (default: True)
+            extract_function_only: If True, extract just the function from new_code.
+                If False, use new_code as-is (agent decides what to include).
 
         Returns:
             PR URL if successful and create_pull_request is True, None otherwise
@@ -61,15 +64,18 @@ class CommitWorkflow:
         print(f"{'='*60}\n")
 
         # Step 1: Update source file
-        print("[1/5] Updating source file...")
-        if not await update_source_file(file_path, function_name, new_code, self.melee_root):
+        print("[1/6] Updating source file...")
+        if not await update_source_file(
+            file_path, function_name, new_code, self.melee_root,
+            extract_function_only=extract_function_only
+        ):
             print("❌ Failed to update source file")
             return None
         self.files_changed.append(f"src/{file_path}")
         print("✓ Source file updated\n")
 
         # Step 2: Update configure.py
-        print("[2/5] Updating configure.py...")
+        print("[2/6] Updating configure.py...")
         if not await update_configure_py(file_path, self.melee_root):
             print("❌ Failed to update configure.py")
             return None
@@ -77,7 +83,7 @@ class CommitWorkflow:
         print("✓ configure.py updated\n")
 
         # Step 3: Update scratches.txt
-        print("[3/5] Updating scratches.txt...")
+        print("[3/6] Updating scratches.txt...")
         if not await update_scratches_txt(function_name, scratch_id, self.melee_root, author):
             print("❌ Failed to update scratches.txt")
             return None
@@ -85,7 +91,7 @@ class CommitWorkflow:
         print("✓ scratches.txt updated\n")
 
         # Step 4: Format files
-        print("[4/5] Formatting changed files...")
+        print("[4/6] Formatting changed files...")
         if not await verify_clang_format_available():
             print("⚠ Warning: git clang-format not available, skipping formatting")
         else:
@@ -99,9 +105,13 @@ class CommitWorkflow:
             else:
                 print("✓ No C files to format\n")
 
-        # Step 5: Create PR (if requested)
+        # Step 5: Regenerate progress report
+        print("[5/6] Regenerating progress report...")
+        await self._regenerate_report()
+
+        # Step 6: Create PR (if requested)
         if create_pull_request:
-            print("[5/5] Creating pull request...")
+            print("[6/6] Creating pull request...")
             pr_url = await create_pr(
                 function_name,
                 scratch_url,
@@ -118,12 +128,40 @@ class CommitWorkflow:
                 print("❌ Failed to create pull request")
                 return None
         else:
-            print("[5/5] Skipping pull request creation (as requested)")
+            print("[6/6] Skipping pull request creation (as requested)")
             print(f"\n{'='*60}")
             print(f"✓ Workflow completed successfully!")
             print(f"Files changed: {', '.join(self.files_changed)}")
             print(f"{'='*60}\n")
             return None
+
+    async def _regenerate_report(self) -> bool:
+        """Regenerate the progress report (report.json) via ninja."""
+        import asyncio
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "ninja", "build/GALE01/report.json",
+                cwd=self.melee_root,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await proc.communicate()
+
+            if proc.returncode == 0:
+                print("✓ Progress report regenerated\n")
+                return True
+            else:
+                print(f"⚠ Warning: Failed to regenerate report (exit {proc.returncode})")
+                if stderr:
+                    print(f"  {stderr.decode().strip()}")
+                return False
+        except FileNotFoundError:
+            print("⚠ Warning: ninja not found, skipping report regeneration")
+            return False
+        except Exception as e:
+            print(f"⚠ Warning: Could not regenerate report: {e}")
+            return False
 
 
 async def auto_detect_and_commit(
@@ -133,7 +171,8 @@ async def auto_detect_and_commit(
     scratch_url: str,
     melee_root: Path,
     author: str = "agent",
-    create_pull_request: bool = True
+    create_pull_request: bool = True,
+    extract_function_only: bool = False,
 ) -> Optional[str]:
     """Auto-detect the file containing a function and commit it.
 
@@ -148,6 +187,10 @@ async def auto_detect_and_commit(
         melee_root: Path to the melee project root
         author: Author name for the scratches.txt entry
         create_pull_request: Whether to create a PR (default: True)
+        extract_function_only: If True, extract just the function from new_code.
+            If False (default), use new_code as-is - the caller is responsible
+            for providing exactly what should be inserted. Use False for agent
+            workflows where the agent has analyzed the target file.
 
     Returns:
         PR URL if successful and create_pull_request is True, None otherwise
@@ -169,5 +212,6 @@ async def auto_detect_and_commit(
         scratch_id,
         scratch_url,
         author,
-        create_pull_request
+        create_pull_request,
+        extract_function_only,
     )

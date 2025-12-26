@@ -5,19 +5,69 @@ from pathlib import Path
 from typing import Optional
 
 
+def _extract_function_from_code(code: str, function_name: str) -> Optional[str]:
+    """Extract just the target function from code that may contain helper definitions.
+
+    Args:
+        code: Full code that may contain struct definitions, forward declarations, etc.
+        function_name: The function to extract
+
+    Returns:
+        The extracted function or None if not found
+    """
+    # Pattern to find the function definition
+    # Match: return_type function_name(params) {
+    func_pattern = re.compile(
+        rf'^([^\n]*?)\s+{re.escape(function_name)}\s*\([^)]*\)[^{{]*\{{',
+        re.MULTILINE
+    )
+
+    match = func_pattern.search(code)
+    if not match:
+        return None
+
+    func_start = match.start()
+
+    # Find the matching closing brace
+    brace_count = 0
+    func_end = None
+    in_function = False
+
+    for i in range(match.end() - 1, len(code)):
+        if code[i] == '{':
+            brace_count += 1
+            in_function = True
+        elif code[i] == '}':
+            brace_count -= 1
+            if in_function and brace_count == 0:
+                func_end = i + 1
+                break
+
+    if func_end is None:
+        return None
+
+    return code[func_start:func_end]
+
+
 async def update_source_file(
     file_path: str,
     function_name: str,
     new_code: str,
-    melee_root: Path
+    melee_root: Path,
+    extract_function_only: bool = False,
 ) -> bool:
     """Replace function implementation in source file.
 
     Args:
         file_path: Relative path to the C file (e.g., "melee/lb/lbcommand.c")
         function_name: Name of the function to replace
-        new_code: The new function implementation
+        new_code: The new function implementation (may include helper definitions)
         melee_root: Path to the melee project root
+        extract_function_only: If True, extract just the target function from new_code,
+            discarding any struct definitions or forward declarations. If False (default),
+            the caller is responsible for providing exactly what should be inserted.
+            Use False for agent-driven workflows where the agent has already decided
+            what to include based on the target file context.
 
     Returns:
         True if successful, False otherwise
@@ -71,14 +121,27 @@ async def update_source_file(
             print(f"Error: Could not find closing brace for function '{function_name}'")
             return False
 
-        # Extract the old function
+        # Extract the old function (for reference/logging)
         old_function = content[func_start:func_end]
 
-        # Ensure new_code is properly formatted and doesn't have extra whitespace
+        # Process new_code based on extraction mode
         new_code = new_code.strip()
 
+        if extract_function_only:
+            # Extract just the target function, discarding helper definitions
+            extracted_function = _extract_function_from_code(new_code, function_name)
+            if extracted_function is None:
+                print(f"Warning: Could not extract function '{function_name}' from new code, using as-is")
+                extracted_function = new_code
+            code_to_insert = extracted_function
+        else:
+            # Use the code as-is - caller is responsible for content
+            # This mode is for agent-driven workflows where the agent has already
+            # analyzed the target file and decided what to include
+            code_to_insert = new_code
+
         # Replace the function
-        new_content = content[:func_start] + new_code + content[func_end:]
+        new_content = content[:func_start] + code_to_insert + content[func_end:]
 
         # Write the updated content back
         full_path.write_text(new_content, encoding='utf-8')

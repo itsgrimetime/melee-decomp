@@ -125,7 +125,7 @@ echo "All workers started"
 
 ### View Logs
 ```bash
-cd /Users/mike/code/melee-decomp/docker
+cd docker
 docker compose logs -f
 
 # View specific service
@@ -225,7 +225,7 @@ Both frontend and backend support hot reload in development mode:
 - **Backend**: Django auto-reloads on Python file changes
 - **Frontend**: Next.js HMR (Hot Module Replacement) via webpack
 
-Changes to files in `/Users/mike/code/melee-decomp/decomp.me/backend` and `/Users/mike/code/melee-decomp/decomp.me/frontend` will be reflected immediately.
+Changes to files in `decomp.me/backend` and `decomp.me/frontend` will be reflected immediately.
 
 ### Debugging
 
