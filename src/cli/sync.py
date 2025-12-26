@@ -20,6 +20,8 @@ from ._common import (
     SLUG_MAP_FILE,
     load_slug_map,
     save_slug_map,
+    load_completed_functions,
+    save_completed_functions,
 )
 
 # API URL from environment
@@ -188,75 +190,68 @@ def sync_auth(
 
 @sync_app.command("list")
 def sync_list(
-    melee_root: Annotated[
-        Path, typer.Option("--melee-root", "-m", help="Path to melee submodule")
-    ] = DEFAULT_MELEE_ROOT,
     min_match: Annotated[
         float, typer.Option("--min-match", help="Minimum match percentage to include")
     ] = 95.0,
-    author: Annotated[
-        Optional[str], typer.Option("--author", "-a", help="Filter by author name")
-    ] = None,
     limit: Annotated[
         int, typer.Option("--limit", "-n", help="Maximum entries to show")
     ] = 50,
 ):
-    """List committed scratches that can be synced to production."""
-    scratches_file = melee_root / "config" / "GALE01" / "scratches.txt"
-    entries = _parse_scratches_txt(scratches_file)
+    """List completed functions that can be synced to production.
 
-    filtered = []
-    for entry in entries:
-        match_str = entry['match_percent']
-        if match_str == 'OK':
-            match_pct = 100.0
-        else:
-            match_pct = float(match_str.rstrip('%'))
+    Reads from completed_functions.json (our structured tracking file).
+    """
+    completed = load_completed_functions()
+    slug_map = load_slug_map()
+
+    # Build set of already-synced local slugs
+    synced_local_slugs = {v.get('local_slug') for v in slug_map.values()}
+
+    # Filter and prepare entries
+    entries = []
+    for func_name, info in completed.items():
+        match_pct = info.get('match_percent', 0)
+        local_slug = info.get('scratch_slug', '')
 
         if match_pct < min_match:
             continue
-        if author and entry['author'].lower() != author.lower():
+        if not local_slug:
             continue
 
-        entry['match_pct'] = match_pct
-        filtered.append(entry)
+        entries.append({
+            'name': func_name,
+            'match_pct': match_pct,
+            'slug': local_slug,
+            'synced': local_slug in synced_local_slugs,
+        })
 
-    filtered.sort(key=lambda x: -x['match_pct'])
-    filtered = filtered[:limit]
+    entries.sort(key=lambda x: -x['match_pct'])
+    entries = entries[:limit]
 
-    if not filtered:
-        console.print("[yellow]No matching scratches found[/yellow]")
+    if not entries:
+        console.print("[yellow]No matching functions found[/yellow]")
         return
 
-    slug_map = load_slug_map()
-    production_slugs = set(slug_map.keys())
-
-    title = f"Scratches to Sync (>= {min_match}% match)"
-    if author:
-        title += f" by {author}"
-    table = Table(title=title)
+    table = Table(title=f"Functions to Sync (>= {min_match}% match)")
     table.add_column("Function", style="cyan")
     table.add_column("Match %", justify="right")
-    table.add_column("Slug")
-    table.add_column("Author")
+    table.add_column("Local Slug")
     table.add_column("Status")
 
     synced_count = 0
-    for entry in filtered:
-        is_synced = entry['slug'] in production_slugs
-        if is_synced:
+    for entry in entries:
+        if entry['synced']:
             synced_count += 1
         table.add_row(
             entry['name'],
             f"{entry['match_pct']:.1f}%",
             entry['slug'],
-            entry['author'],
-            "[green]synced[/green]" if is_synced else "[yellow]pending[/yellow]",
+            "[green]synced[/green]" if entry['synced'] else "[yellow]pending[/yellow]",
         )
 
     console.print(table)
-    pending = len(filtered) - synced_count
-    console.print(f"\n[dim]Found {len(filtered)} scratches ({pending} pending, {synced_count} already synced)[/dim]")
+    pending = len(entries) - synced_count
+    console.print(f"\n[dim]Found {len(entries)} functions ({pending} pending, {synced_count} already synced)[/dim]")
 
 
 @sync_app.command("production")
@@ -270,9 +265,6 @@ def sync_production(
     min_match: Annotated[
         float, typer.Option("--min-match", help="Minimum match percentage to sync")
     ] = 95.0,
-    author: Annotated[
-        Optional[str], typer.Option("--author", "-a", help="Filter by author name")
-    ] = None,
     limit: Annotated[
         int, typer.Option("--limit", "-n", help="Maximum scratches to sync")
     ] = 10,
@@ -283,7 +275,11 @@ def sync_production(
         bool, typer.Option("--force", "-f", help="Re-sync even if already exists on production")
     ] = False,
 ):
-    """Sync committed scratches from local instance to production decomp.me."""
+    """Sync completed functions from local instance to production decomp.me.
+
+    Reads from completed_functions.json to find functions with local slugs
+    that haven't been synced to production yet.
+    """
     _require_api_url(local_url)
 
     prod_cookies = _load_production_cookies()
@@ -292,53 +288,50 @@ def sync_production(
         console.print("[dim]Run 'melee-agent sync auth' first[/dim]")
         raise typer.Exit(1)
 
-    scratches_file = melee_root / "config" / "GALE01" / "scratches.txt"
-    entries = _parse_scratches_txt(scratches_file)
+    completed = load_completed_functions()
+    slug_map = load_slug_map()
 
+    # Build set of already-synced local slugs
+    synced_local_slugs = {v.get('local_slug') for v in slug_map.values()}
+
+    # Filter entries from completed_functions.json
     to_sync = []
-    for entry in entries:
-        match_str = entry['match_percent']
-        if match_str == 'OK':
-            match_pct = 100.0
-        else:
-            match_pct = float(match_str.rstrip('%'))
+    already_synced_list = []
+    for func_name, info in completed.items():
+        match_pct = info.get('match_percent', 0)
+        local_slug = info.get('scratch_slug', '')
 
         if match_pct < min_match:
             continue
-        if author and entry['author'].lower() != author.lower():
+        if not local_slug:
             continue
 
-        entry['match_pct'] = match_pct
-        to_sync.append(entry)
+        entry = {
+            'name': func_name,
+            'slug': local_slug,
+            'match_pct': match_pct,
+        }
+
+        if local_slug in synced_local_slugs:
+            already_synced_list.append(entry)
+        else:
+            to_sync.append(entry)
 
     to_sync.sort(key=lambda x: -x['match_pct'])
     to_sync = to_sync[:limit]
 
-    if not to_sync:
-        console.print("[yellow]No scratches to sync[/yellow]")
-        return
-
-    slug_map = load_slug_map()
-    production_slugs = set(slug_map.keys())
-
-    unsynced = []
-    already_synced = []
-    for entry in to_sync:
-        if entry['slug'] in production_slugs:
-            already_synced.append(entry)
+    if not to_sync and not force:
+        if already_synced_list:
+            console.print(f"[yellow]All {len(already_synced_list)} functions already synced[/yellow]")
+            console.print("[dim]Use --force to re-sync[/dim]")
         else:
-            unsynced.append(entry)
-
-    if already_synced and not force:
-        console.print(f"[dim]Skipping {len(already_synced)} already-synced scratches (use --force to re-sync)[/dim]")
-
-    to_sync = unsynced if not force else to_sync
-
-    if not to_sync:
-        console.print("[yellow]All scratches already synced[/yellow]")
+            console.print("[yellow]No functions to sync[/yellow]")
         return
 
-    console.print(f"[bold]Syncing {len(to_sync)} scratches to production...[/bold]\n")
+    if force and not to_sync:
+        to_sync = already_synced_list[:limit]
+
+    console.print(f"[bold]Syncing {len(to_sync)} functions to production...[/bold]\n")
 
     if dry_run:
         console.print("[cyan]DRY RUN - no changes will be made[/cyan]\n")
@@ -353,6 +346,8 @@ def sync_production(
                 synced = json.load(f)
         except (json.JSONDecodeError, IOError):
             pass
+
+    scratches_file = melee_root / "config" / "GALE01" / "scratches.txt"
 
     async def do_sync():
         results = {"success": 0, "skipped": 0, "failed": 0, "details": []}
@@ -428,9 +423,11 @@ def sync_production(
                             prod_slug = prod_data.get('slug', 'unknown')
                             console.print(f"[green]  Created: {PRODUCTION_DECOMP_ME}/scratch/{prod_slug}[/green]")
 
+                            # Update scratches.txt if the local slug exists there
                             if _update_scratches_txt_slug(scratches_file, local_slug, prod_slug):
                                 console.print(f"[dim]  Updated scratches.txt: {local_slug} -> {prod_slug}[/dim]")
 
+                            # Update slug map
                             current_slug_map = load_slug_map()
                             current_slug_map[prod_slug] = {
                                 'local_slug': local_slug,
@@ -439,6 +436,12 @@ def sync_production(
                                 'synced_at': time.time(),
                             }
                             save_slug_map(current_slug_map)
+
+                            # Update completed_functions.json with production slug
+                            current_completed = load_completed_functions()
+                            if func_name in current_completed:
+                                current_completed[func_name]['production_slug'] = prod_slug
+                                save_completed_functions(current_completed)
 
                             synced[local_slug] = {
                                 'production_slug': prod_slug,
