@@ -382,6 +382,62 @@ def sync_production(
 
                     console.print(f"[cyan]Syncing {func_name}[/cyan] ({local_slug}) - {match_pct:.1f}%")
 
+                    # Search for existing scratches on production with same function name
+                    skip_creation = False
+                    try:
+                        search_resp = await prod_client.get(
+                            '/api/scratch',
+                            params={'search': func_name, 'platform': 'gc_wii', 'page_size': 5}
+                        )
+                        if search_resp.status_code == 200:
+                            search_data = search_resp.json()
+                            existing = search_data.get('results', [])
+                            # Look for exact name match with 100% score (score=0 means perfect)
+                            exact_match = None
+                            for existing_scratch in existing:
+                                existing_name = existing_scratch.get('name', '')
+                                existing_score = existing_scratch.get('score', -1)
+                                if existing_name == func_name and existing_score == 0:
+                                    exact_match = existing_scratch
+                                    break
+
+                            if exact_match and not force:
+                                existing_slug = exact_match.get('slug', '')
+                                console.print(f"[yellow]  Found existing 100% match on production: {existing_slug}[/yellow]")
+                                console.print(f"[dim]  Linking instead of creating (use --force to create anyway)[/dim]")
+                                # Record the mapping
+                                current_slug_map = load_slug_map()
+                                current_slug_map[existing_slug] = {
+                                    'local_slug': local_slug,
+                                    'function': func_name,
+                                    'match_percent': 100.0,
+                                    'synced_at': time.time(),
+                                    'note': 'linked to existing production scratch',
+                                }
+                                save_slug_map(current_slug_map)
+                                # Update completed_functions.json
+                                current_completed = load_completed_functions()
+                                if func_name in current_completed:
+                                    current_completed[func_name]['production_slug'] = existing_slug
+                                    save_completed_functions(current_completed)
+                                results['success'] += 1
+                                results['details'].append({
+                                    'function': func_name,
+                                    'local_slug': local_slug,
+                                    'production_slug': existing_slug,
+                                    'action': 'linked_existing',
+                                })
+                                skip_creation = True
+                            elif existing:
+                                # No exact 100% match, but found related scratches
+                                best = existing[0]
+                                console.print(f"[dim]  Found {len(existing)} existing scratch(es), best: {best.get('name')} (score={best.get('score', '?')})[/dim]")
+                    except Exception as e:
+                        console.print(f"[dim]  Warning: Could not search production: {e}[/dim]")
+
+                    if skip_creation:
+                        continue
+
                     if dry_run:
                         results['success'] += 1
                         continue
