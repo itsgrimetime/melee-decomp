@@ -59,12 +59,37 @@ melee-agent sync status                           # Check auth status
 melee-agent sync list --author <name>             # List scratches to sync
 melee-agent sync production --author <name>       # Sync to production
 melee-agent sync slugs                            # Show local→production mapping
+melee-agent sync replace-author <from> <to>       # Bulk rename author
 ```
 
 **Function extraction:**
 ```bash
 melee-agent extract list --min-match 0 --max-match 0.50  # Find candidates
 melee-agent extract get <function_name>                   # Get ASM + metadata
+```
+
+**Audit & tracking:**
+```bash
+melee-agent audit status                          # Unified view of all work
+melee-agent audit list <category>                 # List by: complete, synced, lost, wip
+melee-agent audit recover --add-to-file           # Add synced funcs to scratches.txt
+melee-agent audit recover --sync-lost             # Recover lost scratches
+```
+
+**PR tracking:**
+```bash
+melee-agent pr status                             # Show PR status summary
+melee-agent pr status --check                     # Check live status via gh CLI
+melee-agent pr link <pr_url> <func1> <func2>...   # Link functions to a PR
+melee-agent pr link-batch <pr_url> -c complete    # Link all complete functions
+melee-agent pr list --no-pr                       # Show functions without PR
+melee-agent pr check <pr_url>                     # Check single PR status
+```
+
+**Pre-commit validation:**
+```bash
+melee-agent hook validate                         # Validate staged changes
+melee-agent hook install                          # Install git pre-commit hook
 ```
 
 ## Workflow
@@ -380,3 +405,91 @@ melee-agent complete mark lbColl_80008440 xYz12 97.0 --committed --notes "regist
 - Run `melee-agent commit lint` to validate the file
 - Run `melee-agent commit lint --fix` to remove malformed entries
 - Always use `melee-agent commit apply` instead of manual edits
+
+## Full Lifecycle Workflow
+
+This is the complete workflow from finding functions to submitting PRs:
+
+### Phase 1: Matching (Parallel Agents)
+
+Multiple agents work simultaneously:
+
+1. **Check status first**: `melee-agent audit status` to see overall progress
+2. **Find functions**: `melee-agent extract list --min-match 0 --max-match 50`
+3. **Claim & work**: Claim a function, create scratch, iterate to 95%+
+4. **Mark complete**: `melee-agent complete mark <func> <slug> <pct> --committed`
+
+### Phase 2: Sync to Production
+
+After accumulating matches on local decomp.me:
+
+1. **Authenticate**: `melee-agent sync auth` (needs cf_clearance cookie from browser)
+2. **List pending**: `melee-agent sync list --author agent`
+3. **Push to prod**: `melee-agent sync production --author agent`
+4. **Update file**: `melee-agent audit recover --add-to-file`
+
+### Phase 3: PR Preparation (every ~10-15 matches)
+
+1. **Audit state**: `melee-agent audit status`
+2. **Recover missing**: If any "synced but not in file", run recovery
+3. **Create branch**: `git checkout -b matches-batch-N`
+4. **Stage changes**: `git add melee/` (or specific files)
+5. **Run pre-commit**: `melee-agent hook validate --verbose`
+6. **Commit**: `git commit -m "Add N matched functions"`
+7. **Push**: `git push -u origin matches-batch-N`
+
+### Phase 4: PR Submission
+
+1. **Create PR** against official doldecomp/melee repo
+2. **Link functions**: `melee-agent pr link-batch <pr_url> --category complete`
+3. **Track status**: `melee-agent pr status --check`
+4. **Address feedback**: If changes requested, update and re-run validation
+
+### Tracking States
+
+Each function progresses through these states:
+
+| State | Where Tracked | Next Action |
+|-------|--------------|-------------|
+| Claimed | `/tmp/decomp_claims.json` | Work on it (expires 1hr) |
+| Local scratch | local decomp.me | Continue improving |
+| 95%+ match | `completed_functions.json` | Sync to production |
+| Synced | `scratches_slug_map.json` | Add to scratches.txt |
+| In scratches.txt | `melee/config/.../scratches.txt` | Include in PR |
+| PR linked | `completed_functions.json` (pr_url) | Wait for review |
+| PR approved | GitHub | Merge PR |
+| Merged | doldecomp/melee | Done! |
+
+Check current state: `melee-agent audit status` and `melee-agent pr status`
+
+### Audit Commands Quick Reference
+
+```bash
+# See overall status
+melee-agent audit status
+
+# List functions by category
+melee-agent audit list complete    # Ready for PR
+melee-agent audit list synced      # Synced but missing from file
+melee-agent audit list lost        # 95%+ but not synced
+melee-agent audit list wip         # Work in progress
+
+# Recovery
+melee-agent audit recover --add-to-file --dry-run   # Preview
+melee-agent audit recover --add-to-file             # Execute
+```
+
+### Common Issues
+
+**"Lost" matches (95%+ but not tracked):**
+- These exist on local decomp.me but weren't synced
+- Run `melee-agent sync production` to push to prod
+- Then `melee-agent audit recover --add-to-file`
+
+**"Synced but not in file":**
+- Happens if melee submodule was reset/updated
+- Run `melee-agent audit recover --add-to-file`
+
+**Pre-commit validation fails:**
+- Local slugs in scratches.txt: Sync first
+- Run `melee-agent sync production` then retry
