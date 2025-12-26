@@ -187,8 +187,14 @@ def pr_status(
                     else:
                         status_str = " [cyan]OPEN[/cyan]"
 
+            # Check if all functions share the same branch
+            branches = set(info.get("branch") for _, info in funcs if info.get("branch"))
+            branch_str = ""
+            if len(branches) == 1:
+                branch_str = f" [dim]branch: {list(branches)[0]}[/dim]"
+
             console.print(f"[bold]PR #{pr_num}[/bold]{status_str}")
-            console.print(f"  [dim]{pr_url}[/dim]")
+            console.print(f"  {pr_url}{branch_str}")
             console.print(f"  Functions: {len(funcs)}")
             for func, info in funcs[:5]:
                 pct = info.get("match_percent", 0)
