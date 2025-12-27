@@ -44,10 +44,9 @@ Then read the source file in `melee/src/` for context. Look for:
 
 ### Step 3: Compile and Iterate
 
-Write code to `/tmp/decomp_<slug>.c`, then:
+Write code to `/tmp/decomp_<slug>.c`, then compile:
 ```bash
-melee-agent scratch update <slug> /tmp/decomp_<slug>.c
-melee-agent scratch compile <slug>
+melee-agent scratch compile <slug> -s /tmp/decomp_<slug>.c
 ```
 
 The compile output now shows **match history** tracking your progress:
@@ -163,8 +162,7 @@ melee-agent extract get lbColl_80008440 --create-scratch
 # → Created scratch `xYz12`
 
 # Read source file for context, then write and compile
-melee-agent scratch update xYz12 /tmp/decomp_xYz12.c
-melee-agent scratch compile xYz12
+melee-agent scratch compile xYz12 -s /tmp/decomp_xYz12.c
 # → 45% match, analyze diff, iterate...
 
 # If stuck, check for type issues
@@ -194,9 +192,11 @@ melee-agent complete mark lbColl_80008440 xYz12 97.0 --committed
 | Only `i` (offset) diffs | Usually fine - focus on `r` and instruction diffs |
 | Commit validation fails | Check braces balanced, function name present, not mid-statement |
 | Commit compile fails | Missing extern declarations or file-local types - use `--dry-run` first |
+| Missing stub marker | Run `melee-agent stub add <function_name>` to add it |
 | Stuck at 85-90% with extra conversion code | Likely type mismatch - run `melee-agent struct issues` and check for known issues |
 | Assembly uses `lfs` but code generates `lwz`+conversion | Field is float but header says int - use cast workaround |
 | Can't find struct offset | `melee-agent struct offset 0xXXX --struct StructName` |
+| Struct field not visible in context | Use `M2C_FIELD(ptr, offset, type)` macro for raw offset access |
 
 **NonMatching files:** You CAN work on functions in NonMatching files. The build uses original .dol for linking, so builds always pass. Match % is tracked per-function.
 

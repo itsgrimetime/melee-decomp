@@ -118,7 +118,7 @@ class CommitWorkflow:
         print("[5/6] Regenerating progress report...")
         await self._regenerate_report()
 
-        # Step 6: Create PR (if requested)
+        # Step 6: Create PR (if requested) or commit directly
         if create_pull_request:
             print("[6/6] Creating pull request...")
             pr_url = await create_pr(
@@ -137,7 +137,12 @@ class CommitWorkflow:
                 print("❌ Failed to create pull request")
                 return None
         else:
-            print("[6/6] Skipping pull request creation (as requested)")
+            print("[6/6] Creating git commit...")
+            commit_success = await self._create_git_commit(function_name, scratch_url)
+            if commit_success:
+                print("✓ Git commit created\n")
+            else:
+                print("⚠ Warning: Failed to create git commit, changes remain uncommitted")
             print(f"\n{'='*60}")
             print(f"✓ Workflow completed successfully!")
             print(f"Files changed: {', '.join(self.files_changed)}")
@@ -239,6 +244,73 @@ class CommitWorkflow:
             return False
         except Exception as e:
             print(f"⚠ Warning: Could not regenerate report: {e}")
+            return False
+
+    async def _create_git_commit(
+        self, function_name: str, scratch_url: str, match_percent: float = 100.0
+    ) -> bool:
+        """Create a git commit for the matched function.
+
+        Args:
+            function_name: Name of the matched function
+            scratch_url: Full URL to the decomp.me scratch
+            match_percent: Match percentage (default 100.0)
+
+        Returns:
+            True if commit was created successfully, False otherwise
+        """
+        try:
+            # First, check if there are any changes to commit
+            proc = await asyncio.create_subprocess_exec(
+                "git", "status", "--porcelain",
+                cwd=self.melee_root,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await proc.communicate()
+
+            if not stdout.strip():
+                print("  No changes to commit")
+                return True  # Not an error, just nothing to do
+
+            # Add the changed files
+            proc = await asyncio.create_subprocess_exec(
+                "git", "add", *self.files_changed,
+                cwd=self.melee_root,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await proc.communicate()
+            if proc.returncode != 0:
+                print(f"  Failed to stage files: {stderr.decode()}")
+                return False
+
+            # Format match percentage (show as integer if whole number)
+            if match_percent == int(match_percent):
+                pct_str = f"{int(match_percent)}%"
+            else:
+                pct_str = f"{match_percent:.1f}%"
+
+            # Create commit message
+            commit_msg = f"Match {function_name} ({pct_str})\n\nScratch: {scratch_url}"
+
+            proc = await asyncio.create_subprocess_exec(
+                "git", "commit", "-m", commit_msg,
+                cwd=self.melee_root,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await proc.communicate()
+
+            if proc.returncode != 0:
+                error_msg = stderr.decode() if stderr else stdout.decode()
+                print(f"  Failed to create commit: {error_msg}")
+                return False
+
+            return True
+
+        except Exception as e:
+            print(f"  Failed to create git commit: {e}")
             return False
 
 

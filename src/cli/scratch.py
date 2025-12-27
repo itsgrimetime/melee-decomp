@@ -180,6 +180,9 @@ def _format_diff_output(diff_output, max_lines: int = 0) -> None:
 @scratch_app.command("compile")
 def scratch_compile(
     slug: Annotated[str, typer.Argument(help="Scratch slug/ID")],
+    source_file: Annotated[
+        Optional[Path], typer.Option("--source", "-s", help="Update source from file before compiling")
+    ] = None,
     api_url: Annotated[
         str, typer.Option("--api-url", help="Decomp.me API URL")
     ] = DEFAULT_API_URL,
@@ -190,12 +193,42 @@ def scratch_compile(
         int, typer.Option("--max-lines", "-n", help="Max diff lines to show (0=all)")
     ] = 100,
 ):
-    """Compile a scratch and show the diff."""
+    """Compile a scratch and show the diff.
+
+    If --source is provided, updates the scratch source code before compiling.
+    """
     require_api_url(api_url)
-    from src.client import DecompMeAPIClient
+    from src.client import DecompMeAPIClient, ScratchUpdate, DecompMeAPIError
+
+    # If source file provided, validate it exists
+    source_code = None
+    if source_file is not None:
+        if not source_file.exists():
+            console.print(f"[red]Source file not found: {source_file}[/red]")
+            raise typer.Exit(1)
+        source_code = source_file.read_text()
 
     async def compile_scratch():
         async with DecompMeAPIClient(base_url=api_url) as client:
+            # Update source first if provided
+            if source_code is not None:
+                try:
+                    await client.update_scratch(slug, ScratchUpdate(source_code=source_code))
+                except DecompMeAPIError as e:
+                    if "403" in str(e):
+                        tokens = _load_scratch_tokens()
+                        if slug in tokens:
+                            console.print("[dim]Session mismatch, re-claiming...[/dim]")
+                            try:
+                                await client.claim_scratch(slug, tokens[slug])
+                                await client.update_scratch(slug, ScratchUpdate(source_code=source_code))
+                            except Exception:
+                                raise e
+                        else:
+                            console.print("[red]No saved token - cannot update[/red]")
+                            raise typer.Exit(1)
+                    else:
+                        raise
             return await client.compile_scratch(slug)
 
     result = asyncio.run(compile_scratch())

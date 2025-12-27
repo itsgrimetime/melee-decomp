@@ -124,6 +124,9 @@ def extract_list(
 ):
     """List unmatched functions from the melee project.
 
+    Match percentages are read from the authoritative report.json which reflects
+    the actual compiled state of decompiled code in the repository.
+
     By default, excludes functions already tracked as completed/attempted.
     Use --include-completed to show all functions.
 
@@ -133,8 +136,20 @@ def extract_list(
 
     Use --sort score to sort by recommendation score (best candidates first).
     Use --module ft to filter to fighter module only.
+
+    To update match percentages after committing code:
+        ninja build/GALE01/report.json
     """
     from src.extractor import extract_unmatched_functions
+    from src.extractor.report import ReportParser
+
+    # Check if report.json exists and warn if stale
+    report_parser = ReportParser(melee_root)
+    if not (melee_root / "build" / "GALE01" / "report.json").exists():
+        console.print("[yellow]Warning: report.json not found. Run 'ninja build/GALE01/report.json' to generate it.[/yellow]")
+    elif report_parser.is_report_stale(max_age_hours=168):  # 1 week
+        age_hours = report_parser.get_report_age_seconds() / 3600
+        console.print(f"[dim]Note: report.json is {age_hours:.0f}h old. Run 'ninja build/GALE01/report.json' to refresh.[/dim]")
 
     result = asyncio.run(extract_unmatched_functions(melee_root))
 
@@ -229,6 +244,7 @@ def extract_get(
 ):
     """Extract a specific function's ASM and context.
 
+    Match percentages are read from the authoritative report.json.
     Use --create-scratch to also create a decomp.me scratch in one step.
     """
     from src.extractor import extract_function
