@@ -11,6 +11,8 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from src.client.api import _get_agent_id
+
 # Console for rich output
 console = Console()
 
@@ -18,8 +20,8 @@ console = Console()
 DECOMP_CONFIG_DIR = Path.home() / ".config" / "decomp-me"
 DECOMP_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
-# Get agent ID for session isolation
-AGENT_ID = os.environ.get("DECOMP_AGENT_ID", "")
+# Get agent ID for session isolation - use same logic as api.py
+AGENT_ID = _get_agent_id()
 _cookies_suffix = f"_{AGENT_ID}" if AGENT_ID else ""
 
 DECOMP_COOKIES_FILE = os.environ.get(

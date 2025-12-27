@@ -29,9 +29,11 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from src.client.api import _get_agent_id
+
 # File paths for coordination (same as MCP server)
-# Per-agent isolation via DECOMP_AGENT_ID env var
-_agent_id = os.environ.get("DECOMP_AGENT_ID", "")
+# Per-agent isolation - use same logic as api.py for consistency
+_agent_id = _get_agent_id()
 _agent_suffix = f"_{_agent_id}" if _agent_id else ""
 
 # Persistent config directory

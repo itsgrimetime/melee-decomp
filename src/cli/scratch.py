@@ -14,9 +14,10 @@ import typer
 from rich.table import Table
 
 from ._common import console, DEFAULT_MELEE_ROOT, DECOMP_CONFIG_DIR
+from src.client.api import _get_agent_id
 
-# Paths
-_agent_id = os.environ.get("DECOMP_AGENT_ID", "")
+# Paths - use same agent ID logic as api.py for session isolation
+_agent_id = _get_agent_id()
 _agent_suffix = f"_{_agent_id}" if _agent_id else ""
 
 DECOMP_SCRATCH_TOKENS_FILE = os.environ.get(
