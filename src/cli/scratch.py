@@ -13,7 +13,7 @@ from typing import Annotated, Optional
 import typer
 from rich.table import Table
 
-from ._common import console, DEFAULT_MELEE_ROOT, DECOMP_CONFIG_DIR, get_agent_context_file, DEFAULT_API_URL, require_api_url
+from ._common import console, DEFAULT_MELEE_ROOT, DECOMP_CONFIG_DIR, get_agent_context_file, DEFAULT_API_URL, require_api_url, record_match_score, format_match_history
 from src.client.api import _get_agent_id
 
 # Paths - use same agent ID logic as api.py for session isolation
@@ -205,9 +205,18 @@ def scratch_compile(
             100.0 if result.diff_output.current_score == 0
             else (1.0 - result.diff_output.current_score / result.diff_output.max_score) * 100
         )
+
+        # Record match score for history tracking
+        record_match_score(slug, result.diff_output.current_score, result.diff_output.max_score)
+
         console.print(f"[green]Compiled successfully![/green]")
         console.print(f"Match: {match_pct:.1f}%")
         console.print(f"Score: {result.diff_output.current_score}/{result.diff_output.max_score}")
+
+        # Show match history if there's progression
+        history_str = format_match_history(slug)
+        if history_str:
+            console.print(f"[dim]History: {history_str}[/dim]")
 
         if show_diff and result.diff_output:
             _format_diff_output(result.diff_output, max_lines)
@@ -259,7 +268,16 @@ def scratch_update(
             100.0 if result.diff_output.current_score == 0
             else (1.0 - result.diff_output.current_score / result.diff_output.max_score) * 100
         )
+
+        # Record match score for history tracking
+        record_match_score(slug, result.diff_output.current_score, result.diff_output.max_score)
+
         console.print(f"[green]Updated![/green] Match: {match_pct:.1f}%")
+
+        # Show match history if there's progression
+        history_str = format_match_history(slug)
+        if history_str:
+            console.print(f"[dim]History: {history_str}[/dim]")
     else:
         console.print(f"[yellow]Updated but compilation failed[/yellow]")
 
@@ -356,12 +374,16 @@ def scratch_search(
 @scratch_app.command("search-context")
 def scratch_search_context(
     slug: Annotated[str, typer.Argument(help="Scratch slug/ID")],
-    pattern: Annotated[str, typer.Argument(help="Regex pattern to search for")],
+    patterns: Annotated[list[str], typer.Argument(help="Regex pattern(s) to search for")],
     context_lines: Annotated[int, typer.Option("--context", "-C", help="Context lines")] = 3,
-    max_results: Annotated[int, typer.Option("--max", "-n", help="Maximum matches")] = 20,
+    max_results: Annotated[int, typer.Option("--max", "-n", help="Maximum matches per pattern")] = 10,
     api_url: Annotated[str, typer.Option("--api-url", help="Decomp.me API URL")] = DEFAULT_API_URL,
 ):
-    """Search through a scratch's context for patterns."""
+    """Search through a scratch's context for patterns.
+
+    Supports multiple patterns in a single call:
+        melee-agent scratch search-context <slug> "HSD_GObj" "FtCmd2" "ColorOverlay"
+    """
     require_api_url(api_url)
     from src.client import DecompMeAPIClient
 
@@ -370,33 +392,41 @@ def scratch_search_context(
             return await client.get_scratch(slug)
 
     scratch = asyncio.run(get())
-
-    try:
-        regex = re.compile(pattern, re.IGNORECASE)
-    except re.error as e:
-        console.print(f"[red]Invalid regex: {e}[/red]")
-        raise typer.Exit(1)
-
     lines = scratch.context.splitlines()
-    matches = []
 
-    for i, line in enumerate(lines):
-        if regex.search(line):
-            start = max(0, i - context_lines)
-            end = min(len(lines), i + context_lines + 1)
-            matches.append({"line_num": i + 1, "context": lines[start:end], "start": start + 1})
-            if len(matches) >= max_results:
-                break
+    # Process each pattern
+    for pattern_idx, pattern in enumerate(patterns):
+        try:
+            regex = re.compile(pattern, re.IGNORECASE)
+        except re.error as e:
+            console.print(f"[red]Invalid regex '{pattern}': {e}[/red]")
+            continue
 
-    if not matches:
-        console.print(f"[yellow]No matches found for: {pattern}[/yellow]")
-        return
+        matches = []
+        for i, line in enumerate(lines):
+            if regex.search(line):
+                start = max(0, i - context_lines)
+                end = min(len(lines), i + context_lines + 1)
+                matches.append({"line_num": i + 1, "context": lines[start:end], "start": start + 1})
+                if len(matches) >= max_results:
+                    break
 
-    console.print(f"[bold]Found {len(matches)} matches[/bold]\n")
-    for idx, match in enumerate(matches[:10], 1):
-        console.print(f"[cyan]Match {idx}[/cyan] (line {match['line_num']})")
-        for j, line in enumerate(match["context"]):
-            ln = match["start"] + j
-            marker = ">>> " if ln == match["line_num"] else "    "
-            console.print(f"{marker}{ln:5d}: {line}")
-        console.print()
+        # Print separator between patterns if multiple
+        if pattern_idx > 0:
+            console.print("\n" + "─" * 60 + "\n")
+
+        if not matches:
+            console.print(f"[yellow]No matches for: {pattern}[/yellow]")
+            continue
+
+        console.print(f"[bold cyan]Pattern:[/bold cyan] {pattern} [dim]({len(matches)} matches)[/dim]\n")
+        for idx, match in enumerate(matches[:5], 1):  # Show max 5 per pattern
+            console.print(f"[cyan]Match {idx}[/cyan] (line {match['line_num']})")
+            for j, line in enumerate(match["context"]):
+                ln = match["start"] + j
+                marker = ">>> " if ln == match["line_num"] else "    "
+                console.print(f"{marker}{ln:5d}: {line}")
+            console.print()
+
+        if len(matches) > 5:
+            console.print(f"[dim]... and {len(matches) - 5} more matches[/dim]")

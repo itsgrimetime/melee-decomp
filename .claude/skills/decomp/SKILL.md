@@ -50,6 +50,13 @@ melee-agent scratch update <slug> /tmp/decomp_<slug>.c
 melee-agent scratch compile <slug>
 ```
 
+The compile output now shows **match history** tracking your progress:
+```
+Compiled successfully!
+Match: 85.0%
+History: 45% → 71.5% → 85%  # Shows your progress over iterations
+```
+
 **Diff markers:**
 - `r` = register mismatch → reorder variable declarations
 - `i` = offset difference → usually OK, ignore
@@ -76,6 +83,11 @@ melee-agent commit apply <function_name> <slug>            # Then commit
 melee-agent complete mark <function_name> <slug> <pct> --committed
 ```
 
+**Improved commit diagnostics:** When `--dry-run` fails, the CLI now:
+- Suggests missing `#include` statements based on undefined types
+- Detects header signature mismatches (e.g., `UNK_RET` vs actual signature)
+- Shows which header file needs updating
+
 ## Type and Context Tips
 
 **Quick struct lookup:** Use the struct command to find field offsets and known issues:
@@ -83,9 +95,14 @@ melee-agent complete mark <function_name> <slug> <pct> --committed
 melee-agent struct offset 0x1898              # What field is at offset 0x1898?
 melee-agent struct show dmg --offset 0x1890   # Show fields near offset
 melee-agent struct issues                     # Show all known type issues
+melee-agent struct callback FtCmd2            # Look up callback signature
+melee-agent struct callback                   # List all known callback types
 ```
 
-**Search context:** `melee-agent scratch search-context <slug> "pattern"`
+**Search context (supports multiple patterns):**
+```bash
+melee-agent scratch search-context <slug> "HSD_GObj" "FtCmd2" "ColorOverlay"
+```
 
 **File-local definitions:** If a function uses a `static struct` defined in the .c file, you MUST include it in your scratch source - the context only has headers.
 

@@ -1,5 +1,6 @@
-"""Struct commands - lookup struct layouts and field offsets."""
+"""Struct commands - lookup struct layouts, field offsets, and callback signatures."""
 
+import asyncio
 import re
 from pathlib import Path
 from typing import Annotated, Optional
@@ -9,7 +10,7 @@ from rich.table import Table
 from rich.panel import Panel
 from rich.text import Text
 
-from ._common import console, get_agent_melee_root
+from ._common import console, get_agent_melee_root, DEFAULT_API_URL, require_api_url
 
 struct_app = typer.Typer(help="Lookup struct layouts and field offsets")
 
@@ -306,3 +307,152 @@ def struct_offset(
         console.print(f"[red]Offset 0x{target:X} not found in {struct_name}[/red]")
         if fields:
             console.print(f"[dim]Struct range: 0x{fields[0]['offset']:X} - 0x{fields[-1]['offset']:X}[/dim]")
+
+
+# Common callback typedefs used in Melee
+KNOWN_CALLBACKS = {
+    "FtCmd2": {
+        "signature": "void (*FtCmd2)(Fighter_GObj* gobj, CommandInfo* cmd, int arg2)",
+        "header": "<melee/ft/ftcmd.h>",
+        "description": "Command interpreter callback for fighter actions",
+        "example": "static void my_callback(Fighter_GObj* gobj, CommandInfo* cmd, int arg2) {}"
+    },
+    "HSD_GObjEvent": {
+        "signature": "void (*HSD_GObjEvent)(HSD_GObj* gobj)",
+        "header": "<baselib/gobj.h>",
+        "description": "Generic gobj event callback",
+        "example": "static void my_event(HSD_GObj* gobj) {}"
+    },
+    "HSD_GObjPredicate": {
+        "signature": "bool (*HSD_GObjPredicate)(HSD_GObj* gobj)",
+        "header": "<baselib/gobj.h>",
+        "description": "Gobj predicate for filtering",
+        "example": "static bool my_predicate(HSD_GObj* gobj) { return TRUE; }"
+    },
+    "GObj_RenderFunc": {
+        "signature": "void (*GObj_RenderFunc)(HSD_GObj* gobj, int code)",
+        "header": "<baselib/gobj.h>",
+        "description": "Render function callback",
+        "example": "static void my_render(HSD_GObj* gobj, int code) {}"
+    },
+    "HSD_UserDataEvent": {
+        "signature": "void (*HSD_UserDataEvent)(void* user_data)",
+        "header": "<baselib/gobj.h>",
+        "description": "User data cleanup callback",
+        "example": "static void my_cleanup(void* user_data) {}"
+    },
+    "ftCo_Callback": {
+        "signature": "void (*ftCo_Callback)(HSD_GObj* gobj)",
+        "header": "<melee/ft/ftcommon.h>",
+        "description": "Common fighter callback",
+        "example": "static void my_callback(HSD_GObj* gobj) {}"
+    },
+}
+
+
+@struct_app.command("callback")
+def struct_callback(
+    name: Annotated[Optional[str], typer.Argument(help="Callback type name (e.g., FtCmd2)")] = None,
+    search: Annotated[
+        Optional[str], typer.Option("--search", "-s", help="Search for callback by pattern")
+    ] = None,
+    slug: Annotated[
+        Optional[str], typer.Option("--slug", help="Search scratch context for callback type")
+    ] = None,
+    api_url: Annotated[str, typer.Option("--api-url", help="Decomp.me API URL")] = DEFAULT_API_URL,
+):
+    """Look up callback function signatures.
+
+    When a function takes a callback parameter, use this to find the expected signature.
+
+    Examples:
+        melee-agent struct callback FtCmd2
+        melee-agent struct callback --search Cmd
+        melee-agent struct callback --slug abc123 --search lb_80014258
+    """
+    # If slug provided, search context for function and extract callback param
+    if slug:
+        if not search:
+            console.print("[red]--search is required when using --slug[/red]")
+            raise typer.Exit(1)
+
+        require_api_url(api_url)
+        from src.client import DecompMeAPIClient
+
+        async def get():
+            async with DecompMeAPIClient(base_url=api_url) as client:
+                return await client.get_scratch(slug)
+
+        scratch = asyncio.run(get())
+
+        # Search for the function declaration
+        pattern = re.compile(rf'\b{re.escape(search)}\s*\([^)]+\)', re.IGNORECASE)
+        for match in pattern.finditer(scratch.context):
+            # Get surrounding context
+            start = max(0, match.start() - 100)
+            end = min(len(scratch.context), match.end() + 50)
+            snippet = scratch.context[start:end]
+
+            console.print(f"[bold cyan]Found:[/bold cyan] {match.group()}")
+
+            # Try to extract the signature
+            func_text = match.group()
+            console.print(f"\n[dim]{snippet}[/dim]")
+
+            # Look for callback parameters (typedef'd function pointers)
+            for cb_name, cb_info in KNOWN_CALLBACKS.items():
+                if cb_name.lower() in func_text.lower():
+                    console.print(f"\n[bold green]Callback parameter: {cb_name}[/bold green]")
+                    console.print(f"  Signature: [cyan]{cb_info['signature']}[/cyan]")
+                    console.print(f"  Header: [yellow]{cb_info['header']}[/yellow]")
+                    console.print(f"\n  [dim]Example:[/dim]")
+                    console.print(f"  [green]{cb_info['example']}[/green]")
+            console.print()
+        return
+
+    # List known callbacks
+    if not name and not search:
+        table = Table(title="Known Callback Types")
+        table.add_column("Name", style="cyan")
+        table.add_column("Signature", style="green")
+        table.add_column("Description", style="dim")
+
+        for cb_name, cb_info in KNOWN_CALLBACKS.items():
+            table.add_row(cb_name, cb_info["signature"], cb_info["description"])
+
+        console.print(table)
+        console.print("\n[dim]Use 'melee-agent struct callback <name>' for details[/dim]")
+        return
+
+    # Search by pattern
+    if search:
+        matches = {k: v for k, v in KNOWN_CALLBACKS.items() if search.lower() in k.lower()}
+        if not matches:
+            console.print(f"[yellow]No callbacks matching '{search}'[/yellow]")
+            return
+
+        for cb_name, cb_info in matches.items():
+            console.print(f"\n[bold cyan]{cb_name}[/bold cyan]")
+            console.print(f"  Signature: [green]{cb_info['signature']}[/green]")
+            console.print(f"  Header: [yellow]{cb_info['header']}[/yellow]")
+            console.print(f"  {cb_info['description']}")
+            console.print(f"\n  [dim]Example:[/dim]")
+            console.print(f"  [green]{cb_info['example']}[/green]")
+        return
+
+    # Look up specific callback
+    if name not in KNOWN_CALLBACKS:
+        console.print(f"[red]Unknown callback type: {name}[/red]")
+        console.print("[dim]Known types:[/dim]")
+        for cb_name in KNOWN_CALLBACKS:
+            console.print(f"  • {cb_name}")
+        raise typer.Exit(1)
+
+    cb_info = KNOWN_CALLBACKS[name]
+    console.print(f"\n[bold cyan]{name}[/bold cyan]")
+    console.print(f"  Signature: [green]{cb_info['signature']}[/green]")
+    console.print(f"  Header: [yellow]{cb_info['header']}[/yellow]")
+    console.print(f"  {cb_info['description']}")
+    console.print(f"\n[bold]Example implementation:[/bold]")
+    console.print(f"[green]{cb_info['example']}[/green]")
+    console.print(f"\n[dim]Include {cb_info['header']} to use this type.[/dim]")

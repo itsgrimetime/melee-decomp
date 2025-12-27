@@ -12,6 +12,7 @@ from .update import update_source_file
 from .configure import update_configure_py, get_file_path_from_function
 from .format import format_files, verify_clang_format_available
 from .pr import create_pr, switch_to_branch
+from .diagnostics import analyze_commit_error
 
 
 class CommitWorkflow:
@@ -76,10 +77,12 @@ class CommitWorkflow:
 
         # Step 2: Verify file compiles
         print("[2/6] Verifying file compiles...")
-        compiles, error_msg = await self._verify_file_compiles(file_path)
+        compiles, error_msg, full_output = await self._verify_file_compiles(file_path)
         if not compiles:
             print(f"❌ File does not compile after update:")
-            print(f"  {error_msg}")
+            # Show diagnostics with suggestions
+            diagnostic = analyze_commit_error(full_output, file_path)
+            print(diagnostic)
             print("\n  Reverting changes...")
             if await self._revert_file(f"src/{file_path}"):
                 print("  ✓ File reverted to original state")
@@ -141,14 +144,15 @@ class CommitWorkflow:
             print(f"{'='*60}\n")
             return None
 
-    async def _verify_file_compiles(self, file_path: str) -> tuple[bool, str]:
+    async def _verify_file_compiles(self, file_path: str) -> tuple[bool, str, str]:
         """Verify that a source file compiles successfully.
 
         Args:
             file_path: Relative path to the source file (e.g., "melee/lb/lbcommand.c")
 
         Returns:
-            Tuple of (success, error_message). error_message is empty on success.
+            Tuple of (success, error_message, full_output).
+            error_message is empty on success, full_output is for diagnostics.
         """
         # Convert .c to .o for the object file target
         obj_path = f"build/GALE01/src/{file_path}".replace('.c', '.o')
@@ -173,7 +177,7 @@ class CommitWorkflow:
             stdout, stderr = await proc.communicate()
 
             if proc.returncode == 0:
-                return True, ""
+                return True, "", ""
             else:
                 # Extract the actual error message from stderr
                 error_output = stderr.decode() if stderr else stdout.decode() if stdout else "Unknown error"
@@ -181,13 +185,13 @@ class CommitWorkflow:
                 lines = error_output.split('\n')
                 error_lines = [l for l in lines if 'Error:' in l or 'error:' in l.lower()]
                 if error_lines:
-                    return False, '\n'.join(error_lines[:5])  # First 5 error lines
-                return False, error_output[:500]  # First 500 chars of output
+                    return False, '\n'.join(error_lines[:5]), error_output
+                return False, error_output[:500], error_output
 
         except FileNotFoundError:
-            return False, "ninja not found - cannot verify compilation"
+            return False, "ninja not found - cannot verify compilation", ""
         except Exception as e:
-            return False, f"Compilation check failed: {e}"
+            return False, f"Compilation check failed: {e}", ""
 
     async def _revert_file(self, file_path: str) -> bool:
         """Revert a file to its state in git HEAD.

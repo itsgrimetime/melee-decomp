@@ -12,6 +12,7 @@ from rich.console import Console
 
 from ._common import console, DEFAULT_MELEE_ROOT, DECOMP_CONFIG_DIR, DEFAULT_API_URL, require_api_url
 from .complete import _load_completed, _save_completed, _get_current_branch
+from src.commit.diagnostics import analyze_commit_error, check_header_sync, format_signature_mismatch
 
 commit_app = typer.Typer(help="Commit matched functions and create PRs")
 
@@ -109,6 +110,14 @@ def commit_apply(
                 else:
                     console.print("[green]✓ Code validation passed[/green]")
 
+                # Check header signature sync
+                sig_check = check_header_sync(source_code, function_name, melee_root, file_path)
+                if sig_check:
+                    if sig_check["match"]:
+                        console.print("[green]✓ Header signature matches[/green]")
+                    else:
+                        console.print(format_signature_mismatch(sig_check))
+
                 # Show code preview
                 console.print(f"\n[bold]Code to insert ({len(source_code)} chars):[/bold]")
                 preview_lines = source_code.split('\n')
@@ -155,10 +164,10 @@ def commit_apply(
                         console.print("[green]✓ Compilation successful[/green]")
                     else:
                         console.print("[red]✗ Compilation failed:[/red]")
-                        # Extract error lines
-                        for line in result.stderr.split('\n'):
-                            if 'Error:' in line or 'error:' in line.lower():
-                                console.print(f"  {line}")
+                        # Show diagnostics with suggestions
+                        full_output = result.stderr + result.stdout
+                        diagnostic = analyze_commit_error(full_output, file_path)
+                        console.print(diagnostic)
                         raise typer.Exit(1)
 
                 finally:
