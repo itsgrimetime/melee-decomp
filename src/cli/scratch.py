@@ -134,12 +134,74 @@ def scratch_create(
     console.print(f"[green]Created scratch:[/green] {api_url}/scratch/{scratch.slug}")
 
 
+def _extract_text(text_data) -> str:
+    """Extract plain text from diff text data (list of dicts or string)."""
+    if isinstance(text_data, str):
+        return text_data
+    if isinstance(text_data, list):
+        return "".join(item.get("text", "") if isinstance(item, dict) else str(item) for item in text_data)
+    return str(text_data) if text_data else ""
+
+
+def _format_diff_output(diff_output, max_lines: int = 0) -> None:
+    """Format and print the instruction diff."""
+    if not diff_output.rows:
+        console.print("[dim]No diff rows available[/dim]")
+        return
+
+    console.print(f"\n[bold]Instruction Diff:[/bold] (target | current)\n")
+
+    diff_count = 0
+    shown = 0
+
+    for row in diff_output.rows:
+        base_text = ""
+        curr_text = ""
+
+        if row.base and "text" in row.base:
+            base_text = _extract_text(row.base["text"])
+        if row.current and "text" in row.current:
+            curr_text = _extract_text(row.current["text"])
+
+        # Normalize whitespace for comparison
+        base_norm = " ".join(base_text.split())
+        curr_norm = " ".join(curr_text.split())
+
+        is_diff = base_norm != curr_norm
+        if is_diff:
+            diff_count += 1
+
+        # Format output
+        base_display = base_text.strip()[:40].ljust(42)
+        curr_display = curr_text.strip()[:40] if curr_text.strip() else "(missing)"
+
+        if is_diff:
+            console.print(f"[red]{base_display}[/red] | [yellow]{curr_display}[/yellow]")
+        else:
+            console.print(f"[dim]{base_display} | {curr_display}[/dim]")
+
+        shown += 1
+        if max_lines and shown >= max_lines:
+            remaining = len(diff_output.rows) - shown
+            if remaining > 0:
+                console.print(f"[dim]... {remaining} more rows[/dim]")
+            break
+
+    console.print(f"\n[bold]Total differences:[/bold] {diff_count}")
+
+
 @scratch_app.command("compile")
 def scratch_compile(
     slug: Annotated[str, typer.Argument(help="Scratch slug/ID")],
     api_url: Annotated[
         str, typer.Option("--api-url", help="Decomp.me API URL")
     ] = DEFAULT_DECOMP_ME_URL,
+    show_diff: Annotated[
+        bool, typer.Option("--diff", "-d", help="Show instruction diff")
+    ] = False,
+    max_lines: Annotated[
+        int, typer.Option("--max-lines", "-n", help="Max diff lines to show (0=all)")
+    ] = 100,
 ):
     """Compile a scratch and show the diff."""
     _require_api_url(api_url)
@@ -159,6 +221,9 @@ def scratch_compile(
         console.print(f"[green]Compiled successfully![/green]")
         console.print(f"Match: {match_pct:.1f}%")
         console.print(f"Score: {result.diff_output.current_score}/{result.diff_output.max_score}")
+
+        if show_diff and result.diff_output:
+            _format_diff_output(result.diff_output, max_lines)
     else:
         console.print(f"[red]Compilation failed[/red]")
         console.print(result.compiler_output)
