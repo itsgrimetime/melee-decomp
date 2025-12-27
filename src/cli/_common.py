@@ -1,5 +1,6 @@
 """Common utilities and constants for CLI commands."""
 
+import fcntl
 import json
 import os
 import re
@@ -45,23 +46,56 @@ PRODUCTION_DECOMP_ME = "https://decomp.me"
 
 
 def load_completed_functions() -> dict:
-    """Load completed functions tracking file."""
+    """Load completed functions tracking file with shared lock."""
     completed_path = Path(DECOMP_COMPLETED_FILE)
     if completed_path.exists():
         try:
             with open(completed_path, 'r') as f:
-                return json.load(f)
+                fcntl.flock(f.fileno(), fcntl.LOCK_SH)
+                try:
+                    return json.load(f)
+                finally:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
         except (json.JSONDecodeError, IOError):
             pass
     return {}
 
 
 def save_completed_functions(data: dict) -> None:
-    """Save completed functions tracking file."""
+    """Save completed functions tracking file with exclusive lock.
+
+    Uses atomic write pattern: lock, read current, merge, write.
+    This prevents race conditions when multiple agents write simultaneously.
+    """
     completed_path = Path(DECOMP_COMPLETED_FILE)
     completed_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(completed_path, 'w') as f:
-        json.dump(data, f, indent=2)
+
+    # Use a lock file for atomic read-modify-write
+    lock_path = completed_path.with_suffix('.lock')
+
+    with open(lock_path, 'w') as lock_file:
+        # Acquire exclusive lock (blocks until available)
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            # Read current data (another process may have written)
+            current_data = {}
+            if completed_path.exists():
+                try:
+                    with open(completed_path, 'r') as f:
+                        current_data = json.load(f)
+                except (json.JSONDecodeError, IOError):
+                    pass
+
+            # Merge: incoming data takes precedence, but preserve entries not in incoming
+            merged_data = {**current_data, **data}
+
+            # Write atomically using temp file + rename
+            temp_path = completed_path.with_suffix('.tmp')
+            with open(temp_path, 'w') as f:
+                json.dump(merged_data, f, indent=2)
+            temp_path.rename(completed_path)
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def load_slug_map() -> dict:
@@ -118,6 +152,45 @@ def load_all_tracking_data(melee_root: Path) -> dict:
             data["scratches_txt_slugs"].add(match.group(2))
 
     return data
+
+
+def parse_scratches_txt(scratches_file: Path) -> list[dict]:
+    """Parse scratches.txt into a list of structured entries.
+
+    Returns list of dicts with: function, match_percent, slug, author, status
+    """
+    entries = []
+    if not scratches_file.exists():
+        return entries
+
+    content = scratches_file.read_text()
+
+    # Pattern to match entries like:
+    # func_name = 100%:MATCHED; // author:agent id:abc123 updated:2025-01-01T00:00:00Z
+    # func_name = 95.5%:TODO; // id:xyz789
+    pattern = re.compile(
+        r'^(?P<name>\w+)\s*=\s*(?P<match>[\d.]+|OK)%?:(?P<status>\w+);\s*//'
+        r'(?:\s*author:(?P<author>\S+))?'
+        r'(?:\s*id:(?P<slug>\w+))?',
+        re.MULTILINE
+    )
+
+    for match in pattern.finditer(content):
+        match_str = match.group('match')
+        try:
+            pct = 100.0 if match_str == 'OK' else float(match_str)
+        except ValueError:
+            pct = 0.0
+
+        entries.append({
+            'function': match.group('name'),
+            'match_percent': pct,
+            'status': match.group('status'),
+            'author': match.group('author') or 'unknown',
+            'slug': match.group('slug') or '',
+        })
+
+    return entries
 
 
 def categorize_functions(data: dict, check_pr_status: bool = False) -> dict:

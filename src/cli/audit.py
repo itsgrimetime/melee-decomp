@@ -1,9 +1,12 @@
 """Audit commands - audit and recover tracked work."""
 
 import json
+import re
+import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Optional
 
 import typer
 from rich.table import Table
@@ -13,6 +16,11 @@ from ._common import (
     DEFAULT_MELEE_ROOT,
     load_all_tracking_data,
     categorize_functions,
+    load_completed_functions,
+    save_completed_functions,
+    load_slug_map,
+    parse_scratches_txt,
+    extract_pr_info,
 )
 
 audit_app = typer.Typer(help="Audit and recover tracked work")
@@ -213,6 +221,29 @@ def audit_recover(
             with open(scratches_file, 'a') as f:
                 f.write("\n" + "\n".join(lines_to_add) + "\n")
             console.print(f"\n[green]Added {len(lines_to_add)} entries to scratches.txt[/green]")
+
+            # Also update completed_functions.json
+            completed = load_completed_functions()
+            updated_count = 0
+            for entry in entries:
+                func = entry["function"]
+                if func not in completed:
+                    completed[func] = {
+                        "match_percent": entry["match_percent"],
+                        "scratch_slug": entry.get("local_slug", ""),
+                        "production_slug": entry["production_slug"],
+                        "committed": False,
+                        "notes": "Recovered via audit recover --add-to-file",
+                        "timestamp": time.time(),
+                    }
+                    updated_count += 1
+                elif not completed[func].get("production_slug"):
+                    completed[func]["production_slug"] = entry["production_slug"]
+                    updated_count += 1
+
+            if updated_count > 0:
+                save_completed_functions(completed)
+                console.print(f"[green]Updated {updated_count} entries in completed_functions.json[/green]")
         else:
             console.print(f"\n[cyan]Would add {len(lines_to_add)} entries (dry run)[/cyan]")
 
@@ -341,3 +372,420 @@ def audit_list(
     console.print(table)
     if len(entries) > 50:
         console.print(f"[dim]... and {len(entries) - 50} more[/dim]")
+
+
+def _list_github_prs(repo: str, author: str, state: str, limit: int) -> list[dict]:
+    """List PRs from GitHub using gh CLI."""
+    try:
+        cmd = [
+            "gh", "pr", "list",
+            "--repo", repo,
+            "--author", author,
+            "--state", state,
+            "--limit", str(limit),
+            "--json", "number,title,body,state,mergedAt,url"
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        if result.returncode != 0:
+            return []
+        return json.loads(result.stdout)
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError):
+        return []
+
+
+def _extract_functions_from_pr(pr: dict) -> list[dict]:
+    """Extract function matches from PR body and title.
+
+    Looks for patterns like:
+    - func_name (100%)
+    - Match: func_name
+    - func_name = 100%
+    """
+    functions = []
+    seen = set()
+
+    text = (pr.get("title", "") + "\n" + pr.get("body", "") or "")
+
+    # Pattern 1: func_name (100%) or func_name (95.5%)
+    for match in re.finditer(r'(\w+)\s*\((\d+(?:\.\d+)?%)\)', text):
+        func_name = match.group(1)
+        pct_str = match.group(2).rstrip('%')
+        if func_name not in seen:
+            seen.add(func_name)
+            functions.append({
+                "function": func_name,
+                "match_percent": float(pct_str),
+            })
+
+    # Pattern 2: Match: func_name or Match func_name
+    for match in re.finditer(r'[Mm]atch[:\s]+(\w+)', text):
+        func_name = match.group(1)
+        if func_name not in seen:
+            seen.add(func_name)
+            functions.append({
+                "function": func_name,
+                "match_percent": 100.0,  # Assume 100% if just "Match:"
+            })
+
+    # Pattern 3: func_name = 100% (scratches.txt format)
+    for match in re.finditer(r'^(\w+)\s*=\s*(\d+(?:\.\d+)?)%', text, re.MULTILINE):
+        func_name = match.group(1)
+        pct_str = match.group(2)
+        if func_name not in seen:
+            seen.add(func_name)
+            functions.append({
+                "function": func_name,
+                "match_percent": float(pct_str),
+            })
+
+    return functions
+
+
+@audit_app.command("discover-prs")
+def audit_discover_prs(
+    author: Annotated[
+        str, typer.Option("--author", "-a", help="GitHub username to search for")
+    ] = "itsgrimetime",
+    repo: Annotated[
+        str, typer.Option("--repo", "-r", help="GitHub repository")
+    ] = "doldecomp/melee",
+    state: Annotated[
+        str, typer.Option("--state", "-s", help="PR state: open, merged, closed, all")
+    ] = "all",
+    limit: Annotated[
+        int, typer.Option("--limit", "-n", help="Maximum PRs to scan")
+    ] = 50,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Show what would be linked")
+    ] = False,
+    output_json: Annotated[
+        bool, typer.Option("--json", help="Output as JSON")
+    ] = False,
+):
+    """Discover functions from GitHub PRs and link them.
+
+    Scans PRs by the specified author and parses function names from
+    PR titles and bodies. Updates completed_functions.json with PR associations.
+
+    Example: melee-agent audit discover-prs --author itsgrimetime --state merged
+    """
+    console.print(f"[bold]Scanning GitHub PRs[/bold]")
+    console.print(f"  Repo: {repo}")
+    console.print(f"  Author: {author}")
+    console.print(f"  State: {state}")
+    console.print()
+
+    # Handle 'all' state by querying both merged and open
+    if state == "all":
+        states_to_query = ["merged", "open"]
+    else:
+        states_to_query = [state]
+
+    all_prs = []
+    for s in states_to_query:
+        prs = _list_github_prs(repo, author, s, limit)
+        for pr in prs:
+            pr["_queried_state"] = s  # Track which query found it
+        all_prs.extend(prs)
+
+    if not all_prs:
+        console.print("[yellow]No PRs found or gh CLI not available[/yellow]")
+        console.print("[dim]Make sure 'gh' CLI is installed and authenticated[/dim]")
+        return
+
+    console.print(f"Found {len(all_prs)} PRs\n")
+
+    completed = load_completed_functions()
+    results = []
+    total_linked = 0
+    total_updated = 0
+
+    for pr in all_prs:
+        pr_url = pr.get("url", "")
+        pr_number = pr.get("number", 0)
+        pr_state = pr.get("state", "UNKNOWN")
+        is_merged = pr.get("mergedAt") is not None or pr.get("_queried_state") == "merged"
+
+        functions = _extract_functions_from_pr(pr)
+        if not functions:
+            continue
+
+        linked_funcs = []
+        for func_info in functions:
+            func = func_info["function"]
+            if func in completed:
+                current = completed[func]
+                needs_update = False
+
+                # Link if no PR currently
+                if not current.get("pr_url"):
+                    current["pr_url"] = pr_url
+                    current["pr_number"] = pr_number
+                    current["pr_repo"] = repo
+                    needs_update = True
+                    total_linked += 1
+
+                # Update state if merged
+                if is_merged and current.get("pr_url") == pr_url:
+                    if current.get("pr_state") != "MERGED":
+                        current["pr_state"] = "MERGED"
+                        needs_update = True
+                        total_updated += 1
+
+                if needs_update:
+                    linked_funcs.append(func)
+
+        if linked_funcs:
+            results.append({
+                "pr_number": pr_number,
+                "pr_url": pr_url,
+                "state": "MERGED" if is_merged else pr_state,
+                "functions": linked_funcs,
+            })
+
+    if output_json:
+        print(json.dumps(results, indent=2))
+        return
+
+    if results:
+        for r in results:
+            state_color = "green" if r["state"] == "MERGED" else "cyan"
+            console.print(f"[bold]PR #{r['pr_number']}[/bold] [{state_color}]{r['state']}[/{state_color}]")
+            console.print(f"  {r['pr_url']}")
+            for func in r["functions"][:5]:
+                console.print(f"    → {func}")
+            if len(r["functions"]) > 5:
+                console.print(f"    [dim]... and {len(r['functions']) - 5} more[/dim]")
+            console.print()
+
+    console.print(f"[bold]Summary:[/bold]")
+    console.print(f"  PRs scanned: {len(all_prs)}")
+    console.print(f"  Functions newly linked: {total_linked}")
+    console.print(f"  Functions marked merged: {total_updated}")
+
+    if not dry_run and (total_linked > 0 or total_updated > 0):
+        save_completed_functions(completed)
+        console.print(f"\n[green]Saved changes to completed_functions.json[/green]")
+    elif dry_run:
+        console.print(f"\n[cyan](dry run - no changes saved)[/cyan]")
+
+
+@audit_app.command("rebuild")
+def audit_rebuild(
+    melee_root: Annotated[
+        Path, typer.Option("--melee-root", "-m", help="Path to melee submodule")
+    ] = DEFAULT_MELEE_ROOT,
+    author: Annotated[
+        str, typer.Option("--author", "-a", help="Author for GitHub queries")
+    ] = "itsgrimetime",
+    skip_github: Annotated[
+        bool, typer.Option("--skip-github", help="Skip GitHub PR discovery")
+    ] = False,
+    skip_git: Annotated[
+        bool, typer.Option("--skip-git", help="Skip local git commit analysis")
+    ] = False,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Show what would change")
+    ] = False,
+    verbose: Annotated[
+        bool, typer.Option("--verbose", "-v", help="Show detailed progress")
+    ] = False,
+    output_json: Annotated[
+        bool, typer.Option("--json", help="Output summary as JSON")
+    ] = False,
+):
+    """Rebuild tracking data from all sources.
+
+    Reconciles state from:
+    - slug_map.json (production slug mappings)
+    - scratches.txt (entries in the repo file)
+    - GitHub PRs (if --skip-github not set)
+    - Local git commits (if --skip-git not set)
+
+    Updates completed_functions.json with consolidated data.
+
+    Example: melee-agent audit rebuild --dry-run --verbose
+    """
+    stats = {
+        "slug_map_merged": 0,
+        "scratches_txt_merged": 0,
+        "github_prs_found": 0,
+        "github_functions_linked": 0,
+        "git_committed_found": 0,
+        "errors": [],
+    }
+
+    completed = load_completed_functions()
+    initial_count = len(completed)
+
+    if verbose:
+        console.print("[bold]Phase 1: Merging from slug_map.json[/bold]")
+
+    # Step 1: Merge from slug_map
+    slug_map = load_slug_map()
+    for prod_slug, info in slug_map.items():
+        func = info.get("function")
+        if not func:
+            continue
+
+        if func not in completed:
+            completed[func] = {
+                "match_percent": info.get("match_percent", 100.0),
+                "scratch_slug": info.get("local_slug", ""),
+                "production_slug": prod_slug,
+                "committed": False,
+                "notes": "Recovered from slug_map",
+                "timestamp": time.time(),
+            }
+            stats["slug_map_merged"] += 1
+            if verbose:
+                console.print(f"  + {func} (from slug_map)")
+        elif not completed[func].get("production_slug"):
+            completed[func]["production_slug"] = prod_slug
+            completed[func]["scratch_slug"] = info.get("local_slug",
+                completed[func].get("scratch_slug", ""))
+            stats["slug_map_merged"] += 1
+            if verbose:
+                console.print(f"  ~ {func} (added production_slug)")
+
+    if verbose:
+        console.print(f"  Merged {stats['slug_map_merged']} entries\n")
+        console.print("[bold]Phase 2: Merging from scratches.txt[/bold]")
+
+    # Step 2: Merge from scratches.txt
+    scratches_file = melee_root / "config" / "GALE01" / "scratches.txt"
+    scratches_entries = parse_scratches_txt(scratches_file)
+
+    for entry in scratches_entries:
+        func = entry["function"]
+        pct = entry["match_percent"]
+
+        if pct < 95:
+            continue  # Skip low-match entries
+
+        if func not in completed:
+            completed[func] = {
+                "match_percent": pct,
+                "scratch_slug": entry.get("slug", ""),
+                "production_slug": entry.get("slug", ""),  # Assume production slug in file
+                "committed": False,
+                "notes": "Recovered from scratches.txt",
+                "timestamp": time.time(),
+            }
+            stats["scratches_txt_merged"] += 1
+            if verbose:
+                console.print(f"  + {func} ({pct}%)")
+        elif completed[func].get("match_percent", 0) < pct:
+            # Update if scratches.txt has higher match
+            completed[func]["match_percent"] = pct
+            stats["scratches_txt_merged"] += 1
+            if verbose:
+                console.print(f"  ~ {func} (updated to {pct}%)")
+
+    if verbose:
+        console.print(f"  Merged {stats['scratches_txt_merged']} entries\n")
+
+    # Step 3: Discover from GitHub
+    if not skip_github:
+        if verbose:
+            console.print("[bold]Phase 3: Discovering from GitHub PRs[/bold]")
+
+        try:
+            for state in ["merged", "open"]:
+                prs = _list_github_prs("doldecomp/melee", author, state, 100)
+                stats["github_prs_found"] += len(prs)
+
+                for pr in prs:
+                    pr_url = pr.get("url", "")
+                    pr_number = pr.get("number", 0)
+                    is_merged = pr.get("mergedAt") is not None or state == "merged"
+
+                    functions = _extract_functions_from_pr(pr)
+                    for func_info in functions:
+                        func = func_info["function"]
+                        if func in completed:
+                            current = completed[func]
+                            if not current.get("pr_url"):
+                                current["pr_url"] = pr_url
+                                current["pr_number"] = pr_number
+                                current["pr_repo"] = "doldecomp/melee"
+                                stats["github_functions_linked"] += 1
+                                if verbose:
+                                    console.print(f"  → {func} linked to PR #{pr_number}")
+
+                            if is_merged and current.get("pr_state") != "MERGED":
+                                current["pr_state"] = "MERGED"
+
+            if verbose:
+                console.print(f"  Found {stats['github_prs_found']} PRs, linked {stats['github_functions_linked']} functions\n")
+        except Exception as e:
+            stats["errors"].append(f"GitHub: {e}")
+            if verbose:
+                console.print(f"  [yellow]Error: {e}[/yellow]\n")
+
+    # Step 4: Analyze git commits
+    if not skip_git:
+        if verbose:
+            console.print("[bold]Phase 4: Analyzing git commits[/bold]")
+
+        try:
+            # Get list of functions that might have commits
+            functions_to_check = [
+                func for func, info in completed.items()
+                if info.get("match_percent", 0) >= 95 and not info.get("committed")
+            ]
+
+            for func in functions_to_check:
+                # Check if function appears in commit messages in melee repo
+                cmd = [
+                    "git", "log", "--oneline", "--all", "-1",
+                    f"--grep={func}", "--", "src/melee/"
+                ]
+                try:
+                    result = subprocess.run(
+                        cmd, cwd=melee_root, capture_output=True, text=True, timeout=5
+                    )
+                    if result.returncode == 0 and result.stdout.strip():
+                        completed[func]["committed"] = True
+                        stats["git_committed_found"] += 1
+                        if verbose:
+                            commit = result.stdout.strip().split()[0]
+                            console.print(f"  ✓ {func} (commit {commit})")
+                except subprocess.TimeoutExpired:
+                    pass
+
+            if verbose:
+                console.print(f"  Found {stats['git_committed_found']} committed functions\n")
+        except Exception as e:
+            stats["errors"].append(f"Git: {e}")
+            if verbose:
+                console.print(f"  [yellow]Error: {e}[/yellow]\n")
+
+    # Output results
+    if output_json:
+        print(json.dumps(stats, indent=2))
+        return
+
+    console.print("[bold]Rebuild Summary[/bold]")
+    console.print(f"  Initial entries: {initial_count}")
+    console.print(f"  Final entries: {len(completed)}")
+    console.print()
+    console.print(f"  From slug_map: {stats['slug_map_merged']}")
+    console.print(f"  From scratches.txt: {stats['scratches_txt_merged']}")
+    if not skip_github:
+        console.print(f"  GitHub PRs scanned: {stats['github_prs_found']}")
+        console.print(f"  Functions linked to PRs: {stats['github_functions_linked']}")
+    if not skip_git:
+        console.print(f"  Functions marked committed: {stats['git_committed_found']}")
+
+    if stats["errors"]:
+        console.print()
+        console.print("[yellow]Errors encountered:[/yellow]")
+        for err in stats["errors"]:
+            console.print(f"  - {err}")
+
+    if not dry_run:
+        save_completed_functions(completed)
+        console.print(f"\n[green]Saved changes to completed_functions.json[/green]")
+    else:
+        console.print(f"\n[cyan](dry run - no changes saved)[/cyan]")
