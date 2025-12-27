@@ -30,6 +30,7 @@ from .sync import sync_app
 from .pr import pr_app
 from .audit import audit_app
 from .hook import hook_app
+from .struct import struct_app
 from .compilers import list_compilers
 
 # Import common utilities for backward compatibility
@@ -56,6 +57,7 @@ app.add_typer(sync_app, name="sync")
 app.add_typer(pr_app, name="pr")
 app.add_typer(audit_app, name="audit")
 app.add_typer(hook_app, name="hook")
+app.add_typer(struct_app, name="struct")
 
 # Register standalone commands
 app.command("compilers")(list_compilers)

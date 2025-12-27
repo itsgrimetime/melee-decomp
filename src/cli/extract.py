@@ -34,6 +34,55 @@ def _get_context_file() -> Path:
 extract_app = typer.Typer(help="Extract and list unmatched functions")
 
 
+def _compute_recommendation_score(func) -> float:
+    """Compute a recommendation score for function selection.
+
+    Higher score = better candidate for matching.
+    Factors:
+    - Smaller functions are easier (50-300 bytes ideal)
+    - Low match % means more room for improvement
+    - Certain modules (ft/, lb/) are better documented
+    """
+    score = 100.0
+
+    # Size scoring: prefer 50-300 bytes
+    if func.size_bytes < 50:
+        score -= 20  # Too small, likely trivial
+    elif func.size_bytes <= 150:
+        score += 20  # Ideal small
+    elif func.size_bytes <= 300:
+        score += 10  # Good medium
+    elif func.size_bytes <= 500:
+        score += 0   # Acceptable
+    elif func.size_bytes <= 800:
+        score -= 10  # Getting complex
+    else:
+        score -= 30  # Very complex
+
+    # Match % scoring: prefer lower (more room to improve)
+    if func.current_match < 0.10:
+        score += 15  # Fresh start
+    elif func.current_match < 0.30:
+        score += 10  # Good candidate
+    elif func.current_match < 0.50:
+        score += 5   # Some work done
+    elif func.current_match >= 0.95:
+        score -= 40  # Already nearly done, likely stuck
+
+    # Module scoring: prefer well-documented modules
+    path = func.file_path.lower()
+    if "/ft/" in path or "/lb/" in path:
+        score += 15  # Fighter/Library - well documented
+    elif "/gr/" in path:
+        score += 10  # Ground - good patterns
+    elif "/it/" in path:
+        score += 5   # Item - reasonable
+    elif "/mn/" in path or "/db/" in path:
+        score -= 10  # Menu/Debug - less common
+
+    return score
+
+
 @extract_app.command("list")
 def extract_list(
     melee_root: Annotated[
@@ -63,6 +112,15 @@ def extract_list(
     show_status: Annotated[
         bool, typer.Option("--show-status", help="Show object status column (Matching/NonMatching)")
     ] = False,
+    module: Annotated[
+        Optional[str], typer.Option("--module", help="Filter by module path (e.g., ft, lb, gr, it)")
+    ] = None,
+    sort_by: Annotated[
+        str, typer.Option("--sort", help="Sort by: score (recommended), size, match")
+    ] = "score",
+    show_score: Annotated[
+        bool, typer.Option("--show-score", help="Show recommendation score column")
+    ] = False,
 ):
     """List unmatched functions from the melee project.
 
@@ -72,6 +130,9 @@ def extract_list(
     Use --matching-only to only show functions in files already marked as Matching.
     These are the only functions that can be safely committed without linker errors
     from NonMatching file dependencies.
+
+    Use --sort score to sort by recommendation score (best candidates first).
+    Use --module ft to filter to fighter module only.
     """
     from src.extractor import extract_unmatched_functions
 
@@ -88,21 +149,39 @@ def extract_list(
             except (json.JSONDecodeError, IOError):
                 pass
 
-    # Filter and limit functions
+    # Filter functions
     functions = [
         f for f in result.functions
         if min_match <= f.current_match <= max_match
         and min_size <= f.size_bytes <= max_size
         and f.name not in completed
         and (not matching_only or f.object_status == "Matching")
+        and (not module or f"/{module}/" in f.file_path.lower())
     ]
-    functions = sorted(functions, key=lambda f: -f.current_match)[:limit]
 
-    table = Table(title="Unmatched Functions")
+    # Sort functions
+    if sort_by == "score":
+        functions = sorted(functions, key=lambda f: -_compute_recommendation_score(f))
+    elif sort_by == "size":
+        functions = sorted(functions, key=lambda f: f.size_bytes)
+    elif sort_by == "match":
+        functions = sorted(functions, key=lambda f: -f.current_match)
+    else:
+        functions = sorted(functions, key=lambda f: -f.current_match)
+
+    functions = functions[:limit]
+
+    # Build table
+    title = "Unmatched Functions"
+    if sort_by == "score":
+        title += " (sorted by recommendation)"
+    table = Table(title=title)
     table.add_column("Name", style="cyan")
     table.add_column("File", style="green")
     table.add_column("Match %", justify="right")
     table.add_column("Size", justify="right")
+    if show_score:
+        table.add_column("Score", justify="right", style="magenta")
     if show_status:
         table.add_column("Status", style="yellow")
     table.add_column("Address", style="dim")
@@ -114,6 +193,9 @@ def extract_list(
             f"{func.current_match * 100:.1f}%",
             f"{func.size_bytes}",
         ]
+        if show_score:
+            score = _compute_recommendation_score(func)
+            row.append(f"{score:.0f}")
         if show_status:
             row.append(func.object_status)
         row.append(func.address)
@@ -122,7 +204,8 @@ def extract_list(
     console.print(table)
     excluded_msg = f", {len(completed)} completed excluded" if completed else ""
     matching_msg = ", Matching files only" if matching_only else ""
-    console.print(f"\n[dim]Found {len(functions)} functions (from {result.total_functions} total{excluded_msg}{matching_msg})[/dim]")
+    module_msg = f", {module}/ only" if module else ""
+    console.print(f"\n[dim]Found {len(functions)} functions (from {result.total_functions} total{excluded_msg}{matching_msg}{module_msg})[/dim]")
 
 
 @extract_app.command("get")
