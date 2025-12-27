@@ -32,6 +32,7 @@ from .audit import audit_app
 from .hook import hook_app
 from .struct import struct_app
 from .stub import stub_app
+from .worktree import worktree_app
 from .compilers import list_compilers
 
 # Import common utilities for backward compatibility
@@ -60,6 +61,7 @@ app.add_typer(audit_app, name="audit")
 app.add_typer(hook_app, name="hook")
 app.add_typer(struct_app, name="struct")
 app.add_typer(stub_app, name="stub")
+app.add_typer(worktree_app, name="worktree")
 
 # Register standalone commands
 app.command("compilers")(list_compilers)
