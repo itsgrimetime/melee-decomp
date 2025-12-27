@@ -152,6 +152,9 @@ def pr_status(
     no_pr = []
 
     for func, info in completed.items():
+        # Skip functions already in upstream (not our work)
+        if info.get("already_in_upstream"):
+            continue
         pr_url = info.get("pr_url")
         if pr_url:
             if pr_url not in by_pr:
