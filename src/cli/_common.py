@@ -162,25 +162,14 @@ def _create_agent_worktree(agent_id: str, worktree_path: Path) -> Path:
                 orig_dst.symlink_to(orig_src.resolve())
                 console.print(f"[dim]Linked orig/ from main melee[/dim]")
 
-        # Run configure.py + ninja to set up build (generates ctx.c)
-        console.print(f"[dim]Building worktree (this takes ~10s)...[/dim]")
-        result = subprocess.run(
-            ["python", "configure.py"],
-            cwd=worktree_path,
-            capture_output=True, text=True
-        )
-        if result.returncode == 0:
-            result = subprocess.run(
-                ["ninja"],
-                cwd=worktree_path,
-                capture_output=True, text=True
-            )
-            if result.returncode == 0:
-                console.print(f"[dim]Build complete[/dim]")
-            else:
-                console.print(f"[yellow]Warning: ninja failed, will use main melee context[/yellow]")
-        else:
-            console.print(f"[yellow]Warning: configure.py failed, will use main melee context[/yellow]")
+        # Copy ctx.c from main melee (it's the same - just preprocessed headers)
+        main_ctx = DEFAULT_MELEE_ROOT / "build" / "ctx.c"
+        if main_ctx.exists():
+            (worktree_path / "build").mkdir(exist_ok=True)
+            worktree_ctx = worktree_path / "build" / "ctx.c"
+            import shutil
+            shutil.copy2(main_ctx, worktree_ctx)
+            console.print(f"[dim]Copied context file from main melee[/dim]")
 
         return worktree_path
 
