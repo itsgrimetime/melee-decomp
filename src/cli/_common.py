@@ -148,8 +148,6 @@ def _create_agent_worktree(agent_id: str, worktree_path: Path) -> Path:
                 capture_output=True, text=True, check=True
             )
 
-        console.print(f"[dim]Created worktree for agent {agent_id}[/dim]")
-
         # Symlink orig/ directory (contains original game files needed for build)
         # Remove the git-checked-out orig/ (just has .gitkeep) and replace with symlink
         orig_src = DEFAULT_MELEE_ROOT / "orig"
@@ -160,7 +158,6 @@ def _create_agent_worktree(agent_id: str, worktree_path: Path) -> Path:
                 shutil.rmtree(orig_dst)
             if not orig_dst.exists():
                 orig_dst.symlink_to(orig_src.resolve())
-                console.print(f"[dim]Linked orig/ from main melee[/dim]")
 
         # Copy ctx.c from main melee (it's the same - just preprocessed headers)
         main_ctx = DEFAULT_MELEE_ROOT / "build" / "ctx.c"
@@ -169,7 +166,11 @@ def _create_agent_worktree(agent_id: str, worktree_path: Path) -> Path:
             worktree_ctx = worktree_path / "build" / "ctx.c"
             import shutil
             shutil.copy2(main_ctx, worktree_ctx)
-            console.print(f"[dim]Copied context file from main melee[/dim]")
+
+        # Print clear instructions about the worktree
+        console.print(f"[bold cyan]WORKTREE CREATED:[/bold cyan] {worktree_path}")
+        console.print(f"[bold cyan]BRANCH:[/bold cyan] {branch_name}")
+        console.print(f"[yellow]Run all git commands in the worktree, not in melee/[/yellow]")
 
         return worktree_path
 
