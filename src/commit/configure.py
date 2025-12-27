@@ -71,7 +71,7 @@ async def get_file_path_from_function(
     """Find the file path containing a specific function.
 
     This searches through the melee source directory to find which file
-    contains the given function.
+    contains the given function (either as a definition or a stub marker).
 
     Args:
         function_name: Name of the function to search for
@@ -97,12 +97,19 @@ async def get_file_path_from_function(
                 # Pattern matches function definitions like:
                 # - void FunctionName(
                 # - static s32 FunctionName(
-                pattern = re.compile(
+                definition_pattern = re.compile(
                     rf'^\s*(?:static\s+)?(?:inline\s+)?[\w\*\s]+\s+{re.escape(function_name)}\s*\(',
                     re.MULTILINE
                 )
 
-                if pattern.search(content):
+                # Also look for stub markers like:
+                # /// #FunctionName
+                stub_pattern = re.compile(
+                    rf'^///\s*#\s*{re.escape(function_name)}\s*$',
+                    re.MULTILINE
+                )
+
+                if definition_pattern.search(content) or stub_pattern.search(content):
                     # Return path relative to src directory
                     rel_path = c_file.relative_to(src_dir)
                     return str(rel_path)

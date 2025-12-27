@@ -126,7 +126,7 @@ async def update_source_file(
     melee_root: Path,
     extract_function_only: bool = False,
 ) -> bool:
-    """Replace function implementation in source file.
+    """Replace function implementation or stub in source file.
 
     Args:
         file_path: Relative path to the C file (e.g., "melee/lb/lbcommand.c")
@@ -153,46 +153,59 @@ async def update_source_file(
         # Read the current file content
         content = full_path.read_text(encoding='utf-8')
 
-        # Find the function to replace
-        # Pattern matches function definitions with various return types and modifiers
-        # Handles cases like:
-        # - void FunctionName(args)
-        # - static inline bool FunctionName(args)
-        # - s32 FunctionName(args)
-        function_pattern = re.compile(
-            rf'^([^\n]*?)\s+{re.escape(function_name)}\s*\([^)]*\)[^{{]*\{{',
+        # First, try to find stub marker (/// #FunctionName)
+        stub_pattern = re.compile(
+            rf'^///\s*#\s*{re.escape(function_name)}\s*$',
             re.MULTILINE
         )
+        stub_match = stub_pattern.search(content)
 
-        match = function_pattern.search(content)
-        if not match:
-            print(f"Error: Function '{function_name}' not found in {file_path}")
-            return False
+        if stub_match:
+            # Replace stub marker with new code
+            func_start = stub_match.start()
+            func_end = stub_match.end()
+            print(f"Found stub marker for '{function_name}', replacing with implementation")
+        else:
+            # Try to find actual function definition
+            # Pattern matches function definitions with various return types and modifiers
+            # Handles cases like:
+            # - void FunctionName(args)
+            # - static inline bool FunctionName(args)
+            # - s32 FunctionName(args)
+            function_pattern = re.compile(
+                rf'^([^\n]*?)\s+{re.escape(function_name)}\s*\([^)]*\)[^{{]*\{{',
+                re.MULTILINE
+            )
 
-        # Find the start of the function
-        func_start = match.start()
+            match = function_pattern.search(content)
+            if not match:
+                print(f"Error: Function '{function_name}' not found in {file_path}")
+                return False
 
-        # Find the matching closing brace
-        brace_count = 0
-        func_end = None
-        in_function = False
+            # Find the start of the function
+            func_start = match.start()
 
-        for i in range(match.end() - 1, len(content)):
-            if content[i] == '{':
-                brace_count += 1
-                in_function = True
-            elif content[i] == '}':
-                brace_count -= 1
-                if in_function and brace_count == 0:
-                    func_end = i + 1
-                    break
+            # Find the matching closing brace
+            brace_count = 0
+            func_end = None
+            in_function = False
 
-        if func_end is None:
-            print(f"Error: Could not find closing brace for function '{function_name}'")
-            return False
+            for i in range(match.end() - 1, len(content)):
+                if content[i] == '{':
+                    brace_count += 1
+                    in_function = True
+                elif content[i] == '}':
+                    brace_count -= 1
+                    if in_function and brace_count == 0:
+                        func_end = i + 1
+                        break
 
-        # Extract the old function (for reference/logging)
-        old_function = content[func_start:func_end]
+            if func_end is None:
+                print(f"Error: Could not find closing brace for function '{function_name}'")
+                return False
+
+            # Extract the old function (for reference/logging)
+            old_function = content[func_start:func_end]
 
         # Process new_code based on extraction mode
         new_code = new_code.strip()

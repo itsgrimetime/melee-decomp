@@ -116,8 +116,8 @@ melee-agent scratch create <function_name>
 # Get scratch details
 melee-agent scratch get <slug>
 
-# Update scratch source from file
-melee-agent scratch update <slug> /tmp/decomp_test.c
+# Update scratch source from file (use unique filename per scratch)
+melee-agent scratch update <slug> /tmp/decomp_<slug>.c
 
 # Compile and show match percentage
 melee-agent scratch compile <slug>
@@ -258,11 +258,11 @@ DECOMP_AGENT_ID=agent-1
 
 5. **Iterate on the decompilation**
    ```bash
-   # Write code to temp file
-   echo 'void MyFunc(void) { ... }' > /tmp/decomp_test.c
+   # Write code to temp file (use slug in filename to avoid conflicts)
+   echo 'void MyFunc(void) { ... }' > /tmp/decomp_<slug>.c
 
    # Update and compile
-   melee-agent scratch update <slug> /tmp/decomp_test.c
+   melee-agent scratch update <slug> /tmp/decomp_<slug>.c
    melee-agent scratch compile <slug> --diff
    ```
 

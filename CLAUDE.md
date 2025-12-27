@@ -75,7 +75,7 @@ DECOMP_AGENT_ID=agent-1                  # Optional: manual agent isolation
 2. **Claim it**: `claim add <func>` (prevents duplicate work)
 3. **Create scratch**: `scratch create <func>`
 4. **Read source**: Check `melee/src/` for existing code + context
-5. **Iterate**: Write to `/tmp/decomp_test.c`, `scratch update`, `scratch compile`
+5. **Iterate**: Write to `/tmp/decomp_<slug>.c`, `scratch update`, `scratch compile`
 6. **Commit at 95%+**: `commit apply <func> <slug> --dry-run` then actual
 7. **Mark complete**: `complete mark <func> <slug> <pct> --committed`
 

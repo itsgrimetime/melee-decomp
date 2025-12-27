@@ -200,11 +200,12 @@ Then use the Read tool to get the full source file and understand the context.
 
 ### Step 3: Compile and Analyze
 
-Write your source code to a temp file, then compile:
+Write your source code to a temp file, then compile. **Important:** Use an agent-specific temp file to avoid race conditions when multiple agents run in parallel:
 
 ```bash
-# Write code to temp file
-cat > /tmp/decomp_test.c << 'EOF'
+# Write code to temp file (use agent-specific filename)
+# The $$ variable gives the shell process ID, ensuring uniqueness
+cat > /tmp/decomp_$$.c << 'EOF'
 // Your source code here
 void function_name(...) {
     ...
@@ -212,9 +213,11 @@ void function_name(...) {
 EOF
 
 # Update scratch and compile
-melee-agent scratch update <slug> /tmp/decomp_test.c
+melee-agent scratch update <slug> /tmp/decomp_$$.c
 melee-agent scratch compile <slug>
 ```
+
+Alternatively, when using the Write tool in Claude Code, use a unique filename like `/tmp/decomp_<slug>.c` where `<slug>` is the scratch ID.
 
 **CRITICAL:** Include any file-local type definitions (structs, enums) in your source. The scratch context only has headers, not .c file local definitions.
 
@@ -381,10 +384,10 @@ Read: melee/src/lb/lbcoll.c
 
 **Step 3:** Write and compile
 ```bash
-cat > /tmp/decomp_test.c << 'EOF'
+cat > /tmp/decomp_xYz12.c << 'EOF'
 void lbColl_80008440(...) {...}
 EOF
-melee-agent scratch update xYz12 /tmp/decomp_test.c
+melee-agent scratch update xYz12 /tmp/decomp_xYz12.c
 melee-agent scratch compile xYz12
 ```
 → 45% match
@@ -442,6 +445,25 @@ melee-agent complete mark lbColl_80008440 xYz12 97.0 --committed --notes "regist
 - The build uses the original .dol object for linking, so builds always pass
 - A file can only be flipped to Matching when ALL its functions are 100% AND data matches
 - Use `tools/dep_graph.py --leaves` to find NonMatching files with no NonMatching dependencies
+
+**Header signature mismatch (context declares wrong signature):**
+
+Sometimes the header declares a function incorrectly (e.g., `void func(void)` when the assembly clearly shows it takes parameters). Signs of this:
+- Assembly shows `cmpwi r3, 1` or similar use of argument registers
+- Assembly stores r3/r4/etc to stack frame at function start
+- Context compilation fails with "too many arguments" or similar
+
+**How to fix header bugs:**
+1. Verify the assembly actually uses the parameter (not just passing through to a tail call)
+2. Check the calling convention: r3-r10 for int args, f1-f8 for float args
+3. Fix the header in the melee repo (in your worktree):
+   - Find the header: `grep -rn "func_name" melee-worktrees/<agent>/include/`
+   - Update the signature to match what the assembly expects
+   - Rebuild: `cd melee-worktrees/<agent> && ninja`
+4. Re-create the scratch with `melee-agent scratch create <func>` to get updated context
+5. Continue with matching
+
+This is a legitimate fix - header bugs exist in the codebase and fixing them is valuable.
 
 ## Full Lifecycle Workflow
 
