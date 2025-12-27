@@ -13,15 +13,23 @@ from ._common import (
     console,
     DEFAULT_MELEE_ROOT,
     DECOMP_COMPLETED_FILE,
+    get_agent_melee_root,
+    get_agent_context_file,
 )
 
 # API URL from environment
 _api_base = os.environ.get("DECOMP_API_BASE", "")
 DEFAULT_DECOMP_ME_URL = _api_base[:-4] if _api_base.endswith("/api") else _api_base
 
-# Context file for scratch creation
+# Context file override from environment
 _context_env = os.environ.get("DECOMP_CONTEXT_FILE", "")
-DEFAULT_CONTEXT_FILE = Path(_context_env) if _context_env else DEFAULT_MELEE_ROOT / "build" / "ctx.c"
+
+
+def _get_context_file() -> Path:
+    """Get context file path, using agent's worktree if available."""
+    if _context_env:
+        return Path(_context_env)
+    return get_agent_context_file()
 
 extract_app = typer.Typer(help="Extract and list unmatched functions")
 
@@ -179,7 +187,7 @@ def extract_get(
             console.print("[red]Cannot create scratch - ASM not available[/red]")
             raise typer.Exit(1)
 
-        ctx_path = DEFAULT_CONTEXT_FILE
+        ctx_path = _get_context_file()
         if not ctx_path.exists():
             console.print(f"[red]Context file not found: {ctx_path}[/red]")
             console.print("[dim]Run 'ninja' in melee/ to generate build/ctx.c[/dim]")

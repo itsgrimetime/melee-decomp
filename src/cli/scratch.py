@@ -13,7 +13,7 @@ from typing import Annotated, Optional
 import typer
 from rich.table import Table
 
-from ._common import console, DEFAULT_MELEE_ROOT, DECOMP_CONFIG_DIR
+from ._common import console, DEFAULT_MELEE_ROOT, DECOMP_CONFIG_DIR, get_agent_context_file
 from src.client.api import _get_agent_id
 
 # Paths - use same agent ID logic as api.py for session isolation
@@ -29,9 +29,15 @@ DECOMP_SCRATCH_TOKENS_FILE = os.environ.get(
 _api_base = os.environ.get("DECOMP_API_BASE", "")
 DEFAULT_DECOMP_ME_URL = _api_base[:-4] if _api_base.endswith("/api") else _api_base
 
-# Context file for scratch creation
+# Context file override from environment
 _context_env = os.environ.get("DECOMP_CONTEXT_FILE", "")
-DEFAULT_CONTEXT_FILE = Path(_context_env) if _context_env else DEFAULT_MELEE_ROOT / "build" / "ctx.c"
+
+
+def _get_context_file() -> Path:
+    """Get context file path, using agent's worktree if available."""
+    if _context_env:
+        return Path(_context_env)
+    return get_agent_context_file()
 
 scratch_app = typer.Typer(help="Manage decomp.me scratches")
 
@@ -85,7 +91,7 @@ def scratch_create(
     from src.client import DecompMeAPIClient
     from src.extractor import extract_function
 
-    ctx_path = context_file or DEFAULT_CONTEXT_FILE
+    ctx_path = context_file or _get_context_file()
     if not ctx_path.exists():
         console.print(f"[red]Context file not found: {ctx_path}[/red]")
         console.print("[dim]Run 'ninja' in melee/ to generate build/ctx.c[/dim]")

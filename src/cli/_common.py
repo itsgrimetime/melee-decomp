@@ -38,11 +38,122 @@ PRODUCTION_COOKIES_FILE = DECOMP_CONFIG_DIR / "production_cookies.json"
 # Project paths
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 DEFAULT_MELEE_ROOT = PROJECT_ROOT / "melee"
+MELEE_WORKTREES_DIR = PROJECT_ROOT / "melee-worktrees"
 SLUG_MAP_FILE = PROJECT_ROOT / "config" / "scratches_slug_map.json"
 
 # decomp.me instances
 LOCAL_DECOMP_ME = os.environ.get("DECOMP_ME_URL", "http://10.200.0.1")
 PRODUCTION_DECOMP_ME = "https://decomp.me"
+
+
+def get_agent_melee_root(agent_id: str | None = None) -> Path:
+    """Get the melee worktree path for the current agent.
+
+    Each agent gets its own worktree to avoid conflicts when working in parallel.
+    Worktrees are created on-demand at melee-worktrees/{agent_id}/.
+
+    Args:
+        agent_id: Optional agent ID override. Uses AGENT_ID if not provided.
+
+    Returns:
+        Path to the agent's melee worktree (or main melee if no agent ID).
+    """
+    aid = agent_id or AGENT_ID
+    if not aid:
+        return DEFAULT_MELEE_ROOT
+
+    worktree_path = MELEE_WORKTREES_DIR / aid
+
+    # Check if worktree already exists
+    if worktree_path.exists() and (worktree_path / "src").exists():
+        return worktree_path
+
+    # Create worktree on first use
+    return _create_agent_worktree(aid, worktree_path)
+
+
+def get_agent_context_file(agent_id: str | None = None) -> Path:
+    """Get the context file path for the current agent.
+
+    Uses agent's worktree context if available, otherwise falls back to main melee.
+    This allows agents to work without requiring a full build in their worktree.
+
+    Args:
+        agent_id: Optional agent ID override. Uses AGENT_ID if not provided.
+
+    Returns:
+        Path to the context file (build/ctx.c).
+    """
+    agent_root = get_agent_melee_root(agent_id)
+    agent_ctx = agent_root / "build" / "ctx.c"
+
+    # If agent's worktree has a built context, use it
+    if agent_ctx.exists():
+        return agent_ctx
+
+    # Fall back to main melee's context file
+    main_ctx = DEFAULT_MELEE_ROOT / "build" / "ctx.c"
+    if main_ctx.exists():
+        return main_ctx
+
+    # Return agent path so error message shows what needs to be built
+    return agent_ctx
+
+
+def _create_agent_worktree(agent_id: str, worktree_path: Path) -> Path:
+    """Create a new worktree for an agent.
+
+    Creates a new branch and worktree for the agent to work in isolation.
+    """
+    import subprocess
+
+    MELEE_WORKTREES_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Get current branch from main melee
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=DEFAULT_MELEE_ROOT,
+            capture_output=True, text=True, check=True
+        )
+        base_branch = result.stdout.strip()
+    except subprocess.CalledProcessError:
+        base_branch = "master"
+
+    # Create branch name for this agent
+    branch_name = f"agent/{agent_id}"
+
+    # Check if branch already exists
+    result = subprocess.run(
+        ["git", "branch", "--list", branch_name],
+        cwd=DEFAULT_MELEE_ROOT,
+        capture_output=True, text=True
+    )
+    branch_exists = bool(result.stdout.strip())
+
+    try:
+        if branch_exists:
+            # Worktree with existing branch
+            subprocess.run(
+                ["git", "worktree", "add", str(worktree_path), branch_name],
+                cwd=DEFAULT_MELEE_ROOT,
+                capture_output=True, text=True, check=True
+            )
+        else:
+            # Create new branch from current HEAD
+            subprocess.run(
+                ["git", "worktree", "add", "-b", branch_name, str(worktree_path)],
+                cwd=DEFAULT_MELEE_ROOT,
+                capture_output=True, text=True, check=True
+            )
+
+        console.print(f"[dim]Created worktree for agent {agent_id} at {worktree_path}[/dim]")
+        return worktree_path
+
+    except subprocess.CalledProcessError as e:
+        console.print(f"[yellow]Warning: Could not create worktree: {e.stderr}[/yellow]")
+        console.print(f"[yellow]Falling back to shared melee directory[/yellow]")
+        return DEFAULT_MELEE_ROOT
 
 
 def load_completed_functions() -> dict:
@@ -122,8 +233,6 @@ def load_all_tracking_data(melee_root: Path) -> dict:
         "completed": {},
         "slug_map": {},
         "synced": {},
-        "scratches_txt_funcs": set(),
-        "scratches_txt_slugs": set(),
     }
 
     # Completed functions
@@ -141,56 +250,7 @@ def load_all_tracking_data(melee_root: Path) -> dict:
         except (json.JSONDecodeError, IOError):
             pass
 
-    # Parse scratches.txt
-    scratches_file = melee_root / "config" / "GALE01" / "scratches.txt"
-    if scratches_file.exists():
-        content = scratches_file.read_text()
-        # Extract function names and slugs
-        pattern = re.compile(r'^(\w+)\s*=.*?id:(\w+)', re.MULTILINE)
-        for match in pattern.finditer(content):
-            data["scratches_txt_funcs"].add(match.group(1))
-            data["scratches_txt_slugs"].add(match.group(2))
-
     return data
-
-
-def parse_scratches_txt(scratches_file: Path) -> list[dict]:
-    """Parse scratches.txt into a list of structured entries.
-
-    Returns list of dicts with: function, match_percent, slug, author, status
-    """
-    entries = []
-    if not scratches_file.exists():
-        return entries
-
-    content = scratches_file.read_text()
-
-    # Pattern to match entries like:
-    # func_name = 100%:MATCHED; // author:agent id:abc123 updated:2025-01-01T00:00:00Z
-    # func_name = 95.5%:TODO; // id:xyz789
-    pattern = re.compile(
-        r'^(?P<name>\w+)\s*=\s*(?P<match>[\d.]+|OK)%?:(?P<status>\w+);\s*//'
-        r'(?:\s*author:(?P<author>\S+))?'
-        r'(?:\s*id:(?P<slug>\w+))?',
-        re.MULTILINE
-    )
-
-    for match in pattern.finditer(content):
-        match_str = match.group('match')
-        try:
-            pct = 100.0 if match_str == 'OK' else float(match_str)
-        except ValueError:
-            pct = 0.0
-
-        entries.append({
-            'function': match.group('name'),
-            'match_percent': pct,
-            'status': match.group('status'),
-            'author': match.group('author') or 'unknown',
-            'slug': match.group('slug') or '',
-        })
-
-    return entries
 
 
 def categorize_functions(data: dict, check_pr_status: bool = False) -> dict:
@@ -200,10 +260,8 @@ def categorize_functions(data: dict, check_pr_status: bool = False) -> dict:
     - merged: PR merged (done!)
     - in_review: Has PR that's still open
     - committed: Committed locally but no PR
-    - ready: Synced + in scratches.txt, ready for PR
-    - synced_not_in_file: Synced but not in scratches.txt
-    - in_file_not_synced: In file but local slug
-    - lost_high_match: 95%+ but not synced or in file
+    - ready: Synced to production, ready for PR
+    - lost_high_match: 95%+ but not synced
 
     For <95% matches:
     - work_in_progress: Still being worked on
@@ -212,10 +270,8 @@ def categorize_functions(data: dict, check_pr_status: bool = False) -> dict:
         "merged": [],             # PR merged
         "in_review": [],          # PR open
         "committed": [],          # Committed but no PR
-        "ready": [],              # Synced + in file, ready for PR
-        "synced_not_in_file": [], # Synced but not in scratches.txt
-        "in_file_not_synced": [], # In file but local slug
-        "lost_high_match": [],    # 95%+ but not synced or in file
+        "ready": [],              # Synced, ready for PR
+        "lost_high_match": [],    # 95%+ but not synced
         "work_in_progress": [],   # <95% match
     }
 
@@ -238,7 +294,6 @@ def categorize_functions(data: dict, check_pr_status: bool = False) -> dict:
         branch = info.get("branch", "")
 
         # Determine status
-        in_scratches = func in data["scratches_txt_funcs"] or slug in data["scratches_txt_slugs"]
         synced_to_prod = func in prod_funcs or slug in synced_local_slugs
 
         entry = {
@@ -277,12 +332,8 @@ def categorize_functions(data: dict, check_pr_status: bool = False) -> dict:
                     categories["in_review"].append(entry)
             elif is_committed:
                 categories["committed"].append(entry)
-            elif synced_to_prod and in_scratches:
-                categories["ready"].append(entry)
             elif synced_to_prod:
-                categories["synced_not_in_file"].append(entry)
-            elif in_scratches:
-                categories["in_file_not_synced"].append(entry)
+                categories["ready"].append(entry)
             else:
                 categories["lost_high_match"].append(entry)
         else:
