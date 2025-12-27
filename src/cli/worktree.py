@@ -40,9 +40,9 @@ def _get_worktree_info(melee_root: Path) -> List[dict]:
         name = wt_path.name
         branch = f"agent/{name}"
 
-        # Get commits ahead of master
+        # Get commits ahead of upstream/master (PRs go to upstream, not origin)
         ret, out, _ = _run_git(
-            ["rev-list", "--count", f"master..{branch}"],
+            ["rev-list", "--count", f"upstream/master..{branch}"],
             melee_root
         )
         commits_ahead = int(out) if ret == 0 and out.isdigit() else 0
@@ -51,7 +51,7 @@ def _get_worktree_info(melee_root: Path) -> List[dict]:
         commit_subjects = []
         if commits_ahead > 0:
             ret, out, _ = _run_git(
-                ["log", "--oneline", f"master..{branch}"],
+                ["log", "--oneline", f"upstream/master..{branch}"],
                 melee_root
             )
             if ret == 0 and out:
@@ -284,9 +284,9 @@ def worktree_collect(
         console.print(f"[red]Branch {branch_name} already exists. Use --branch to specify a different name.[/red]")
         raise typer.Exit(1)
 
-    # Create new branch from master
-    console.print(f"Creating branch [cyan]{branch_name}[/cyan] from master...")
-    ret, _, err = _run_git(["checkout", "-b", branch_name, "master"], melee_root)
+    # Create new branch from upstream/master
+    console.print(f"Creating branch [cyan]{branch_name}[/cyan] from upstream/master...")
+    ret, _, err = _run_git(["checkout", "-b", branch_name, "upstream/master"], melee_root)
     if ret != 0:
         console.print(f"[red]Failed to create branch: {err}[/red]")
         raise typer.Exit(1)
