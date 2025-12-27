@@ -62,8 +62,11 @@ melee-agent sync production           # Sync to https://decomp.me
 ## Environment
 
 ```bash
-DECOMP_API_BASE=http://10.200.0.1     # Self-hosted decomp.me
-DECOMP_AGENT_ID=agent-1               # Optional: manual agent isolation
+# decomp.me server (defaults to local hostname, set for remote access)
+DECOMP_ME_URL=http://nzxt-discord.local  # Home network (default)
+DECOMP_ME_URL=http://10.200.0.1          # Remote via WireGuard VPN
+
+DECOMP_AGENT_ID=agent-1                  # Optional: manual agent isolation
 ```
 
 ## Workflow

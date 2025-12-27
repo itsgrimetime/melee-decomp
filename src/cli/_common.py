@@ -42,8 +42,23 @@ MELEE_WORKTREES_DIR = PROJECT_ROOT / "melee-worktrees"
 SLUG_MAP_FILE = PROJECT_ROOT / "config" / "scratches_slug_map.json"
 
 # decomp.me instances
-LOCAL_DECOMP_ME = os.environ.get("DECOMP_ME_URL", "http://10.200.0.1")
+# Local: http://nzxt-discord.local (home network)
+# Remote: http://10.200.0.1 (via WireGuard VPN)
+LOCAL_DECOMP_ME = os.environ.get("DECOMP_ME_URL", "http://nzxt-discord.local")
 PRODUCTION_DECOMP_ME = "https://decomp.me"
+
+# API URL - derived from LOCAL_DECOMP_ME or DECOMP_API_BASE env var
+_api_base = os.environ.get("DECOMP_API_BASE", "")
+DEFAULT_API_URL = _api_base[:-4] if _api_base.endswith("/api") else (_api_base or LOCAL_DECOMP_ME)
+
+
+def require_api_url(api_url: str) -> None:
+    """Validate that API URL is configured and show helpful error if not."""
+    if not api_url:
+        console.print("[red]Error: DECOMP_API_BASE environment variable is required[/red]")
+        console.print("[dim]Set it to your decomp.me instance URL, e.g.:[/dim]")
+        console.print(f"[dim]  export DECOMP_API_BASE={LOCAL_DECOMP_ME}[/dim]")
+        raise SystemExit(1)
 
 
 def get_agent_melee_root(agent_id: str | None = None) -> Path:

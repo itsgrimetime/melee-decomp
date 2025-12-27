@@ -13,7 +13,7 @@ from typing import Annotated, Optional
 import typer
 from rich.table import Table
 
-from ._common import console, DEFAULT_MELEE_ROOT, DECOMP_CONFIG_DIR, get_agent_context_file
+from ._common import console, DEFAULT_MELEE_ROOT, DECOMP_CONFIG_DIR, get_agent_context_file, DEFAULT_API_URL, require_api_url
 from src.client.api import _get_agent_id
 
 # Paths - use same agent ID logic as api.py for session isolation
@@ -24,10 +24,6 @@ DECOMP_SCRATCH_TOKENS_FILE = os.environ.get(
     "DECOMP_SCRATCH_TOKENS_FILE",
     str(DECOMP_CONFIG_DIR / f"scratch_tokens{_agent_suffix}.json")
 )
-
-# API URL from environment
-_api_base = os.environ.get("DECOMP_API_BASE", "")
-DEFAULT_DECOMP_ME_URL = _api_base[:-4] if _api_base.endswith("/api") else _api_base
 
 # Context file override from environment
 _context_env = os.environ.get("DECOMP_CONTEXT_FILE", "")
@@ -64,15 +60,6 @@ def _save_scratch_token(slug: str, token: str) -> None:
         json.dump(tokens, f, indent=2)
 
 
-def _require_api_url(api_url: str) -> None:
-    """Validate that API URL is configured."""
-    if not api_url:
-        console.print("[red]Error: DECOMP_API_BASE environment variable is required[/red]")
-        console.print("[dim]Set it to your decomp.me instance URL, e.g.:[/dim]")
-        console.print("[dim]  export DECOMP_API_BASE=http://10.200.0.1[/dim]")
-        raise typer.Exit(1)
-
-
 @scratch_app.command("create")
 def scratch_create(
     function_name: Annotated[str, typer.Argument(help="Name of the function")],
@@ -81,13 +68,13 @@ def scratch_create(
     ] = DEFAULT_MELEE_ROOT,
     api_url: Annotated[
         str, typer.Option("--api-url", help="Decomp.me API URL")
-    ] = DEFAULT_DECOMP_ME_URL,
+    ] = DEFAULT_API_URL,
     context_file: Annotated[
         Optional[Path], typer.Option("--context", "-c", help="Path to context file")
     ] = None,
 ):
     """Create a new scratch for a function on decomp.me."""
-    _require_api_url(api_url)
+    require_api_url(api_url)
     from src.client import DecompMeAPIClient
     from src.extractor import extract_function
 
@@ -195,7 +182,7 @@ def scratch_compile(
     slug: Annotated[str, typer.Argument(help="Scratch slug/ID")],
     api_url: Annotated[
         str, typer.Option("--api-url", help="Decomp.me API URL")
-    ] = DEFAULT_DECOMP_ME_URL,
+    ] = DEFAULT_API_URL,
     show_diff: Annotated[
         bool, typer.Option("--diff", "-d", help="Show instruction diff")
     ] = False,
@@ -204,7 +191,7 @@ def scratch_compile(
     ] = 100,
 ):
     """Compile a scratch and show the diff."""
-    _require_api_url(api_url)
+    require_api_url(api_url)
     from src.client import DecompMeAPIClient
 
     async def compile_scratch():
@@ -235,10 +222,10 @@ def scratch_update(
     source_file: Annotated[Path, typer.Argument(help="Path to C source file")],
     api_url: Annotated[
         str, typer.Option("--api-url", help="Decomp.me API URL")
-    ] = DEFAULT_DECOMP_ME_URL,
+    ] = DEFAULT_API_URL,
 ):
     """Update a scratch's source code from a file."""
-    _require_api_url(api_url)
+    require_api_url(api_url)
     from src.client import DecompMeAPIClient, ScratchUpdate, DecompMeAPIError
 
     source_code = source_file.read_text()
@@ -282,13 +269,13 @@ def scratch_get(
     slug: Annotated[str, typer.Argument(help="Scratch slug/ID or URL")],
     api_url: Annotated[
         str, typer.Option("--api-url", help="Decomp.me API URL")
-    ] = DEFAULT_DECOMP_ME_URL,
+    ] = DEFAULT_API_URL,
     output_json: Annotated[
         bool, typer.Option("--json", help="Output as JSON")
     ] = False,
 ):
     """Get full scratch information."""
-    _require_api_url(api_url)
+    require_api_url(api_url)
     from src.client import DecompMeAPIClient
 
     # Extract slug from URL if needed
@@ -336,13 +323,13 @@ def scratch_search(
     ] = 10,
     api_url: Annotated[
         str, typer.Option("--api-url", help="Decomp.me API URL")
-    ] = DEFAULT_DECOMP_ME_URL,
+    ] = DEFAULT_API_URL,
     output_json: Annotated[
         bool, typer.Option("--json", help="Output as JSON")
     ] = False,
 ):
     """Search for scratches on decomp.me."""
-    _require_api_url(api_url)
+    require_api_url(api_url)
     from src.client import DecompMeAPIClient
 
     async def search():
@@ -372,10 +359,10 @@ def scratch_search_context(
     pattern: Annotated[str, typer.Argument(help="Regex pattern to search for")],
     context_lines: Annotated[int, typer.Option("--context", "-C", help="Context lines")] = 3,
     max_results: Annotated[int, typer.Option("--max", "-n", help="Maximum matches")] = 20,
-    api_url: Annotated[str, typer.Option("--api-url", help="Decomp.me API URL")] = DEFAULT_DECOMP_ME_URL,
+    api_url: Annotated[str, typer.Option("--api-url", help="Decomp.me API URL")] = DEFAULT_API_URL,
 ):
     """Search through a scratch's context for patterns."""
-    _require_api_url(api_url)
+    require_api_url(api_url)
     from src.client import DecompMeAPIClient
 
     async def get():

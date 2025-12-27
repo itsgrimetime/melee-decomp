@@ -10,23 +10,10 @@ from typing import Annotated, Optional
 import typer
 from rich.console import Console
 
-from ._common import console, DEFAULT_MELEE_ROOT, DECOMP_CONFIG_DIR
+from ._common import console, DEFAULT_MELEE_ROOT, DECOMP_CONFIG_DIR, DEFAULT_API_URL, require_api_url
 from .complete import _load_completed, _save_completed, _get_current_branch
 
-# API URL from environment
-_api_base = os.environ.get("DECOMP_API_BASE", "")
-DEFAULT_DECOMP_ME_URL = _api_base[:-4] if _api_base.endswith("/api") else _api_base
-
 commit_app = typer.Typer(help="Commit matched functions and create PRs")
-
-
-def _require_api_url(api_url: str) -> None:
-    """Validate that API URL is configured."""
-    if not api_url:
-        console.print("[red]Error: DECOMP_API_BASE environment variable is required[/red]")
-        console.print("[dim]Set it to your decomp.me instance URL, e.g.:[/dim]")
-        console.print("[dim]  export DECOMP_API_BASE=http://10.200.0.1[/dim]")
-        raise typer.Exit(1)
 
 
 @commit_app.command("apply")
@@ -38,7 +25,7 @@ def commit_apply(
     ] = DEFAULT_MELEE_ROOT,
     api_url: Annotated[
         str, typer.Option("--api-url", help="Decomp.me API URL")
-    ] = DEFAULT_DECOMP_ME_URL,
+    ] = DEFAULT_API_URL,
     create_pr: Annotated[
         bool, typer.Option("--pr", help="Create a PR after committing")
     ] = False,
@@ -65,7 +52,7 @@ def commit_apply(
     Use --force to bypass the match check entirely (use with caution).
     Use --dry-run to preview changes and verify compilation without modifying files.
     """
-    _require_api_url(api_url)
+    require_api_url(api_url)
     from src.client import DecompMeAPIClient
     from src.commit import auto_detect_and_commit
     from src.commit.configure import get_file_path_from_function
