@@ -37,8 +37,8 @@ All operations via `python -m src.cli` or `melee-agent`:
 # Scratch operations
 melee-agent scratch create <func>     # Create scratch from melee repo
 melee-agent scratch get <slug>        # Fetch scratch details
+melee-agent scratch compile <slug> -s <file>  # Update + compile in one step
 melee-agent scratch compile <slug>    # Compile and diff
-melee-agent scratch update <slug> <file>  # Update source
 
 # Function discovery
 melee-agent extract list --max-match 0.50  # Find unmatched functions
@@ -52,6 +52,15 @@ melee-agent commit apply <func> <slug> --dry-run  # Preview first
 melee-agent claim add <func>          # Claim before working
 melee-agent claim release <func>      # Release when done
 melee-agent complete mark <func> <slug> <pct>  # Record completion
+
+# Stub management (for missing stub markers)
+melee-agent stub check <func>         # Check if stub exists
+melee-agent stub add <func>           # Add missing stub marker
+
+# Worktree management (parallel agents)
+melee-agent worktree list             # Show all agent worktrees
+melee-agent worktree prune --force    # Clean up merged worktrees
+melee-agent worktree collect          # Batch commits into PR branch
 
 # Sync to production decomp.me
 melee-agent sync auth                 # Configure cf_clearance cookie
@@ -73,9 +82,9 @@ DECOMP_AGENT_ID=agent-1                  # Optional: manual agent isolation
 
 1. **Find function**: `extract list` or user-specified
 2. **Claim it**: `claim add <func>` (prevents duplicate work)
-3. **Create scratch**: `scratch create <func>`
+3. **Create scratch**: `extract get <func> --create-scratch`
 4. **Read source**: Check `melee/src/` for existing code + context
-5. **Iterate**: Write to `/tmp/decomp_<slug>.c`, `scratch update`, `scratch compile`
+5. **Iterate**: Write to `/tmp/decomp_<slug>.c`, `scratch compile <slug> -s /tmp/decomp_<slug>.c`
 6. **Commit at 95%+**: `commit apply <func> <slug> --dry-run` then actual
 7. **Mark complete**: `complete mark <func> <slug> <pct> --committed`
 
