@@ -9,16 +9,40 @@ You are an expert at matching C source code to PowerPC assembly for the Melee de
 
 ## Parallel Agent Setup
 
-Agent session isolation is **automatic** - no configuration needed. Each Claude Code conversation gets a unique agent ID based on its process ID, creating isolated session files.
+Agent session isolation is **automatic** - no configuration needed. Each Claude Code conversation gets a unique agent ID based on its process ID, creating isolated session files and git worktrees.
+
+### Git Worktrees (Source Isolation)
+
+Each agent gets its own melee worktree to avoid git conflicts when working in parallel:
+
+- **Location:** `melee-worktrees/{agent_id}/` (e.g., `melee-worktrees/claude62741/`)
+- **Branch:** `agent/{agent_id}` (e.g., `agent/claude62741`)
+- **Created:** Automatically on first CLI command (takes ~1 second)
+
+When a worktree is created, you'll see:
+```
+WORKTREE CREATED: /path/to/melee-worktrees/claude62741
+BRANCH: agent/claude62741
+Run all git commands in the worktree, not in melee/
+```
+
+On subsequent commands:
+```
+Using worktree: /path/to/melee-worktrees/claude62741
+```
+
+**Important:** All git operations (commits, branches, etc.) should be done in your worktree directory, not in the main `melee/` submodule.
+
+### Session Files
 
 **Shared across agents** (for coordination):
 - `/tmp/decomp_claims.json` - function claims (ephemeral, 1-hour expiry)
 
-**Persistent files** (in `~/.config/decomp-me/`):
-- `completed_functions.json` - completion tracking (prevents re-picking)
-- `cookies*.json` - decomp.me session (per-agent)
-- `scratch_tokens*.json` - scratch ownership tokens (per-agent)
-- `production_cookies.json` - production decomp.me auth
+**Per-agent files** (in `~/.config/decomp-me/`):
+- `cookies_{agent_id}.json` - decomp.me session
+- `scratch_tokens_{agent_id}.json` - scratch ownership tokens
+- `completed_functions.json` - completion tracking (shared, with locking)
+- `production_cookies.json` - production decomp.me auth (shared)
 
 **Project files** (in `melee-decomp/config/`):
 - `scratches_slug_map.json` - local→production slug mapping

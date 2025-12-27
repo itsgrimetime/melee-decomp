@@ -66,6 +66,7 @@ def get_agent_melee_root(agent_id: str | None = None) -> Path:
 
     # Check if worktree already exists
     if worktree_path.exists() and (worktree_path / "src").exists():
+        console.print(f"[dim]Using worktree: {worktree_path}[/dim]")
         return worktree_path
 
     # Create worktree on first use
