@@ -1,9 +1,7 @@
 """Commit commands - commit matched functions and create PRs."""
 
 import asyncio
-import json
 import os
-import re
 import subprocess
 import time
 from pathlib import Path
@@ -192,7 +190,6 @@ def commit_apply(
                 scratch_id=scratch_slug,
                 scratch_url=scratch_url,
                 melee_root=melee_root,
-                author="agent",
                 create_pull_request=create_pr,
                 extract_function_only=not full_code,
             )
@@ -241,72 +238,3 @@ def commit_format(
     else:
         console.print("[red]Formatting failed[/red]")
         raise typer.Exit(1)
-
-
-@commit_app.command("lint")
-def commit_lint(
-    melee_root: Annotated[
-        Path, typer.Option("--melee-root", "-m", help="Path to melee submodule")
-    ] = DEFAULT_MELEE_ROOT,
-    fix: Annotated[
-        bool, typer.Option("--fix", help="Remove malformed entries")
-    ] = False,
-):
-    """Validate scratches.txt format and report issues."""
-    scratches_path = melee_root / "config" / "GALE01" / "scratches.txt"
-
-    if not scratches_path.exists():
-        console.print(f"[red]scratches.txt not found at {scratches_path}[/red]")
-        raise typer.Exit(1)
-
-    content = scratches_path.read_text(encoding='utf-8')
-    lines = content.split('\n')
-
-    # Valid entry pattern: FunctionName = PERCENT%:STATUS; // author:NAME id:SLUG
-    valid_pattern = re.compile(
-        r'^[a-zA-Z_][a-zA-Z0-9_]*\s*=\s*(?:\d+(?:\.\d+)?%|OK):[A-Z0-9x_]+;\s*//'
-        r'(?:\s*author:[a-zA-Z0-9_-]+)?'
-        r'(?:\s*id:[a-zA-Z0-9]+)?'
-    )
-
-    # Malformed pattern: just function = slug (missing percentage/status)
-    malformed_pattern = re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*\s*=\s*[a-zA-Z0-9]{5}$')
-
-    issues = []
-    malformed_lines = []
-
-    for i, line in enumerate(lines, 1):
-        line = line.strip()
-        if not line or line.startswith('#') or line.startswith('//'):
-            continue  # Skip empty lines and comments
-
-        if malformed_pattern.match(line):
-            issues.append((i, line, "Malformed: missing percentage/status (format: func = slug)"))
-            malformed_lines.append(i)
-        elif not valid_pattern.match(line):
-            # Could be a valid older format or truly invalid
-            if '=' in line and '//' in line:
-                pass  # Likely valid older format
-            elif '=' in line:
-                issues.append((i, line, "Missing comment section (// author:... id:...)"))
-
-    if issues:
-        console.print(f"[yellow]Found {len(issues)} issue(s) in scratches.txt:[/yellow]\n")
-        for line_num, line_content, issue in issues[:20]:  # Show first 20
-            console.print(f"  Line {line_num}: {issue}")
-            console.print(f"    [dim]{line_content[:80]}{'...' if len(line_content) > 80 else ''}[/dim]")
-
-        if len(issues) > 20:
-            console.print(f"\n  [dim]... and {len(issues) - 20} more issues[/dim]")
-
-        if fix and malformed_lines:
-            # Remove malformed lines
-            new_lines = [l for i, l in enumerate(lines, 1) if i not in malformed_lines]
-            scratches_path.write_text('\n'.join(new_lines), encoding='utf-8')
-            console.print(f"\n[green]Removed {len(malformed_lines)} malformed entries[/green]")
-        elif malformed_lines:
-            console.print(f"\n[dim]Run with --fix to remove {len(malformed_lines)} malformed entries[/dim]")
-
-        raise typer.Exit(1)
-    else:
-        console.print("[green]scratches.txt is valid[/green]")

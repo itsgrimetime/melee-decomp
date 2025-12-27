@@ -3,11 +3,9 @@
 import asyncio
 import json
 import os
-import re
 import time
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated, Any, Optional
+from typing import Annotated, Optional
 
 import typer
 from rich.table import Table
@@ -68,55 +66,6 @@ def _prompt_cf_clearance() -> str:
 
     cf_clearance = typer.prompt("Enter cf_clearance cookie value")
     return cf_clearance.strip()
-
-
-def _parse_scratches_txt(scratches_file: Path) -> list[dict[str, Any]]:
-    """Parse scratches.txt to extract committed match entries."""
-    entries = []
-    if not scratches_file.exists():
-        return entries
-
-    pattern = re.compile(
-        r'^(?P<name>\w+)\s*=\s*(?P<match>[\d.]+%|OK):(?P<status>\w+);\s*//'
-        r'(?:\s*author:(?P<author>\S+))?'
-        r'(?:\s*id:(?P<slug>\w+))?'
-        r'(?:\s*parent:(?P<parent>\w+))?',
-        re.MULTILINE
-    )
-
-    content = scratches_file.read_text()
-    for match in pattern.finditer(content):
-        entry = {
-            'name': match.group('name'),
-            'match_percent': match.group('match'),
-            'status': match.group('status'),
-            'author': match.group('author') or 'unknown',
-            'slug': match.group('slug'),
-            'parent': match.group('parent'),
-        }
-        if entry['slug']:
-            entries.append(entry)
-
-    return entries
-
-
-def _update_scratches_txt_slug(scratches_file: Path, old_slug: str, new_slug: str) -> bool:
-    """Replace a scratch slug in scratches.txt."""
-    content = scratches_file.read_text()
-    new_content = re.sub(
-        rf'\bid:{re.escape(old_slug)}\b',
-        f'id:{new_slug}',
-        content
-    )
-    new_content = re.sub(
-        rf'\bparent:{re.escape(old_slug)}\b',
-        f'parent:{new_slug}',
-        new_content
-    )
-    if new_content != content:
-        scratches_file.write_text(new_content)
-        return True
-    return False
 
 
 @sync_app.command("status")
@@ -347,8 +296,6 @@ def sync_production(
         except (json.JSONDecodeError, IOError):
             pass
 
-    scratches_file = melee_root / "config" / "GALE01" / "scratches.txt"
-
     async def do_sync():
         results = {"success": 0, "skipped": 0, "failed": 0, "details": []}
 
@@ -479,10 +426,6 @@ def sync_production(
                             prod_slug = prod_data.get('slug', 'unknown')
                             console.print(f"[green]  Created: {PRODUCTION_DECOMP_ME}/scratch/{prod_slug}[/green]")
 
-                            # Update scratches.txt if the local slug exists there
-                            if _update_scratches_txt_slug(scratches_file, local_slug, prod_slug):
-                                console.print(f"[dim]  Updated scratches.txt: {local_slug} -> {prod_slug}[/dim]")
-
                             # Update slug map
                             current_slug_map = load_slug_map()
                             current_slug_map[prod_slug] = {
@@ -576,75 +519,6 @@ def sync_slugs(
 
         console.print(table)
         console.print(f"\n[dim]{len(slug_map)} mappings stored in {SLUG_MAP_FILE}[/dim]")
-
-
-@sync_app.command("replace-author")
-def sync_replace_author(
-    from_author: Annotated[
-        str, typer.Argument(help="Author name to replace")
-    ],
-    to_author: Annotated[
-        str, typer.Argument(help="New author name")
-    ],
-    melee_root: Annotated[
-        Path, typer.Option("--melee-root", "-m", help="Path to melee submodule")
-    ] = DEFAULT_MELEE_ROOT,
-    dry_run: Annotated[
-        bool, typer.Option("--dry-run", help="Show what would change without modifying")
-    ] = False,
-):
-    """Bulk replace author names in scratches.txt."""
-    scratches_file = melee_root / "config" / "GALE01" / "scratches.txt"
-
-    if not scratches_file.exists():
-        console.print(f"[red]scratches.txt not found at {scratches_file}[/red]")
-        raise typer.Exit(1)
-
-    content = scratches_file.read_text(encoding='utf-8')
-    pattern = re.compile(rf'\bauthor:{re.escape(from_author)}\b')
-    matches = pattern.findall(content)
-    count = len(matches)
-
-    if count == 0:
-        console.print(f"[yellow]No entries found with author:{from_author}[/yellow]")
-        return
-
-    console.print(f"Found [bold]{count}[/bold] entries with author:{from_author}")
-
-    if dry_run:
-        console.print(f"\n[cyan]DRY RUN[/cyan] - Would replace author:{from_author} -> author:{to_author}")
-        lines = content.split('\n')
-        shown = 0
-        for line in lines:
-            if pattern.search(line):
-                func_match = re.match(r'^(\w+)\s*=', line)
-                func_name = func_match.group(1) if func_match else "?"
-                console.print(f"  {func_name}")
-                shown += 1
-                if shown >= 10:
-                    remaining = count - shown
-                    if remaining > 0:
-                        console.print(f"  [dim]... and {remaining} more[/dim]")
-                    break
-        return
-
-    new_content = pattern.sub(f'author:{to_author}', content)
-    now = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
-
-    def update_timestamp(line: str) -> str:
-        if f'author:{to_author}' in line:
-            if 'updated:' in line:
-                line = re.sub(r'updated:\S+', f'updated:{now}', line)
-            else:
-                line = line.rstrip() + f' updated:{now}'
-        return line
-
-    lines = new_content.split('\n')
-    updated_lines = [update_timestamp(line) for line in lines]
-    new_content = '\n'.join(updated_lines)
-
-    scratches_file.write_text(new_content, encoding='utf-8')
-    console.print(f"[green]Updated {count} entries: author:{from_author} -> author:{to_author}[/green]")
 
 
 @sync_app.command("clear")

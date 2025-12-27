@@ -104,6 +104,7 @@ def _create_agent_worktree(agent_id: str, worktree_path: Path) -> Path:
     """Create a new worktree for an agent.
 
     Creates a new branch and worktree for the agent to work in isolation.
+    Also symlinks orig/ and runs configure.py + ninja to set up the build.
     """
     import subprocess
 
@@ -147,7 +148,40 @@ def _create_agent_worktree(agent_id: str, worktree_path: Path) -> Path:
                 capture_output=True, text=True, check=True
             )
 
-        console.print(f"[dim]Created worktree for agent {agent_id} at {worktree_path}[/dim]")
+        console.print(f"[dim]Created worktree for agent {agent_id}[/dim]")
+
+        # Symlink orig/ directory (contains original game files needed for build)
+        # Remove the git-checked-out orig/ (just has .gitkeep) and replace with symlink
+        orig_src = DEFAULT_MELEE_ROOT / "orig"
+        orig_dst = worktree_path / "orig"
+        if orig_src.exists():
+            import shutil
+            if orig_dst.exists() and not orig_dst.is_symlink():
+                shutil.rmtree(orig_dst)
+            if not orig_dst.exists():
+                orig_dst.symlink_to(orig_src.resolve())
+                console.print(f"[dim]Linked orig/ from main melee[/dim]")
+
+        # Run configure.py + ninja to set up build (generates ctx.c)
+        console.print(f"[dim]Building worktree (this takes ~10s)...[/dim]")
+        result = subprocess.run(
+            ["python", "configure.py"],
+            cwd=worktree_path,
+            capture_output=True, text=True
+        )
+        if result.returncode == 0:
+            result = subprocess.run(
+                ["ninja"],
+                cwd=worktree_path,
+                capture_output=True, text=True
+            )
+            if result.returncode == 0:
+                console.print(f"[dim]Build complete[/dim]")
+            else:
+                console.print(f"[yellow]Warning: ninja failed, will use main melee context[/yellow]")
+        else:
+            console.print(f"[yellow]Warning: configure.py failed, will use main melee context[/yellow]")
+
         return worktree_path
 
     except subprocess.CalledProcessError as e:

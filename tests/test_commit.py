@@ -13,7 +13,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from src.commit import (
     CommitWorkflow,
     update_source_file,
-    update_scratches_txt,
     update_configure_py,
     format_files,
     verify_clang_format_available,
@@ -58,13 +57,6 @@ void AnotherFunction(int x) {
 MeleeLib("lb (Library)")
 Object(NonMatching, "melee/lb/lbcommand.c")
 Object(Matching, "melee/lb/lbcollision.c")
-""")
-
-    # Create scratches.txt
-    scratches_txt = config_dir / "scratches.txt"
-    scratches_txt.write_text("""
-# Scratch tracking file
-OldFunction = 100%:MATCHED; // author:someone id:abc123
 """)
 
     return melee_root
@@ -160,73 +152,6 @@ class TestUpdateSourceFile:
         )
 
         assert result is False
-
-
-class TestUpdateScratchesTxt:
-    """Test the update_scratches_txt function."""
-
-    @pytest.mark.asyncio
-    async def test_add_new_entry(self, temp_melee_root):
-        """Test adding a new entry to scratches.txt."""
-        result = await update_scratches_txt(
-            "NewFunction",
-            "xyz789",
-            temp_melee_root,
-            "agent"
-        )
-
-        assert result is True
-
-        # Verify entry was added
-        scratches_path = temp_melee_root / "config" / "GALE01" / "scratches.txt"
-        content = scratches_path.read_text()
-        assert "NewFunction = 100%:MATCHED; // author:agent id:xyz789" in content
-
-    @pytest.mark.asyncio
-    async def test_add_duplicate_entry(self, temp_melee_root):
-        """Test adding a duplicate entry."""
-        function_name = "TestFunc"
-        scratch_id = "test123"
-
-        # Add first time
-        result1 = await update_scratches_txt(
-            function_name,
-            scratch_id,
-            temp_melee_root,
-            "agent"
-        )
-        assert result1 is True
-
-        # Add again - should succeed but not duplicate
-        result2 = await update_scratches_txt(
-            function_name,
-            scratch_id,
-            temp_melee_root,
-            "agent"
-        )
-        assert result2 is True
-
-        # Verify only one entry exists
-        scratches_path = temp_melee_root / "config" / "GALE01" / "scratches.txt"
-        content = scratches_path.read_text()
-        assert content.count(f"id:{scratch_id}") == 1
-
-    @pytest.mark.asyncio
-    async def test_custom_author(self, temp_melee_root):
-        """Test adding entry with custom author."""
-        result = await update_scratches_txt(
-            "CustomFunc",
-            "custom123",
-            temp_melee_root,
-            "developer"
-        )
-
-        assert result is True
-
-        # Verify author is correct
-        scratches_path = temp_melee_root / "config" / "GALE01" / "scratches.txt"
-        content = scratches_path.read_text()
-        assert "author:developer" in content
 
 
 class TestUpdateConfigurePy:
@@ -355,7 +280,6 @@ class TestCommitWorkflow:
                 new_code="void TestFunction(void) { return; }",
                 scratch_id="test123",
                 scratch_url="http://decomp.me/scratch/test123",
-                author="agent",
                 create_pull_request=False
             )
 
@@ -366,7 +290,6 @@ class TestCommitWorkflow:
         # Verify files were changed
         assert "src/melee/lb/lbcommand.c" in workflow.files_changed
         assert "configure.py" in workflow.files_changed
-        assert "config/GALE01/scratches.txt" in workflow.files_changed
 
     @pytest.mark.asyncio
     async def test_execute_with_mocked_pr(self, temp_melee_root):
@@ -382,7 +305,6 @@ class TestCommitWorkflow:
                 new_code="void TestFunction(void) { return; }",
                 scratch_id="test123",
                 scratch_url="http://decomp.me/scratch/test123",
-                author="agent",
                 create_pull_request=True
             )
 
@@ -401,7 +323,6 @@ class TestCommitWorkflow:
             new_code="void NonExistentFunction(void) {}",
             scratch_id="test123",
             scratch_url="http://decomp.me/scratch/test123",
-            author="agent",
             create_pull_request=False
         )
 
@@ -432,24 +353,12 @@ class TestIntegration:
         )
         assert result is True
 
-        # Step 3: Update scratches.txt
-        result = await update_scratches_txt(
-            "TestFunction",
-            "scratch123",
-            temp_melee_root,
-            "test"
-        )
-        assert result is True
-
         # Verify all changes
         src_file = temp_melee_root / "src" / "melee" / "lb" / "lbcommand.c"
         assert "/* matched */" in src_file.read_text()
 
         configure_file = temp_melee_root / "configure.py"
         assert 'Object(Matching, "melee/lb/lbcommand.c")' in configure_file.read_text()
-
-        scratches_file = temp_melee_root / "config" / "GALE01" / "scratches.txt"
-        assert "TestFunction = 100%:MATCHED" in scratches_file.read_text()
 
     @pytest.mark.asyncio
     async def test_workflow_idempotency(self, temp_melee_root):

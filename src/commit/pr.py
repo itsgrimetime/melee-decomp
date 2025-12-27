@@ -121,7 +121,6 @@ Co-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>"""
 - Matched function `{function_name}` from decomp.me
 - Updated source file with matching code
 - Changed NonMatching to Matching in configure.py
-- Added entry to scratches.txt
 
 ## decomp.me scratch
 {scratch_url}

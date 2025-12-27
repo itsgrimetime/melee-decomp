@@ -8,7 +8,7 @@ Reverse-engineering Super Smash Bros. Melee (GameCube) to matching C code using 
 melee-decomp/
 ├── melee/                    # Submodule: main decompilation repo
 │   ├── src/melee/            # Decompiled C source files
-│   ├── config/GALE01/        # Build config + scratches.txt
+│   ├── config/GALE01/        # Build config
 │   └── tools/                # Build tools (ninja, dtk)
 ├── src/
 │   ├── cli.py                # Main CLI (melee-agent)
@@ -28,7 +28,6 @@ melee-decomp/
 | `~/.config/decomp-me/` | Persistent config (cookies, tokens, completed functions) |
 | `/tmp/decomp_claims.json` | Ephemeral agent claims (1-hour expiry) |
 | `config/scratches_slug_map.json` | Local→production slug mapping |
-| `melee/config/GALE01/scratches.txt` | Scratch tracking (synced from decomp.me) |
 
 ## CLI Commands
 

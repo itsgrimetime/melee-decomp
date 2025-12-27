@@ -8,16 +8,15 @@ This module provides a complete workflow for integrating matched functions from 
 
 1. Updating source files with matched code
 2. Updating `configure.py` to change `NonMatching` → `Matching`
-3. Adding entries to `scratches.txt`
-4. Running code formatting (`git clang-format`)
-5. Creating branches, commits, and pull requests
+3. Running code formatting (`git clang-format`)
+4. Creating branches, commits, and pull requests
 
 ## Module Structure
 
 ```
 commit/
 ├── __init__.py       # Module exports
-├── update.py         # Update source files and scratches.txt
+├── update.py         # Update source files
 ├── configure.py      # Update configure.py file
 ├── format.py         # Run clang-format on files
 ├── pr.py            # Create PRs via GitHub API
@@ -49,7 +48,6 @@ pr_url = await auto_detect_and_commit(
     scratch_id="abc123",
     scratch_url="https://decomp.me/scratch/abc123",
     melee_root=Path("/path/to/melee"),
-    author="agent",
     create_pull_request=True
 )
 
@@ -72,7 +70,6 @@ pr_url = await workflow.execute(
     new_code="...",
     scratch_id="abc123",
     scratch_url="https://decomp.me/scratch/abc123",
-    author="agent",
     create_pull_request=True
 )
 ```
@@ -102,19 +99,6 @@ from commit import update_configure_py
 success = await update_configure_py(
     file_path="melee/lb/lbcommand.c",
     melee_root=Path("/path/to/melee")
-)
-```
-
-#### Update scratches.txt
-
-```python
-from commit import update_scratches_txt
-
-success = await update_scratches_txt(
-    function_name="Command_Execute",
-    scratch_id="abc123",
-    melee_root=Path("/path/to/melee"),
-    author="agent"
 )
 ```
 
@@ -186,13 +170,6 @@ Object(NonMatching, "melee/lb/lbcommand.c")  # Before
 Object(Matching, "melee/lb/lbcommand.c")     # After
 ```
 
-### scratches.txt
-
-Located at `config/GALE01/scratches.txt`, entries follow this format:
-```
-FunctionName = 100%:MATCHED; // author:agent id:abc123
-```
-
 ## Workflow Steps
 
 The complete workflow performs these steps in order:
@@ -206,16 +183,12 @@ The complete workflow performs these steps in order:
    - Changes `Object(NonMatching, ...)` to `Object(Matching, ...)`
    - Validates the file exists in configure.py
 
-3. **Update scratches.txt**
-   - Adds entry with function name, match percentage, and scratch ID
-   - Includes author attribution
-
-4. **Format Files**
+3. **Format Files**
    - Runs `git clang-format` on modified C files
    - Ensures code follows project style guidelines
    - Automatically stages formatted changes
 
-5. **Create Pull Request**
+4. **Create Pull Request**
    - Creates new branch: `agent/match-{function_name}`
    - Commits all changes with descriptive message
    - Pushes to remote repository

@@ -26,7 +26,6 @@ async def auto_detect_and_commit(
     scratch_id: str,
     scratch_url: str,
     melee_root: Path,
-    author: str = "agent",
     create_pull_request: bool = True
 ) -> Optional[str]
 ```
@@ -37,7 +36,6 @@ async def auto_detect_and_commit(
 - `scratch_id` (str): decomp.me scratch ID
 - `scratch_url` (str): Full URL to the decomp.me scratch
 - `melee_root` (Path): Path to the melee project root
-- `author` (str, optional): Author name for scratches.txt. Default: "agent"
 - `create_pull_request` (bool, optional): Whether to create a PR. Default: True
 
 **Returns:**
@@ -97,43 +95,6 @@ success = await update_source_file(
     function_name="Command_Execute",
     new_code="bool Command_Execute(...) { ... }",
     melee_root=Path("/path/to/melee")
-)
-```
-
-### `update_scratches_txt()`
-
-Add or update entry in scratches.txt.
-
-```python
-async def update_scratches_txt(
-    function_name: str,
-    scratch_id: str,
-    melee_root: Path,
-    author: str = "agent"
-) -> bool
-```
-
-**Parameters:**
-- `function_name` (str): Name of the matched function
-- `scratch_id` (str): The decomp.me scratch ID
-- `melee_root` (Path): Path to the melee project root
-- `author` (str, optional): Author name. Default: "agent"
-
-**Returns:**
-- `bool`: True if successful, False otherwise
-
-**Entry Format:**
-```
-FunctionName = 100%:MATCHED; // author:agent id:abc123
-```
-
-**Example:**
-```python
-success = await update_scratches_txt(
-    function_name="Command_Execute",
-    scratch_id="abc123",
-    melee_root=Path("/path/to/melee"),
-    author="agent"
 )
 ```
 
@@ -402,7 +363,6 @@ async def execute(
     new_code: str,
     scratch_id: str,
     scratch_url: str,
-    author: str = "agent",
     create_pull_request: bool = True
 ) -> Optional[str]
 ```
@@ -413,7 +373,6 @@ async def execute(
 - `new_code` (str): The new function implementation
 - `scratch_id` (str): decomp.me scratch ID
 - `scratch_url` (str): Full URL to the decomp.me scratch
-- `author` (str, optional): Author name. Default: "agent"
 - `create_pull_request` (bool, optional): Whether to create a PR. Default: True
 
 **Returns:**
@@ -423,9 +382,8 @@ async def execute(
 **Workflow Steps:**
 1. Update the source file with new code
 2. Update configure.py to mark as Matching
-3. Update scratches.txt with match info
-4. Format the changed files
-5. Create a PR (if requested)
+3. Format the changed files
+4. Create a PR (if requested)
 
 **Example:**
 ```python
@@ -505,7 +463,6 @@ pr_url = await auto_detect_and_commit(
 from commit import (
     update_source_file,
     update_configure_py,
-    update_scratches_txt,
     format_files,
     create_pr
 )
@@ -514,7 +471,6 @@ melee_root = Path("/path/to/melee")
 
 await update_source_file("melee/lb/file.c", "MyFunc", "...", melee_root)
 await update_configure_py("melee/lb/file.c", melee_root)
-await update_scratches_txt("MyFunc", "abc123", melee_root)
 await format_files(["src/melee/lb/file.c"], melee_root)
 await create_pr("MyFunc", "https://...", ["src/..."], melee_root)
 ```

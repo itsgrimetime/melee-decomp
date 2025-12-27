@@ -65,7 +65,6 @@ melee-agent sync slugs                            # Show local→production mapp
 **Function extraction:**
 ```bash
 melee-agent extract list --min-match 0 --max-match 0.50  # Find candidates
-melee-agent extract list --matching-only                  # Only committable functions
 melee-agent extract list --show-status                    # Show Matching/NonMatching column
 melee-agent extract get <function_name>                   # Get ASM + metadata
 melee-agent extract get <function_name> --create-scratch  # Get ASM + create scratch in one step
@@ -75,9 +74,8 @@ melee-agent extract get <function_name> --create-scratch  # Get ASM + create scr
 ```bash
 melee-agent audit status                          # Progress overview (merged/review/committed/ready)
 melee-agent audit status --check                  # Check live PR status from GitHub
-melee-agent audit list <category>                 # List by: merged, review, committed, ready, synced, lost, wip
-melee-agent audit recover --add-to-file           # Add synced funcs to scratches.txt
-melee-agent audit recover --sync-lost             # Recover lost scratches
+melee-agent audit list <category>                 # List by: merged, review, committed, ready, lost, wip
+melee-agent audit recover                         # Show lost scratches needing recovery
 ```
 
 **PR tracking:**
@@ -105,28 +103,26 @@ melee-agent hook install                          # Install git pre-commit hook
 **If user asks to "work on something new":** Find an unmatched function:
 
 ```bash
-# For committable functions only (RECOMMENDED):
-melee-agent extract list --matching-only --min-match 0 --max-match 0.50 --limit 20
-
-# To see all functions with their status:
-melee-agent extract list --show-status --min-match 0 --max-match 0.50 --limit 20
+melee-agent extract list --min-match 0 --max-match 0.50 --limit 20
 ```
 
-**CRITICAL: Matching vs NonMatching Files**
+**Understanding Matching vs NonMatching Files**
 
-The melee project has two types of source files:
-- **Matching files**: Compile from C source. Functions here can be committed.
-- **NonMatching files**: Use pre-compiled object files from the original binary. Functions here CANNOT be committed without first converting the entire file to Matching status.
+The melee project has two types of source files in `configure.py`:
+- **Matching files**: Build compiles from C source
+- **NonMatching files**: Build uses pre-compiled object from original .dol for linking
 
-**Why this matters:**
-- If you match a function in a NonMatching file, `melee-agent commit apply` will fail with linker errors
-- NonMatching files reference original binary symbols (e.g., `it_803F5BA8`) that may not exist in Matching files
-- Converting a file from NonMatching→Matching often causes cascading linker errors from other NonMatching files
+**Key insight:** You CAN work on functions in NonMatching files! The build system:
+- Uses the original .dol object for linking (so builds always pass)
+- Tracks per-function match % in `report.json` to detect regressions
+- Only requires flipping to Matching when ALL functions in a file are 100% matched AND data matches
 
-**Use `--matching-only`** to only see functions that can actually be committed.
+**When to flip a file to Matching:**
+- Every function in the file must be 100% matched
+- Data must also match
+- Use `tools/dep_graph.py --leaves` to find files with no NonMatching dependencies
 
 **Prioritization strategy:**
-- **In Matching files** (REQUIRED for commit) - Use `--matching-only` flag
 - **0-50% match** (PREFERRED) - Fresh functions with room to improve
 - **50-500 bytes** - Not too simple, not too complex
 - **In well-understood modules** - ft/, lb/, gr/ have good patterns
@@ -267,11 +263,9 @@ melee-agent commit apply <function_name> <scratch_slug>
 
 The commit workflow automatically:
 - Updates the source file with your code
-- Updates `config/GALE01/scratches.txt` with the match entry
+- Updates `configure.py` to mark the file as Matching
 - Validates and verifies compilation
 - Reverts if compilation fails
-
-**IMPORTANT:** Never manually edit `scratches.txt` - always use `melee-agent commit apply`. The CLI ensures proper formatting.
 
 **Always mark as completed when done** (this prevents other agents from re-picking it):
 ```bash
@@ -338,11 +332,11 @@ void my_function(void) {
 
 User: `/decomp` (no function specified)
 
-**Step 0:** Find a good candidate (committable functions only)
+**Step 0:** Find a good candidate
 ```bash
-melee-agent extract list --matching-only --min-match 0 --max-match 0.50 --limit 10
+melee-agent extract list --min-match 0 --max-match 0.50 --limit 10
 ```
-→ Pick `lbColl_80008440` at 0% match, 180 bytes (in a Matching file, can be committed)
+→ Pick `lbColl_80008440` at 0% match, 180 bytes
 → Claim it:
 ```bash
 melee-agent claim add lbColl_80008440
@@ -390,7 +384,6 @@ melee-agent complete mark lbColl_80008440 xYz12 97.0 --committed --notes "regist
 3. **Don't ignore file-local types** - they must be included in source
 4. **Don't commit to repo until 95%+ match** - only Step 7 touches the melee repo
 5. **Don't keep trying the same changes** - if reordering doesn't help after 3-4 attempts, the issue is likely context-related
-6. **Don't try to commit functions in NonMatching files** - use `--matching-only` when finding functions to avoid wasted effort
 
 ## Troubleshooting
 
@@ -420,21 +413,11 @@ melee-agent complete mark lbColl_80008440 xYz12 97.0 --committed --notes "regist
 - Use `--dry-run` to preview and test before actual commit
 - Check that file-local types are included in your scratch source
 
-**Malformed scratches.txt entries:**
-- Run `melee-agent commit lint` to validate the file
-- Run `melee-agent commit lint --fix` to remove malformed entries
-- Always use `melee-agent commit apply` instead of manual edits
-
-**Linker error: undefined symbol (e.g., `it_803F5BA8`):**
-- The function is in a NonMatching file that references symbols from other NonMatching files
-- These symbols use original binary names that don't exist in Matching files
-- **Solution**: Don't commit this function. Use `--matching-only` to find committable functions instead
-- Converting NonMatching→Matching requires fixing all symbol references, which often causes cascading errors
-
-**Commit succeeds but build fails with undefined reference:**
-- A NonMatching file depends on a symbol you just renamed in your Matching file
-- NonMatching files use pre-compiled objects, so you can't update their references
-- **Solution**: Keep the original symbol name in your Matching file, or wait until the dependent file is also converted to Matching
+**Understanding NonMatching files:**
+- Functions in NonMatching files CAN be worked on - matches are tracked per-function
+- The build uses the original .dol object for linking, so builds always pass
+- A file can only be flipped to Matching when ALL its functions are 100% AND data matches
+- Use `tools/dep_graph.py --leaves` to find NonMatching files with no NonMatching dependencies
 
 ## Full Lifecycle Workflow
 
@@ -445,9 +428,7 @@ This is the complete workflow from finding functions to submitting PRs:
 Multiple agents work simultaneously:
 
 1. **Check status first**: `melee-agent audit status` to see overall progress
-2. **Find functions**: `melee-agent extract list --matching-only --min-match 0 --max-match 50`
-   - Use `--matching-only` to only see functions that can be committed (in Matching files)
-   - Functions in NonMatching files cannot be committed without resolving linker dependencies
+2. **Find functions**: `melee-agent extract list --min-match 0 --max-match 50`
 3. **Claim & work**: Claim a function, create scratch, iterate to 95%+
 4. **Mark complete**: `melee-agent complete mark <func> <slug> <pct> --committed`
 
@@ -486,8 +467,7 @@ Each function progresses through these states:
 | Claimed | `/tmp/decomp_claims.json` | Work on it (expires 1hr) |
 | Local scratch | local decomp.me | Continue improving |
 | 95%+ match | `completed_functions.json` (with branch) | Sync to production |
-| Synced | `scratches_slug_map.json` | Add to scratches.txt |
-| In scratches.txt | `melee/config/.../scratches.txt` | Include in PR |
+| Synced | `scratches_slug_map.json` | Create PR |
 | PR linked | `completed_functions.json` (pr_url, branch) | Wait for review |
 | PR approved | GitHub | Merge PR |
 | Merged | doldecomp/melee | Done! |
@@ -506,13 +486,11 @@ melee-agent audit list merged      # PRs merged (done!)
 melee-agent audit list review      # PRs open, in review
 melee-agent audit list committed   # Committed but no PR
 melee-agent audit list ready       # Ready for PR
-melee-agent audit list synced      # Synced but missing from file
 melee-agent audit list lost        # 95%+ but not synced
 melee-agent audit list wip         # Work in progress
 
 # Recovery
-melee-agent audit recover --add-to-file --dry-run   # Preview
-melee-agent audit recover --add-to-file             # Execute
+melee-agent audit recover          # Show lost scratches
 ```
 
 ### Common Issues
@@ -520,12 +498,7 @@ melee-agent audit recover --add-to-file             # Execute
 **"Lost" matches (95%+ but not tracked):**
 - These exist on local decomp.me but weren't synced
 - Run `melee-agent sync production` to push to prod
-- Then `melee-agent audit recover --add-to-file`
-
-**"Synced but not in file":**
-- Happens if melee submodule was reset/updated
-- Run `melee-agent audit recover --add-to-file`
 
 **Pre-commit validation fails:**
-- Local slugs in scratches.txt: Sync first
-- Run `melee-agent sync production` then retry
+- Check symbols.txt is updated for new function names
+- Ensure clang-format has been run

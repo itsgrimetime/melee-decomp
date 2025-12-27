@@ -1,7 +1,6 @@
 """Update source files with matched code."""
 
 import re
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -233,79 +232,3 @@ async def update_source_file(
         return False
 
 
-def validate_scratches_entry(function_name: str, scratch_id: str, author: str) -> tuple[bool, str]:
-    """Validate inputs for a scratches.txt entry.
-
-    Returns:
-        Tuple of (is_valid, error_message). error_message is empty if valid.
-    """
-    # Function name: alphanumeric, underscore, no spaces
-    if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', function_name):
-        return False, f"Invalid function name '{function_name}': must be a valid C identifier"
-
-    # Scratch ID: 5 alphanumeric characters (decomp.me format)
-    if not re.match(r'^[a-zA-Z0-9]{5}$', scratch_id):
-        return False, f"Invalid scratch ID '{scratch_id}': must be exactly 5 alphanumeric characters"
-
-    # Author: no spaces or special chars
-    if not re.match(r'^[a-zA-Z0-9_-]+$', author):
-        return False, f"Invalid author '{author}': must be alphanumeric with underscores/dashes"
-
-    return True, ""
-
-
-async def update_scratches_txt(
-    function_name: str,
-    scratch_id: str,
-    melee_root: Path,
-    author: str = "agent"
-) -> bool:
-    """Add/update entry in scratches.txt.
-
-    Args:
-        function_name: Name of the matched function
-        scratch_id: The decomp.me scratch ID
-        melee_root: Path to the melee project root
-        author: Author name (default: "agent")
-
-    Returns:
-        True if successful, False otherwise
-    """
-    try:
-        # Validate inputs first
-        is_valid, error_msg = validate_scratches_entry(function_name, scratch_id, author)
-        if not is_valid:
-            print(f"Error: {error_msg}")
-            return False
-
-        scratches_path = melee_root / "config" / "GALE01" / "scratches.txt"
-
-        if not scratches_path.exists():
-            print(f"Error: scratches.txt not found at {scratches_path}")
-            return False
-
-        # Create the new entry with timestamps
-        # Format: FunctionName = 100%:MATCHED; // author:agent id:XXXXX updated:TIMESTAMP created:TIMESTAMP
-        now = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
-        new_entry = f"{function_name} = 100%:MATCHED; // author:{author} id:{scratch_id} updated:{now} created:{now}\n"
-
-        # Read existing content
-        content = scratches_path.read_text(encoding='utf-8')
-
-        # Check if an entry for this function already exists
-        pattern = re.compile(rf'^{re.escape(function_name)}\s*=.*id:{re.escape(scratch_id)}', re.MULTILINE)
-
-        if pattern.search(content):
-            print(f"Entry for '{function_name}' with id '{scratch_id}' already exists in scratches.txt")
-            return True
-
-        # Append the new entry
-        with open(scratches_path, 'a', encoding='utf-8') as f:
-            f.write(new_entry)
-
-        print(f"Successfully added entry for '{function_name}' to scratches.txt")
-        return True
-
-    except Exception as e:
-        print(f"Error updating scratches.txt: {e}")
-        return False

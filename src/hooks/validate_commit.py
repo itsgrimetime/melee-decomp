@@ -2,13 +2,13 @@
 """Pre-commit validation hook for melee decompilation commits.
 
 Validates:
-1. 100% matches are in scratches.txt and not duplicates
-2. Scratch IDs are production decomp.me slugs (not local)
-3. symbols.txt is updated if function names changed
-4. CONTRIBUTING.md guidelines are followed
+1. Implicit function declarations (like CI's Issues check)
+2. symbols.txt is updated if function names changed
+3. CONTRIBUTING.md coding guidelines are followed
+4. clang-format has been run on C files
 
 Usage:
-    python -m src.hooks.validate_commit [--fix] [--no-production-check]
+    python -m src.hooks.validate_commit [--fix]
 """
 
 import argparse
@@ -22,12 +22,8 @@ from typing import Optional
 # Project paths
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 MELEE_ROOT = PROJECT_ROOT / "melee"
-SCRATCHES_FILE = MELEE_ROOT / "config" / "GALE01" / "scratches.txt"
 SYMBOLS_FILE = MELEE_ROOT / "config" / "GALE01" / "symbols.txt"
-SLUG_MAP_FILE = PROJECT_ROOT / "config" / "scratches_slug_map.json"
-
-# Production decomp.me
-PRODUCTION_DECOMP_ME = "https://decomp.me"
+COMPILE_COMMANDS = MELEE_ROOT / "compile_commands.json"
 
 
 class ValidationError:
@@ -53,30 +49,10 @@ class ValidationError:
 class CommitValidator:
     """Validates a commit against project guidelines."""
 
-    def __init__(self, melee_root: Path = MELEE_ROOT, check_production: bool = True):
+    def __init__(self, melee_root: Path = MELEE_ROOT):
         self.melee_root = melee_root
-        self.check_production = check_production
         self.errors: list[ValidationError] = []
         self.warnings: list[ValidationError] = []
-
-        # Load slug map (production_slug -> local info)
-        self.slug_map = self._load_slug_map()
-        # Invert to get local_slug -> production_slug
-        self.local_to_production = {
-            v.get("local_slug"): k
-            for k, v in self.slug_map.items()
-            if v.get("local_slug")
-        }
-
-    def _load_slug_map(self) -> dict:
-        """Load the production slug mapping."""
-        if not SLUG_MAP_FILE.exists():
-            return {}
-        try:
-            with open(SLUG_MAP_FILE, "r") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, IOError):
-            return {}
 
     def _get_staged_files(self) -> list[str]:
         """Get list of staged files."""
@@ -102,142 +78,138 @@ class CommitValidator:
         except subprocess.CalledProcessError:
             return ""
 
-    def validate_scratches_txt(self) -> None:
-        """Validate only NEW scratches.txt entries (from staged changes)."""
-        if not SCRATCHES_FILE.exists():
-            return
-
-        # Get the staged diff for scratches.txt
-        diff = self._get_staged_diff("melee/config/GALE01/scratches.txt")
-        if not diff:
-            return  # No changes to scratches.txt
-
-        # Parse the full file to check for duplicates against existing entries
-        content = SCRATCHES_FILE.read_text()
-        existing_slugs: set[str] = set()
-        existing_funcs_100pct: dict[str, list[str]] = {}  # func_name -> [slugs]
-
-        entry_pattern = re.compile(
-            r'^(?P<name>\w+)\s*=\s*(?P<match>[\d.]+%|OK):(?P<status>\S+);\s*//'
-            r'(?:\s*author:(?P<author>\S+))?'
-            r'(?:\s*id:(?P<slug>\w+))?',
-            re.MULTILINE
-        )
-
-        for match in entry_pattern.finditer(content):
-            slug = match.group("slug")
-            func_name = match.group("name")
-            match_pct = match.group("match")
-            if slug:
-                existing_slugs.add(slug)
-            if match_pct in ("OK", "100%"):
-                if func_name not in existing_funcs_100pct:
-                    existing_funcs_100pct[func_name] = []
-                if slug:
-                    existing_funcs_100pct[func_name].append(slug)
-
-        # Now check only the ADDED lines in the diff
-        added_entries: list[tuple[str, str, str]] = []  # (func_name, slug, match_pct)
-
-        for line in diff.split("\n"):
-            if not line.startswith("+") or line.startswith("+++"):
-                continue
-
-            content_line = line[1:]  # Remove + prefix
-            match = entry_pattern.match(content_line.strip())
-            if not match:
-                continue
-
-            func_name = match.group("name")
-            slug = match.group("slug")
-            match_pct = match.group("match")
-
-            if not slug:
-                continue
-
-            added_entries.append((func_name, slug, match_pct))
-
-            # Check if this is a local slug (not synced to production)
-            if slug in self.local_to_production:
-                prod_slug = self.local_to_production[slug]
-                self.errors.append(ValidationError(
-                    f"Local slug '{slug}' should be production slug '{prod_slug}'",
-                    str(SCRATCHES_FILE), fixable=True
-                ))
-
-            # Check for duplicate slug being added
-            if slug in existing_slugs:
-                # Only warn if we're adding a duplicate (the slug already exists)
-                # Count how many times this slug appears in added entries
-                added_count = sum(1 for _, s, _ in added_entries if s == slug)
-                if added_count > 1:
-                    self.errors.append(ValidationError(
-                        f"Duplicate scratch ID '{slug}' being added",
-                        str(SCRATCHES_FILE)
-                    ))
-
-            # Check for duplicate 100% match for same function
-            if match_pct in ("OK", "100%"):
-                if func_name in existing_funcs_100pct:
-                    existing_100_slugs = existing_funcs_100pct[func_name]
-                    # Only warn if adding a NEW 100% entry (different slug)
-                    if slug not in existing_100_slugs:
-                        self.warnings.append(ValidationError(
-                            f"Adding another 100% match for '{func_name}' (existing: {existing_100_slugs[:2]})",
-                            str(SCRATCHES_FILE)
-                        ))
-
-            # Check if slug exists on production (for new 100% matches)
-            if match_pct in ("OK", "100%") and slug not in self.slug_map:
-                if self.check_production:
-                    self.warnings.append(ValidationError(
-                        f"New 100% match '{func_name}' (id:{slug}) not in slug map - sync to production first",
-                        str(SCRATCHES_FILE)
-                    ))
-
-    def validate_production_slugs(self) -> None:
-        """Verify new scratch IDs exist on production decomp.me (via HTTP)."""
-        if not self.check_production:
-            return
-
-        # Get newly added scratches.txt entries from staged diff
-        diff = self._get_staged_diff("melee/config/GALE01/scratches.txt")
-        if not diff:
-            return
-
-        # Find added entries with 100% match that aren't in our slug map
-        slugs_to_check = []
-        for line in diff.split("\n"):
-            if line.startswith("+") and not line.startswith("+++"):
-                content = line[1:]
-                if "100%" in content or "= OK:" in content:
-                    slug_match = re.search(r'\bid:(\w{5})\b', content)
-                    if slug_match:
-                        slug = slug_match.group(1)
-                        # Skip if already in slug map (known production slug)
-                        if slug not in self.slug_map and slug not in self.local_to_production:
-                            slugs_to_check.append(slug)
-
-        if not slugs_to_check:
-            return
-
-        # Verify slugs exist on production (limit to avoid slowdown)
-        import httpx
+    def _load_compile_commands(self) -> dict[str, list[str]]:
+        """Load compile_commands.json and return file -> args mapping."""
+        if not COMPILE_COMMANDS.exists():
+            return {}
 
         try:
-            with httpx.Client(timeout=10.0) as client:
-                for slug in slugs_to_check[:3]:
-                    try:
-                        resp = client.get(f"{PRODUCTION_DECOMP_ME}/api/scratch/{slug}")
-                        if resp.status_code == 404:
+            with open(COMPILE_COMMANDS) as f:
+                commands = json.load(f)
+
+            # Build mapping from file path to compiler arguments
+            file_args = {}
+            for entry in commands:
+                file_path = entry.get("file", "")
+                args = entry.get("arguments", [])
+                if file_path and args:
+                    # Normalize to relative path from melee root
+                    if file_path.startswith(str(MELEE_ROOT)):
+                        rel_path = file_path[len(str(MELEE_ROOT)) + 1:]
+                        file_args[rel_path] = args
+            return file_args
+        except (json.JSONDecodeError, IOError):
+            return {}
+
+    def validate_implicit_declarations(self) -> None:
+        """Check for implicit function declarations using clang.
+
+        This mirrors the CI 'Issues' check that catches missing includes.
+        """
+        staged_files = self._get_staged_files()
+
+        # Handle both parent repo (melee/src/...) and submodule (src/...) contexts
+        c_files = []
+        for f in staged_files:
+            if f.endswith(".c"):
+                if f.startswith("melee/src/"):
+                    c_files.append(f)
+                elif f.startswith("src/melee/"):
+                    # Running from within melee submodule
+                    c_files.append("melee/" + f)
+
+        # Also check melee submodule for changes if not already found
+        if not c_files:
+            try:
+                result = subprocess.run(
+                    ["git", "diff", "--cached", "--name-only"],
+                    capture_output=True, text=True, check=True,
+                    cwd=MELEE_ROOT
+                )
+                submodule_files = result.stdout.strip().split("\n") if result.stdout.strip() else []
+                for f in submodule_files:
+                    if f.startswith("src/melee/") and f.endswith(".c"):
+                        c_files.append("melee/" + f)
+            except subprocess.CalledProcessError:
+                pass
+
+        if not c_files:
+            return
+
+        # Check if clang is available
+        try:
+            subprocess.run(["clang", "--version"], capture_output=True, check=True)
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            self.warnings.append(ValidationError(
+                "clang not found - skipping implicit declaration check"
+            ))
+            return
+
+        # Load compile commands for proper include paths
+        compile_commands = self._load_compile_commands()
+        if not compile_commands:
+            self.warnings.append(ValidationError(
+                "compile_commands.json not found - run 'ninja' in melee/ first"
+            ))
+            return
+
+        for c_file in c_files:
+            # Get the path relative to melee/ for display, and src/ path for compile_commands
+            if c_file.startswith("melee/"):
+                display_path = c_file
+                # compile_commands uses paths like "src/melee/ft/ftcoll.c"
+                src_path = c_file[6:]  # Remove "melee/" prefix -> "src/melee/ft/ftcoll.c"
+            else:
+                display_path = c_file
+                src_path = c_file
+
+            # Find matching compile command
+            args = compile_commands.get(src_path)
+            if not args:
+                continue
+
+            # Build clang command for syntax check only
+            # Filter to just include paths and defines, add our warning flag
+            clang_args = ["clang", "-fsyntax-only", "-Werror=implicit-function-declaration"]
+
+            for arg in args[1:]:  # Skip the compiler name
+                if arg.startswith("-I") or arg.startswith("-D") or arg.startswith("-nostdinc"):
+                    clang_args.append(arg)
+                elif arg.startswith("--target="):
+                    clang_args.append(arg)
+                elif arg == "-fno-builtin":
+                    clang_args.append(arg)
+
+            # Add the source file
+            clang_args.append(str(MELEE_ROOT / src_path))
+
+            # Run clang
+            result = subprocess.run(
+                clang_args,
+                capture_output=True,
+                text=True,
+                cwd=MELEE_ROOT
+            )
+
+            # Parse errors from stderr
+            if result.returncode != 0:
+                for line in result.stderr.split("\n"):
+                    # Match both old and new clang message formats
+                    if "implicit declaration of function" in line or "call to undeclared function" in line:
+                        # Extract file:line: message
+                        match = re.match(r"([^:]+):(\d+):\d+: (?:error|warning): (.+)", line)
+                        if match:
+                            file_path = match.group(1)
+                            line_num = int(match.group(2))
+                            message = match.group(3)
+                            # Make path relative
+                            if str(MELEE_ROOT) in file_path:
+                                file_path = "melee/" + file_path.split(str(MELEE_ROOT) + "/")[1]
                             self.errors.append(ValidationError(
-                                f"Scratch '{slug}' not found on production - run 'melee-agent sync production' first",
-                                str(SCRATCHES_FILE)
+                                message,
+                                file_path,
+                                line_num
                             ))
-                    except Exception:
-                        pass  # Network errors shouldn't block
-        except Exception:
-            pass
 
     def validate_symbols_txt(self) -> None:
         """Check if symbols.txt needs updating for new function names."""
@@ -365,8 +337,7 @@ class CommitValidator:
 
     def run(self) -> tuple[list[ValidationError], list[ValidationError]]:
         """Run all validations."""
-        self.validate_scratches_txt()
-        self.validate_production_slugs()
+        self.validate_implicit_declarations()
         self.validate_symbols_txt()
         self.validate_coding_style()
         self.validate_clang_format()
@@ -376,12 +347,10 @@ class CommitValidator:
 def main():
     parser = argparse.ArgumentParser(description="Validate commit against project guidelines")
     parser.add_argument("--fix", action="store_true", help="Attempt to fix issues")
-    parser.add_argument("--no-production-check", action="store_true",
-                        help="Skip production decomp.me verification")
     parser.add_argument("--verbose", "-v", action="store_true", help="Show all warnings")
     args = parser.parse_args()
 
-    validator = CommitValidator(check_production=not args.no_production_check)
+    validator = CommitValidator()
     errors, warnings = validator.run()
 
     # Print results

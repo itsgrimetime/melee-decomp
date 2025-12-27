@@ -16,9 +16,6 @@ def hook_validate(
     fix: Annotated[
         bool, typer.Option("--fix", help="Attempt to fix issues automatically")
     ] = False,
-    no_production_check: Annotated[
-        bool, typer.Option("--no-production-check", help="Skip production decomp.me verification")
-    ] = False,
     verbose: Annotated[
         bool, typer.Option("--verbose", "-v", help="Show all warnings")
     ] = False,
@@ -26,17 +23,14 @@ def hook_validate(
     """Validate staged changes against project guidelines.
 
     Checks:
-    - 100% matches are in scratches.txt and not duplicates
-    - Scratch IDs are production slugs (not local instance)
+    - Implicit function declarations (uses clang, like CI's Issues check)
     - symbols.txt is updated if needed
     - CONTRIBUTING.md coding style guidelines
+    - clang-format has been run
     """
     from src.hooks.validate_commit import CommitValidator
 
-    validator = CommitValidator(
-        melee_root=DEFAULT_MELEE_ROOT,
-        check_production=not no_production_check
-    )
+    validator = CommitValidator(melee_root=DEFAULT_MELEE_ROOT)
     errors, warnings = validator.run()
 
     if warnings and verbose:

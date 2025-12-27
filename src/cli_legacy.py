@@ -1133,76 +1133,6 @@ def commit_format(
         raise typer.Exit(1)
 
 
-@commit_app.command("lint")
-def commit_lint(
-    melee_root: Annotated[
-        Path, typer.Option("--melee-root", "-m", help="Path to melee submodule")
-    ] = DEFAULT_MELEE_ROOT,
-    fix: Annotated[
-        bool, typer.Option("--fix", help="Remove malformed entries")
-    ] = False,
-):
-    """Validate scratches.txt format and report issues."""
-    scratches_path = melee_root / "config" / "GALE01" / "scratches.txt"
-
-    if not scratches_path.exists():
-        console.print(f"[red]scratches.txt not found at {scratches_path}[/red]")
-        raise typer.Exit(1)
-
-    content = scratches_path.read_text(encoding='utf-8')
-    lines = content.split('\n')
-
-    # Valid entry pattern: FunctionName = PERCENT%:STATUS; // author:NAME id:SLUG
-    valid_pattern = re.compile(
-        r'^[a-zA-Z_][a-zA-Z0-9_]*\s*=\s*(?:\d+(?:\.\d+)?%|OK):[A-Z0-9x_]+;\s*//'
-        r'(?:\s*author:[a-zA-Z0-9_-]+)?'
-        r'(?:\s*id:[a-zA-Z0-9]+)?'
-    )
-
-    # Malformed pattern: just function = slug (missing percentage/status)
-    malformed_pattern = re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*\s*=\s*[a-zA-Z0-9]{5}$')
-
-    issues = []
-    malformed_lines = []
-
-    for i, line in enumerate(lines, 1):
-        line = line.strip()
-        if not line or line.startswith('#') or line.startswith('//'):
-            continue  # Skip empty lines and comments
-
-        if malformed_pattern.match(line):
-            issues.append((i, line, "Malformed: missing percentage/status (format: func = slug)"))
-            malformed_lines.append(i)
-        elif not valid_pattern.match(line):
-            # Could be a valid older format or truly invalid
-            # Check if it at least has the basic structure
-            if '=' in line and '//' in line:
-                pass  # Likely valid older format
-            elif '=' in line:
-                issues.append((i, line, "Missing comment section (// author:... id:...)"))
-
-    if issues:
-        console.print(f"[yellow]Found {len(issues)} issue(s) in scratches.txt:[/yellow]\n")
-        for line_num, line_content, issue in issues[:20]:  # Show first 20
-            console.print(f"  Line {line_num}: {issue}")
-            console.print(f"    [dim]{line_content[:80]}{'...' if len(line_content) > 80 else ''}[/dim]")
-
-        if len(issues) > 20:
-            console.print(f"\n  [dim]... and {len(issues) - 20} more issues[/dim]")
-
-        if fix and malformed_lines:
-            # Remove malformed lines
-            new_lines = [l for i, l in enumerate(lines, 1) if i not in malformed_lines]
-            scratches_path.write_text('\n'.join(new_lines), encoding='utf-8')
-            console.print(f"\n[green]Removed {len(malformed_lines)} malformed entries[/green]")
-        elif malformed_lines:
-            console.print(f"\n[dim]Run with --fix to remove {len(malformed_lines)} malformed entries[/dim]")
-
-        raise typer.Exit(1)
-    else:
-        console.print("[green]scratches.txt is valid[/green]")
-
-
 # ============================================================================
 # Docker Commands
 # ============================================================================
@@ -1304,46 +1234,6 @@ def _prompt_cf_clearance() -> str:
     return cf_clearance.strip()
 
 
-def _parse_scratches_txt(scratches_file: Path) -> list[dict[str, Any]]:
-    """Parse scratches.txt to extract committed match entries.
-
-    Format: FunctionName = MatchPercent%:Status; // author:NAME id:SLUG [parent:PARENT]
-
-    Returns list of dicts with: name, match_percent, status, author, slug, parent
-    """
-    entries = []
-    if not scratches_file.exists():
-        return entries
-
-    # Pattern to parse entries
-    # Examples:
-    # func_80003100 = OK:0x80003100; // author:ChrisNonyminus id:wztwe
-    # __check_pad3 = 100%:0x800051EC; // author:roeming id:XyYWD
-    pattern = re.compile(
-        r'^(?P<name>\w+)\s*=\s*(?P<match>[\d.]+%|OK):(?P<status>\w+);\s*//'
-        r'(?:\s*author:(?P<author>\S+))?'
-        r'(?:\s*id:(?P<slug>\w+))?'
-        r'(?:\s*parent:(?P<parent>\w+))?',
-        re.MULTILINE
-    )
-
-    content = scratches_file.read_text()
-    for match in pattern.finditer(content):
-        entry = {
-            'name': match.group('name'),
-            'match_percent': match.group('match'),
-            'status': match.group('status'),
-            'author': match.group('author') or 'unknown',
-            'slug': match.group('slug'),
-            'parent': match.group('parent'),
-        }
-        # Only include entries with valid scratch slugs
-        if entry['slug']:
-            entries.append(entry)
-
-    return entries
-
-
 @sync_app.command("status")
 def sync_status():
     """Check cf_clearance cookie status and test connection to production."""
@@ -1420,106 +1310,6 @@ def sync_auth(
     sync_status()
 
 
-@sync_app.command("list")
-def sync_list(
-    melee_root: Annotated[
-        Path, typer.Option("--melee-root", "-m", help="Path to melee submodule")
-    ] = DEFAULT_MELEE_ROOT,
-    min_match: Annotated[
-        float, typer.Option("--min-match", help="Minimum match percentage to include")
-    ] = 95.0,
-    author: Annotated[
-        Optional[str], typer.Option("--author", "-a", help="Filter by author name")
-    ] = None,
-    limit: Annotated[
-        int, typer.Option("--limit", "-n", help="Maximum entries to show")
-    ] = 50,
-):
-    """List committed scratches that can be synced to production."""
-    scratches_file = melee_root / "config" / "GALE01" / "scratches.txt"
-    entries = _parse_scratches_txt(scratches_file)
-
-    # Filter by match percentage and author
-    filtered = []
-    for entry in entries:
-        match_str = entry['match_percent']
-        if match_str == 'OK':
-            match_pct = 100.0
-        else:
-            match_pct = float(match_str.rstrip('%'))
-
-        if match_pct < min_match:
-            continue
-        if author and entry['author'].lower() != author.lower():
-            continue
-
-        entry['match_pct'] = match_pct
-        filtered.append(entry)
-
-    # Sort by match percentage descending
-    filtered.sort(key=lambda x: -x['match_pct'])
-    filtered = filtered[:limit]
-
-    if not filtered:
-        console.print("[yellow]No matching scratches found[/yellow]")
-        return
-
-    # Load slug map to check for already-synced scratches
-    slug_map = _load_slug_map(melee_root)
-    production_slugs = set(slug_map.keys())
-
-    title = f"Scratches to Sync (>= {min_match}% match)"
-    if author:
-        title += f" by {author}"
-    table = Table(title=title)
-    table.add_column("Function", style="cyan")
-    table.add_column("Match %", justify="right")
-    table.add_column("Slug")
-    table.add_column("Author")
-    table.add_column("Status")
-
-    synced_count = 0
-    for entry in filtered:
-        is_synced = entry['slug'] in production_slugs
-        if is_synced:
-            synced_count += 1
-        table.add_row(
-            entry['name'],
-            f"{entry['match_pct']:.1f}%",
-            entry['slug'],
-            entry['author'],
-            "[green]synced[/green]" if is_synced else "[yellow]pending[/yellow]",
-        )
-
-    console.print(table)
-    pending = len(filtered) - synced_count
-    console.print(f"\n[dim]Found {len(filtered)} scratches ({pending} pending, {synced_count} already synced)[/dim]")
-
-
-def _update_scratches_txt_slug(scratches_file: Path, old_slug: str, new_slug: str) -> bool:
-    """Replace a scratch slug in scratches.txt.
-
-    Returns True if the file was modified.
-    """
-    content = scratches_file.read_text()
-    # Replace id:OLD_SLUG with id:NEW_SLUG
-    new_content = re.sub(
-        rf'\bid:{re.escape(old_slug)}\b',
-        f'id:{new_slug}',
-        content
-    )
-    # Also update parent:OLD_SLUG references
-    new_content = re.sub(
-        rf'\bparent:{re.escape(old_slug)}\b',
-        f'parent:{new_slug}',
-        new_content
-    )
-    if new_content != content:
-        scratches_file.write_text(new_content)
-        return True
-    return False
-
-
 # Slug map file location - in melee-decomp repo, not melee submodule
 # This avoids conflicts when updating the melee submodule
 SLUG_MAP_FILE = Path(__file__).parent.parent / "config" / "scratches_slug_map.json"
@@ -1541,264 +1331,6 @@ def _save_slug_map(melee_root: Path, slug_map: dict[str, dict[str, Any]]) -> Non
     SLUG_MAP_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(SLUG_MAP_FILE, 'w') as f:
         json.dump(slug_map, f, indent=2)
-
-
-@sync_app.command("production")
-def sync_production(
-    melee_root: Annotated[
-        Path, typer.Option("--melee-root", "-m", help="Path to melee submodule")
-    ] = DEFAULT_MELEE_ROOT,
-    local_url: Annotated[
-        str, typer.Option("--local-url", help="Local decomp.me instance URL")
-    ] = DEFAULT_DECOMP_ME_URL,
-    min_match: Annotated[
-        float, typer.Option("--min-match", help="Minimum match percentage to sync")
-    ] = 95.0,
-    author: Annotated[
-        Optional[str], typer.Option("--author", "-a", help="Filter by author name")
-    ] = None,
-    limit: Annotated[
-        int, typer.Option("--limit", "-n", help="Maximum scratches to sync")
-    ] = 10,
-    dry_run: Annotated[
-        bool, typer.Option("--dry-run", help="Show what would be synced without syncing")
-    ] = False,
-    force: Annotated[
-        bool, typer.Option("--force", "-f", help="Re-sync even if already exists on production")
-    ] = False,
-):
-    """Sync committed scratches from local instance to production decomp.me.
-
-    This will:
-    1. Parse scratches.txt for committed matches
-    2. Fetch each scratch from your local instance
-    3. Create the scratch on production decomp.me
-    4. Update scratches.txt with the new production slug
-    5. Save the local->production mapping to scratches_local_slugs.json
-
-    The mapping file (scratches_local_slugs.json) should be kept in your local
-    fork but not submitted with PRs to upstream.
-
-    Requires cf_clearance cookie - run 'melee-agent sync auth' first.
-    """
-    _require_api_url(local_url)
-
-    # Check for cf_clearance
-    prod_cookies = _load_production_cookies()
-    if not prod_cookies.get('cf_clearance'):
-        console.print("[red]No cf_clearance cookie configured[/red]")
-        console.print("[dim]Run 'melee-agent sync auth' first[/dim]")
-        raise typer.Exit(1)
-
-    # Parse scratches.txt
-    scratches_file = melee_root / "config" / "GALE01" / "scratches.txt"
-    entries = _parse_scratches_txt(scratches_file)
-
-    # Filter by match percentage and author
-    to_sync = []
-    for entry in entries:
-        match_str = entry['match_percent']
-        if match_str == 'OK':
-            match_pct = 100.0
-        else:
-            match_pct = float(match_str.rstrip('%'))
-
-        if match_pct < min_match:
-            continue
-        if author and entry['author'].lower() != author.lower():
-            continue
-
-        entry['match_pct'] = match_pct
-        to_sync.append(entry)
-
-    # Sort and limit
-    to_sync.sort(key=lambda x: -x['match_pct'])
-    to_sync = to_sync[:limit]
-
-    if not to_sync:
-        console.print("[yellow]No scratches to sync[/yellow]")
-        return
-
-    # Load slug map to check for already-synced scratches
-    slug_map = _load_slug_map(melee_root)
-    production_slugs = set(slug_map.keys())
-
-    # Filter out entries that are already production slugs
-    unsynced = []
-    already_synced = []
-    for entry in to_sync:
-        if entry['slug'] in production_slugs:
-            already_synced.append(entry)
-        else:
-            unsynced.append(entry)
-
-    if already_synced and not force:
-        console.print(f"[dim]Skipping {len(already_synced)} already-synced scratches (use --force to re-sync)[/dim]")
-
-    to_sync = unsynced if not force else to_sync
-
-    if not to_sync:
-        console.print("[yellow]All scratches already synced[/yellow]")
-        return
-
-    console.print(f"[bold]Syncing {len(to_sync)} scratches to production...[/bold]\n")
-
-    if dry_run:
-        console.print("[cyan]DRY RUN - no changes will be made[/cyan]\n")
-
-    from src.client import DecompMeAPIClient, ScratchCreate
-
-    # Track sync results
-    synced_file = PRODUCTION_COOKIES_FILE.parent / "synced_scratches.json"
-    synced = {}
-    if synced_file.exists():
-        try:
-            with open(synced_file, 'r') as f:
-                synced = json.load(f)
-        except (json.JSONDecodeError, IOError):
-            pass
-
-    async def do_sync():
-        results = {"success": 0, "skipped": 0, "failed": 0, "details": []}
-
-        # Create clients for both instances
-        async with DecompMeAPIClient(base_url=local_url) as local_client:
-            # Production client needs cookies set manually
-            import httpx
-
-            prod_cookies_obj = httpx.Cookies()
-            prod_cookies_obj.set("cf_clearance", prod_cookies['cf_clearance'], domain="decomp.me")
-            if prod_cookies.get('sessionid'):
-                prod_cookies_obj.set("sessionid", prod_cookies['sessionid'], domain="decomp.me")
-
-            async with httpx.AsyncClient(
-                base_url=PRODUCTION_DECOMP_ME,
-                timeout=60.0,
-                cookies=prod_cookies_obj,
-                headers={
-                    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:146.0) Gecko/20100101 Firefox/146.0',
-                    'Accept': 'application/json',
-                },
-                follow_redirects=True,
-            ) as prod_client:
-                for entry in to_sync:
-                    func_name = entry['name']
-                    local_slug = entry['slug']
-                    match_pct = entry['match_pct']
-
-                    # Check if already synced
-                    if local_slug in synced and not force:
-                        console.print(f"[dim]Skipping {func_name} ({local_slug}) - already synced[/dim]")
-                        results['skipped'] += 1
-                        continue
-
-                    console.print(f"[cyan]Syncing {func_name}[/cyan] ({local_slug}) - {match_pct:.1f}%")
-
-                    if dry_run:
-                        results['success'] += 1
-                        continue
-
-                    try:
-                        # Fetch from local instance
-                        local_scratch = await local_client.get_scratch(local_slug)
-
-                        # Create on production
-                        create_data = {
-                            'name': local_scratch.name,
-                            'compiler': local_scratch.compiler,
-                            'platform': local_scratch.platform,
-                            'compiler_flags': local_scratch.compiler_flags,
-                            'diff_flags': local_scratch.diff_flags,
-                            'source_code': local_scratch.source_code,
-                            'context': local_scratch.context,
-                            'diff_label': local_scratch.diff_label,
-                            'target_asm': '',  # Not available from API
-                        }
-
-                        # Fetch target_asm by exporting the scratch
-                        try:
-                            import zipfile
-                            import io
-                            export_data = await local_client.export_scratch(local_slug, target_only=True)
-                            with zipfile.ZipFile(io.BytesIO(export_data)) as zf:
-                                # Look for target.s or similar
-                                for name in zf.namelist():
-                                    if 'target' in name.lower() and name.endswith('.s'):
-                                        create_data['target_asm'] = zf.read(name).decode('utf-8')
-                                        break
-                        except Exception as e:
-                            console.print(f"[yellow]  Warning: Could not export target ASM: {e}[/yellow]")
-
-                        if not create_data['target_asm']:
-                            console.print(f"[yellow]  Warning: No target ASM, scratch may not work correctly[/yellow]")
-
-                        # POST to production
-                        resp = await prod_client.post('/api/scratch', json=create_data)
-
-                        if resp.status_code == 201 or resp.status_code == 200:
-                            prod_data = resp.json()
-                            prod_slug = prod_data.get('slug', 'unknown')
-                            console.print(f"[green]  Created: {PRODUCTION_DECOMP_ME}/scratch/{prod_slug}[/green]")
-
-                            # Update scratches.txt with the new production slug
-                            if _update_scratches_txt_slug(scratches_file, local_slug, prod_slug):
-                                console.print(f"[dim]  Updated scratches.txt: {local_slug} -> {prod_slug}[/dim]")
-
-                            # Save to local slug mapping file
-                            slug_map = _load_slug_map(melee_root)
-                            slug_map[prod_slug] = {
-                                'local_slug': local_slug,
-                                'function': func_name,
-                                'match_percent': match_pct,
-                                'synced_at': time.time(),
-                            }
-                            _save_slug_map(melee_root, slug_map)
-
-                            # Track as synced (using production slug now since file was updated)
-                            synced[local_slug] = {
-                                'production_slug': prod_slug,
-                                'function': func_name,
-                                'match_percent': match_pct,
-                                'timestamp': time.time(),
-                            }
-                            results['success'] += 1
-                            results['details'].append({
-                                'function': func_name,
-                                'local_slug': local_slug,
-                                'production_slug': prod_slug,
-                            })
-                        elif resp.status_code == 403:
-                            console.print(f"[red]  Failed: Cloudflare blocked (cf_clearance expired?)[/red]")
-                            results['failed'] += 1
-                            break  # Stop trying, cookie is bad
-                        else:
-                            error_text = resp.text[:200]
-                            console.print(f"[red]  Failed: {resp.status_code} - {error_text}[/red]")
-                            results['failed'] += 1
-
-                    except Exception as e:
-                        console.print(f"[red]  Error: {e}[/red]")
-                        results['failed'] += 1
-
-        return results
-
-    results = asyncio.run(do_sync())
-
-    # Save synced scratches
-    if not dry_run:
-        with open(synced_file, 'w') as f:
-            json.dump(synced, f, indent=2)
-
-    # Summary
-    console.print(f"\n[bold]Sync Complete[/bold]")
-    console.print(f"  Success: {results['success']}")
-    console.print(f"  Skipped: {results['skipped']}")
-    console.print(f"  Failed: {results['failed']}")
-
-    if results['details']:
-        console.print("\n[bold]Synced scratches:[/bold]")
-        for detail in results['details']:
-            console.print(f"  {detail['function']}: {PRODUCTION_DECOMP_ME}/scratch/{detail['production_slug']}")
 
 
 @sync_app.command("slugs")
@@ -1840,92 +1372,6 @@ def sync_slugs(
         console.print(f"\n[dim]{len(slug_map)} mappings stored in {SLUG_MAP_FILE}[/dim]")
 
 
-@sync_app.command("replace-author")
-def sync_replace_author(
-    from_author: Annotated[
-        str, typer.Argument(help="Author name to replace")
-    ],
-    to_author: Annotated[
-        str, typer.Argument(help="New author name")
-    ],
-    melee_root: Annotated[
-        Path, typer.Option("--melee-root", "-m", help="Path to melee submodule")
-    ] = DEFAULT_MELEE_ROOT,
-    dry_run: Annotated[
-        bool, typer.Option("--dry-run", help="Show what would change without modifying")
-    ] = False,
-):
-    """Bulk replace author names in scratches.txt.
-
-    Example: melee-agent sync replace-author agent itsgrimetime
-    """
-    scratches_file = melee_root / "config" / "GALE01" / "scratches.txt"
-
-    if not scratches_file.exists():
-        console.print(f"[red]scratches.txt not found at {scratches_file}[/red]")
-        raise typer.Exit(1)
-
-    content = scratches_file.read_text(encoding='utf-8')
-
-    # Pattern to match author:FROM_AUTHOR
-    pattern = re.compile(rf'\bauthor:{re.escape(from_author)}\b')
-
-    # Count matches
-    matches = pattern.findall(content)
-    count = len(matches)
-
-    if count == 0:
-        console.print(f"[yellow]No entries found with author:{from_author}[/yellow]")
-        return
-
-    console.print(f"Found [bold]{count}[/bold] entries with author:{from_author}")
-
-    if dry_run:
-        console.print(f"\n[cyan]DRY RUN[/cyan] - Would replace author:{from_author} -> author:{to_author}")
-
-        # Show first few matches
-        lines = content.split('\n')
-        shown = 0
-        for line in lines:
-            if pattern.search(line):
-                # Extract function name
-                func_match = re.match(r'^(\w+)\s*=', line)
-                func_name = func_match.group(1) if func_match else "?"
-                console.print(f"  {func_name}")
-                shown += 1
-                if shown >= 10:
-                    remaining = count - shown
-                    if remaining > 0:
-                        console.print(f"  [dim]... and {remaining} more[/dim]")
-                    break
-        return
-
-    # Perform replacement
-    new_content = pattern.sub(f'author:{to_author}', content)
-
-    # Also update the updated: timestamp for modified entries
-    from datetime import datetime, timezone
-    now = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
-
-    # Update timestamps on modified lines
-    def update_timestamp(line: str) -> str:
-        if f'author:{to_author}' in line:
-            # Replace existing updated: timestamp or add if missing
-            if 'updated:' in line:
-                line = re.sub(r'updated:\S+', f'updated:{now}', line)
-            else:
-                # Add before any trailing newline
-                line = line.rstrip() + f' updated:{now}'
-        return line
-
-    lines = new_content.split('\n')
-    updated_lines = [update_timestamp(line) for line in lines]
-    new_content = '\n'.join(updated_lines)
-
-    scratches_file.write_text(new_content, encoding='utf-8')
-    console.print(f"[green]Updated {count} entries: author:{from_author} -> author:{to_author}[/green]")
-
-
 @sync_app.command("clear")
 def sync_clear():
     """Clear cached cookies and sync history."""
@@ -1952,23 +1398,56 @@ app.add_typer(pr_app, name="pr")
 
 
 def _load_completed_functions() -> dict:
-    """Load completed functions tracking file."""
+    """Load completed functions tracking file with shared lock."""
     completed_path = Path(DECOMP_COMPLETED_FILE)
     if completed_path.exists():
         try:
             with open(completed_path, 'r') as f:
-                return json.load(f)
+                fcntl.flock(f.fileno(), fcntl.LOCK_SH)
+                try:
+                    return json.load(f)
+                finally:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
         except (json.JSONDecodeError, IOError):
             pass
     return {}
 
 
 def _save_completed_functions(data: dict) -> None:
-    """Save completed functions tracking file."""
+    """Save completed functions tracking file with exclusive lock.
+
+    Uses atomic write pattern: lock, read current, merge, write.
+    This prevents race conditions when multiple agents write simultaneously.
+    """
     completed_path = Path(DECOMP_COMPLETED_FILE)
     completed_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(completed_path, 'w') as f:
-        json.dump(data, f, indent=2)
+
+    # Use a lock file for atomic read-modify-write
+    lock_path = completed_path.with_suffix('.lock')
+
+    with open(lock_path, 'w') as lock_file:
+        # Acquire exclusive lock (blocks until available)
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            # Read current data (another process may have written)
+            current_data = {}
+            if completed_path.exists():
+                try:
+                    with open(completed_path, 'r') as f:
+                        current_data = json.load(f)
+                except (json.JSONDecodeError, IOError):
+                    pass
+
+            # Merge: incoming data takes precedence, but preserve entries not in incoming
+            merged_data = {**current_data, **data}
+
+            # Write atomically using temp file + rename
+            temp_path = completed_path.with_suffix('.tmp')
+            with open(temp_path, 'w') as f:
+                json.dump(merged_data, f, indent=2)
+            temp_path.rename(completed_path)
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def _extract_pr_info(pr_url: str) -> tuple[str, int]:
@@ -2306,8 +1785,6 @@ def _load_all_tracking_data(melee_root: Path) -> dict:
         "completed": {},
         "slug_map": {},
         "synced": {},
-        "scratches_txt_funcs": set(),
-        "scratches_txt_slugs": set(),
     }
 
     # Completed functions
@@ -2336,26 +1813,14 @@ def _load_all_tracking_data(melee_root: Path) -> dict:
         except (json.JSONDecodeError, IOError):
             pass
 
-    # Parse scratches.txt
-    scratches_file = melee_root / "config" / "GALE01" / "scratches.txt"
-    if scratches_file.exists():
-        content = scratches_file.read_text()
-        # Extract function names and slugs
-        pattern = re.compile(r'^(\w+)\s*=.*?id:(\w+)', re.MULTILINE)
-        for match in pattern.finditer(content):
-            data["scratches_txt_funcs"].add(match.group(1))
-            data["scratches_txt_slugs"].add(match.group(2))
-
     return data
 
 
 def _categorize_functions(data: dict) -> dict:
     """Categorize all tracked functions by their status."""
     categories = {
-        "complete": [],           # Synced + in scratches.txt
-        "synced_not_in_file": [], # Synced but not in scratches.txt
-        "in_file_not_synced": [], # In file but local slug
-        "lost_high_match": [],    # 95%+ but not synced or in file
+        "complete": [],           # Synced to production
+        "lost_high_match": [],    # 95%+ but not synced
         "work_in_progress": [],   # <95% match
     }
 
@@ -2368,7 +1833,6 @@ def _categorize_functions(data: dict) -> dict:
         slug = info.get("scratch_slug", "")
 
         # Determine status
-        in_scratches = func in data["scratches_txt_funcs"] or slug in data["scratches_txt_slugs"]
         synced_to_prod = func in prod_funcs or slug in synced_local_slugs
 
         entry = {
@@ -2381,12 +1845,8 @@ def _categorize_functions(data: dict) -> dict:
         }
 
         if pct >= 95:
-            if synced_to_prod and in_scratches:
+            if synced_to_prod:
                 categories["complete"].append(entry)
-            elif synced_to_prod:
-                categories["synced_not_in_file"].append(entry)
-            elif in_scratches:
-                categories["in_file_not_synced"].append(entry)
             else:
                 categories["lost_high_match"].append(entry)
         else:
@@ -2414,9 +1874,8 @@ def audit_status(
     """Show unified status of all tracked work.
 
     Categories:
-    - Complete: Synced to production AND in scratches.txt
-    - Synced but missing: Synced to production but not in scratches.txt (needs re-add)
-    - Lost: 95%+ match but not synced or tracked (needs recovery)
+    - Complete: Synced to production
+    - Lost: 95%+ match but not synced (needs recovery)
     - Work in progress: <95% match, still being worked on
     """
     data = _load_all_tracking_data(melee_root)
@@ -2440,16 +1899,6 @@ def audit_status(
         "None - ready for PR"
     )
     table.add_row(
-        "[yellow]⚠️ Synced but not in file[/yellow]",
-        str(len(categories["synced_not_in_file"])),
-        "Run: audit recover --add-to-file"
-    )
-    table.add_row(
-        "[yellow]⚠️ In file, not synced[/yellow]",
-        str(len(categories["in_file_not_synced"])),
-        "Run: sync production"
-    )
-    table.add_row(
         "[red]❌ Lost (95%+)[/red]",
         str(len(categories["lost_high_match"])),
         "Run: audit recover --sync-lost"
@@ -2471,25 +1920,12 @@ def audit_status(
             if len(categories["lost_high_match"]) > 10:
                 console.print(f"  [dim]... and {len(categories['lost_high_match']) - 10} more[/dim]")
 
-    if verbose and categories["synced_not_in_file"]:
-        console.print("\n[yellow bold]Synced but missing from scratches.txt:[/yellow bold]")
-        for entry in categories["synced_not_in_file"][:10]:
-            console.print(f"  {entry['function']}: {entry['match_percent']}% (prod:{entry['production_slug']})")
-        if len(categories["synced_not_in_file"]) > 10:
-            console.print(f"  [dim]... and {len(categories['synced_not_in_file']) - 10} more[/dim]")
-
 
 @audit_app.command("recover")
 def audit_recover(
     melee_root: Annotated[
         Path, typer.Option("--melee-root", "-m", help="Path to melee submodule")
     ] = DEFAULT_MELEE_ROOT,
-    add_to_file: Annotated[
-        bool, typer.Option("--add-to-file", help="Add synced functions to scratches.txt")
-    ] = False,
-    sync_lost: Annotated[
-        bool, typer.Option("--sync-lost", help="Sync lost scratches to production")
-    ] = False,
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Show what would be done")
     ] = False,
@@ -2497,72 +1933,27 @@ def audit_recover(
         int, typer.Option("--limit", "-n", help="Maximum entries to process")
     ] = 20,
 ):
-    """Recover lost or missing tracking entries.
+    """Show lost scratches that need recovery.
 
-    --add-to-file: Add entries for synced functions that are missing from scratches.txt
-    --sync-lost: Sync 95%+ local scratches to production decomp.me
+    Lists 95%+ matches that haven't been synced to production.
     """
-    from datetime import datetime, timezone
-
     data = _load_all_tracking_data(melee_root)
     categories = _categorize_functions(data)
 
-    if add_to_file:
-        entries = categories["synced_not_in_file"][:limit]
-        if not entries:
-            console.print("[green]No synced functions missing from scratches.txt[/green]")
-            return
+    entries = categories["lost_high_match"][:limit]
+    if not entries:
+        console.print("[green]No lost scratches to recover[/green]")
+        return
 
-        console.print(f"[bold]Adding {len(entries)} entries to scratches.txt[/bold]\n")
+    console.print(f"[bold]Found {len(entries)} lost scratches[/bold]\n")
 
-        scratches_file = melee_root / "config" / "GALE01" / "scratches.txt"
-        now = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+    for entry in entries:
+        console.print(f"  {entry['function']}: {entry['match_percent']}% (local:{entry['local_slug']})")
 
-        lines_to_add = []
-        for entry in entries:
-            prod_slug = entry["production_slug"]
-            func = entry["function"]
-            pct = entry["match_percent"]
+    if len(categories["lost_high_match"]) > limit:
+        console.print(f"\n[dim]... and {len(categories['lost_high_match']) - limit} more[/dim]")
 
-            # Format: FunctionName = 100%:MATCHED; // author:agent id:SLUG updated:TIME created:TIME
-            pct_str = "100%" if pct == 100 else f"{pct:.1f}%"
-            line = f"{func} = {pct_str}:MATCHED; // author:agent id:{prod_slug} updated:{now} created:{now}"
-            lines_to_add.append(line)
-
-            if dry_run:
-                console.print(f"  [dim]Would add:[/dim] {func} (id:{prod_slug})")
-            else:
-                console.print(f"  [green]Adding:[/green] {func} (id:{prod_slug})")
-
-        if not dry_run:
-            with open(scratches_file, 'a') as f:
-                f.write("\n" + "\n".join(lines_to_add) + "\n")
-            console.print(f"\n[green]Added {len(lines_to_add)} entries to scratches.txt[/green]")
-        else:
-            console.print(f"\n[cyan]Would add {len(lines_to_add)} entries (dry run)[/cyan]")
-
-    if sync_lost:
-        entries = categories["lost_high_match"][:limit]
-        if not entries:
-            console.print("[green]No lost scratches to sync[/green]")
-            return
-
-        console.print(f"[bold]Found {len(entries)} lost scratches to sync[/bold]\n")
-
-        if dry_run:
-            for entry in entries:
-                console.print(f"  [dim]Would sync:[/dim] {entry['function']} ({entry['match_percent']}%) local:{entry['local_slug']}")
-            console.print(f"\n[cyan]Would sync {len(entries)} scratches (dry run)[/cyan]")
-            console.print("[dim]Run 'melee-agent sync production' after recovery to push to production[/dim]")
-        else:
-            console.print("[yellow]Lost scratch recovery requires manual steps:[/yellow]")
-            console.print("1. Verify scratches exist on local instance")
-            console.print("2. Run: melee-agent sync production --author agent")
-            console.print("3. Run: melee-agent audit recover --add-to-file")
-
-    if not add_to_file and not sync_lost:
-        console.print("[yellow]Specify --add-to-file or --sync-lost[/yellow]")
-        console.print("\nRun 'melee-agent audit status' to see what needs recovery")
+    console.print("\n[yellow]To recover, verify these scratches exist on your local decomp.me instance[/yellow]")
 
 
 @audit_app.command("list")
@@ -2647,9 +2038,6 @@ def hook_validate(
     fix: Annotated[
         bool, typer.Option("--fix", help="Attempt to fix issues automatically")
     ] = False,
-    no_production_check: Annotated[
-        bool, typer.Option("--no-production-check", help="Skip production decomp.me verification")
-    ] = False,
     verbose: Annotated[
         bool, typer.Option("--verbose", "-v", help="Show all warnings")
     ] = False,
@@ -2657,17 +2045,13 @@ def hook_validate(
     """Validate staged changes against project guidelines.
 
     Checks:
-    - 100% matches are in scratches.txt and not duplicates
-    - Scratch IDs are production slugs (not local instance)
     - symbols.txt is updated if needed
     - CONTRIBUTING.md coding style guidelines
+    - clang-format has been run
     """
     from src.hooks.validate_commit import CommitValidator
 
-    validator = CommitValidator(
-        melee_root=DEFAULT_MELEE_ROOT,
-        check_production=not no_production_check
-    )
+    validator = CommitValidator(melee_root=DEFAULT_MELEE_ROOT)
     errors, warnings = validator.run()
 
     # Print results
