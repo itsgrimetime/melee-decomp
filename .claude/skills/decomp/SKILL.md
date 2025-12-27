@@ -65,6 +65,8 @@ melee-agent sync slugs                            # Show local→production mapp
 **Function extraction:**
 ```bash
 melee-agent extract list --min-match 0 --max-match 0.50  # Find candidates
+melee-agent extract list --matching-only                  # Only committable functions
+melee-agent extract list --show-status                    # Show Matching/NonMatching column
 melee-agent extract get <function_name>                   # Get ASM + metadata
 melee-agent extract get <function_name> --create-scratch  # Get ASM + create scratch in one step
 ```
@@ -103,10 +105,28 @@ melee-agent hook install                          # Install git pre-commit hook
 **If user asks to "work on something new":** Find an unmatched function:
 
 ```bash
-melee-agent extract list --min-match 0 --max-match 0.50 --limit 20
+# For committable functions only (RECOMMENDED):
+melee-agent extract list --matching-only --min-match 0 --max-match 0.50 --limit 20
+
+# To see all functions with their status:
+melee-agent extract list --show-status --min-match 0 --max-match 0.50 --limit 20
 ```
 
+**CRITICAL: Matching vs NonMatching Files**
+
+The melee project has two types of source files:
+- **Matching files**: Compile from C source. Functions here can be committed.
+- **NonMatching files**: Use pre-compiled object files from the original binary. Functions here CANNOT be committed without first converting the entire file to Matching status.
+
+**Why this matters:**
+- If you match a function in a NonMatching file, `melee-agent commit apply` will fail with linker errors
+- NonMatching files reference original binary symbols (e.g., `it_803F5BA8`) that may not exist in Matching files
+- Converting a file from NonMatching→Matching often causes cascading linker errors from other NonMatching files
+
+**Use `--matching-only`** to only see functions that can actually be committed.
+
 **Prioritization strategy:**
+- **In Matching files** (REQUIRED for commit) - Use `--matching-only` flag
 - **0-50% match** (PREFERRED) - Fresh functions with room to improve
 - **50-500 bytes** - Not too simple, not too complex
 - **In well-understood modules** - ft/, lb/, gr/ have good patterns
@@ -318,11 +338,11 @@ void my_function(void) {
 
 User: `/decomp` (no function specified)
 
-**Step 0:** Find a good candidate (prioritize low-match functions)
+**Step 0:** Find a good candidate (committable functions only)
 ```bash
-melee-agent extract list --min-match 0 --max-match 0.50 --limit 10
+melee-agent extract list --matching-only --min-match 0 --max-match 0.50 --limit 10
 ```
-→ Pick `lbColl_80008440` at 0% match, 180 bytes (fresh function, not worked on)
+→ Pick `lbColl_80008440` at 0% match, 180 bytes (in a Matching file, can be committed)
 → Claim it:
 ```bash
 melee-agent claim add lbColl_80008440
@@ -370,6 +390,7 @@ melee-agent complete mark lbColl_80008440 xYz12 97.0 --committed --notes "regist
 3. **Don't ignore file-local types** - they must be included in source
 4. **Don't commit to repo until 95%+ match** - only Step 7 touches the melee repo
 5. **Don't keep trying the same changes** - if reordering doesn't help after 3-4 attempts, the issue is likely context-related
+6. **Don't try to commit functions in NonMatching files** - use `--matching-only` when finding functions to avoid wasted effort
 
 ## Troubleshooting
 
@@ -404,6 +425,17 @@ melee-agent complete mark lbColl_80008440 xYz12 97.0 --committed --notes "regist
 - Run `melee-agent commit lint --fix` to remove malformed entries
 - Always use `melee-agent commit apply` instead of manual edits
 
+**Linker error: undefined symbol (e.g., `it_803F5BA8`):**
+- The function is in a NonMatching file that references symbols from other NonMatching files
+- These symbols use original binary names that don't exist in Matching files
+- **Solution**: Don't commit this function. Use `--matching-only` to find committable functions instead
+- Converting NonMatching→Matching requires fixing all symbol references, which often causes cascading errors
+
+**Commit succeeds but build fails with undefined reference:**
+- A NonMatching file depends on a symbol you just renamed in your Matching file
+- NonMatching files use pre-compiled objects, so you can't update their references
+- **Solution**: Keep the original symbol name in your Matching file, or wait until the dependent file is also converted to Matching
+
 ## Full Lifecycle Workflow
 
 This is the complete workflow from finding functions to submitting PRs:
@@ -413,7 +445,9 @@ This is the complete workflow from finding functions to submitting PRs:
 Multiple agents work simultaneously:
 
 1. **Check status first**: `melee-agent audit status` to see overall progress
-2. **Find functions**: `melee-agent extract list --min-match 0 --max-match 50`
+2. **Find functions**: `melee-agent extract list --matching-only --min-match 0 --max-match 50`
+   - Use `--matching-only` to only see functions that can be committed (in Matching files)
+   - Functions in NonMatching files cannot be committed without resolving linker dependencies
 3. **Claim & work**: Claim a function, create scratch, iterate to 95%+
 4. **Mark complete**: `melee-agent complete mark <func> <slug> <pct> --committed`
 

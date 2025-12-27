@@ -49,11 +49,21 @@ def extract_list(
     include_completed: Annotated[
         bool, typer.Option("--include-completed", help="Include already-completed functions")
     ] = False,
+    matching_only: Annotated[
+        bool, typer.Option("--matching-only", "--committable", help="Only show functions in Matching files (can be committed)")
+    ] = False,
+    show_status: Annotated[
+        bool, typer.Option("--show-status", help="Show object status column (Matching/NonMatching)")
+    ] = False,
 ):
     """List unmatched functions from the melee project.
 
     By default, excludes functions already tracked as completed/attempted.
     Use --include-completed to show all functions.
+
+    Use --matching-only to only show functions in files already marked as Matching.
+    These are the only functions that can be safely committed without linker errors
+    from NonMatching file dependencies.
     """
     from src.extractor import extract_unmatched_functions
 
@@ -76,6 +86,7 @@ def extract_list(
         if min_match <= f.current_match <= max_match
         and min_size <= f.size_bytes <= max_size
         and f.name not in completed
+        and (not matching_only or f.object_status == "Matching")
     ]
     functions = sorted(functions, key=lambda f: -f.current_match)[:limit]
 
@@ -84,20 +95,26 @@ def extract_list(
     table.add_column("File", style="green")
     table.add_column("Match %", justify="right")
     table.add_column("Size", justify="right")
+    if show_status:
+        table.add_column("Status", style="yellow")
     table.add_column("Address", style="dim")
 
     for func in functions:
-        table.add_row(
+        row = [
             func.name,
             func.file_path,
             f"{func.current_match * 100:.1f}%",
             f"{func.size_bytes}",
-            func.address,
-        )
+        ]
+        if show_status:
+            row.append(func.object_status)
+        row.append(func.address)
+        table.add_row(*row)
 
     console.print(table)
     excluded_msg = f", {len(completed)} completed excluded" if completed else ""
-    console.print(f"\n[dim]Found {len(functions)} functions (from {result.total_functions} total{excluded_msg})[/dim]")
+    matching_msg = ", Matching files only" if matching_only else ""
+    console.print(f"\n[dim]Found {len(functions)} functions (from {result.total_functions} total{excluded_msg}{matching_msg})[/dim]")
 
 
 @extract_app.command("get")
