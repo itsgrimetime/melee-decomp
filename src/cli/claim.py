@@ -10,7 +10,7 @@ from typing import Annotated, Any
 import typer
 from rich.table import Table
 
-from ._common import console
+from ._common import AGENT_ID, console
 
 # Claims are SHARED and ephemeral (1-hour expiry) - ok in /tmp
 DECOMP_CLAIMS_FILE = os.environ.get("DECOMP_CLAIMS_FILE", "/tmp/decomp_claims.json")
@@ -71,7 +71,7 @@ def claim_add(
     function_name: Annotated[str, typer.Argument(help="Function name to claim")],
     agent_id: Annotated[
         str, typer.Option("--agent-id", help="Agent identifier")
-    ] = "cli",
+    ] = AGENT_ID,
     output_json: Annotated[
         bool, typer.Option("--json", help="Output as JSON")
     ] = False,
@@ -99,11 +99,17 @@ def claim_add(
 
             if function_name in claims:
                 existing = claims[function_name]
+                existing_agent = existing.get("agent_id", "unknown")
                 age_mins = (time.time() - existing["timestamp"]) / 60
+                is_self = existing_agent == agent_id
                 if output_json:
-                    print(json.dumps({"success": False, "error": "already_claimed", "by": existing.get("agent_id"), "age_mins": age_mins}))
+                    print(json.dumps({"success": False, "error": "already_claimed", "by": existing_agent, "age_mins": age_mins, "is_self": is_self}))
                 else:
-                    console.print(f"[red]Already claimed by {existing.get('agent_id')} ({age_mins:.0f}m ago)[/red]")
+                    if is_self:
+                        console.print(f"[yellow]Already claimed by you ({agent_id}) {age_mins:.0f}m ago - claim still active[/yellow]")
+                    else:
+                        console.print(f"[red]CLAIMED BY ANOTHER AGENT: {existing_agent} ({age_mins:.0f}m ago)[/red]")
+                        console.print(f"[red]DO NOT WORK ON THIS FUNCTION - pick a different one[/red]")
                 raise typer.Exit(1)
 
             claims[function_name] = {"agent_id": agent_id, "timestamp": time.time()}
