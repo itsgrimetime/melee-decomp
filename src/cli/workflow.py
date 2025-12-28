@@ -12,7 +12,7 @@ from typing import Annotated, Optional
 import typer
 from rich.console import Console
 
-from ._common import console, DEFAULT_MELEE_ROOT, DEFAULT_API_URL, require_api_url
+from ._common import console, DEFAULT_MELEE_ROOT, DEFAULT_API_URL, require_api_url, resolve_melee_root, AGENT_ID
 from .complete import _load_completed, _save_completed, _get_current_branch
 
 workflow_app = typer.Typer(help="High-level workflow commands (recommended)")
@@ -23,8 +23,8 @@ def workflow_finish(
     function_name: Annotated[str, typer.Argument(help="Name of the matched function")],
     scratch_slug: Annotated[str, typer.Argument(help="Decomp.me scratch slug")],
     melee_root: Annotated[
-        Path, typer.Option("--melee-root", "-m", help="Path to melee submodule")
-    ] = DEFAULT_MELEE_ROOT,
+        Optional[Path], typer.Option("--melee-root", "-m", help="Path to melee submodule (auto-detects agent worktree)")
+    ] = None,
     api_url: Annotated[
         str, typer.Option("--api-url", help="Decomp.me API URL")
     ] = DEFAULT_API_URL,
@@ -62,8 +62,19 @@ def workflow_finish(
         - Release any claims on the function
 
     Use --dry-run to verify everything would work without actually committing.
+
+    Automatically uses the agent's worktree to keep work isolated from other
+    parallel agents. Use --melee-root to override.
     """
     require_api_url(api_url)
+
+    # Auto-detect agent worktree
+    melee_root = resolve_melee_root(melee_root)
+
+    # Warn if not using worktree
+    if AGENT_ID and "melee-worktrees" not in str(melee_root):
+        console.print(f"[yellow]Warning: Working in main repo, not agent worktree[/yellow]")
+        console.print(f"[dim]Consider using: melee-worktrees/{AGENT_ID}/[/dim]")
     from src.client import DecompMeAPIClient
     from src.commit import auto_detect_and_commit
     from src.commit.configure import get_file_path_from_function

@@ -57,7 +57,7 @@ def require_api_url(api_url: str) -> None:
         raise SystemExit(1)
 
 
-def get_agent_melee_root(agent_id: str | None = None) -> Path:
+def get_agent_melee_root(agent_id: str | None = None, create_if_missing: bool = True) -> Path:
     """Get the melee worktree path for the current agent.
 
     Each agent gets its own worktree to avoid conflicts when working in parallel.
@@ -65,6 +65,7 @@ def get_agent_melee_root(agent_id: str | None = None) -> Path:
 
     Args:
         agent_id: Optional agent ID override. Uses AGENT_ID if not provided.
+        create_if_missing: If True (default), create worktree if it doesn't exist.
 
     Returns:
         Path to the agent's melee worktree (or main melee if no agent ID).
@@ -80,8 +81,28 @@ def get_agent_melee_root(agent_id: str | None = None) -> Path:
         console.print(f"[dim]Using worktree: {worktree_path}[/dim]")
         return worktree_path
 
+    if not create_if_missing:
+        return DEFAULT_MELEE_ROOT
+
     # Create worktree on first use
     return _create_agent_worktree(aid, worktree_path)
+
+
+def resolve_melee_root(melee_root: Path | None) -> Path:
+    """Resolve melee root, using agent worktree if not explicitly specified.
+
+    This function should be called at the start of CLI commands to ensure
+    agents work in their assigned worktree by default.
+
+    Args:
+        melee_root: Explicitly provided path, or None to auto-detect.
+
+    Returns:
+        Path to use for melee operations.
+    """
+    if melee_root is not None:
+        return melee_root
+    return get_agent_melee_root()
 
 
 def get_agent_context_file(agent_id: str | None = None) -> Path:

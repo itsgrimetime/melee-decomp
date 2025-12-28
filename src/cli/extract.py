@@ -16,6 +16,8 @@ from ._common import (
     get_agent_melee_root,
     get_agent_context_file,
     check_duplicate_operation,
+    resolve_melee_root,
+    AGENT_ID,
 )
 
 # API URL from environment
@@ -87,8 +89,8 @@ def _compute_recommendation_score(func) -> float:
 @extract_app.command("list")
 def extract_list(
     melee_root: Annotated[
-        Path, typer.Option("--melee-root", "-m", help="Path to melee submodule")
-    ] = DEFAULT_MELEE_ROOT,
+        Optional[Path], typer.Option("--melee-root", "-m", help="Path to melee submodule (auto-detects agent worktree)")
+    ] = None,
     min_match: Annotated[
         float, typer.Option("--min-match", help="Minimum match percentage")
     ] = 0.0,
@@ -141,6 +143,9 @@ def extract_list(
     To update match percentages after committing code:
         ninja build/GALE01/report.json
     """
+    # Auto-detect agent worktree
+    melee_root = resolve_melee_root(melee_root)
+
     from src.extractor import extract_unmatched_functions
     from src.extractor.report import ReportParser
 
@@ -229,8 +234,8 @@ def extract_list(
 def extract_get(
     function_name: Annotated[str, typer.Argument(help="Name of the function to extract")],
     melee_root: Annotated[
-        Path, typer.Option("--melee-root", "-m", help="Path to melee submodule")
-    ] = DEFAULT_MELEE_ROOT,
+        Optional[Path], typer.Option("--melee-root", "-m", help="Path to melee submodule (auto-detects agent worktree)")
+    ] = None,
     output: Annotated[
         Optional[Path], typer.Option("--output", "-o", help="Output file for ASM")
     ] = None,
@@ -249,6 +254,9 @@ def extract_get(
     Match percentages are read from the authoritative report.json.
     Use --create-scratch to also create a decomp.me scratch in one step.
     """
+    # Auto-detect agent worktree
+    melee_root = resolve_melee_root(melee_root)
+
     from src.extractor import extract_function
 
     func = asyncio.run(extract_function(melee_root, function_name))

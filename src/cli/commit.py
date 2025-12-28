@@ -10,7 +10,7 @@ from typing import Annotated, Optional
 import typer
 from rich.console import Console
 
-from ._common import console, DEFAULT_MELEE_ROOT, DECOMP_CONFIG_DIR, DEFAULT_API_URL, require_api_url
+from ._common import console, DEFAULT_MELEE_ROOT, DECOMP_CONFIG_DIR, DEFAULT_API_URL, require_api_url, resolve_melee_root, AGENT_ID
 from .complete import _load_completed, _save_completed, _get_current_branch
 from src.commit.diagnostics import analyze_commit_error, check_header_sync, format_signature_mismatch
 
@@ -22,8 +22,8 @@ def commit_apply(
     function_name: Annotated[str, typer.Argument(help="Name of the matched function")],
     scratch_slug: Annotated[str, typer.Argument(help="Decomp.me scratch slug")],
     melee_root: Annotated[
-        Path, typer.Option("--melee-root", "-m", help="Path to melee submodule")
-    ] = DEFAULT_MELEE_ROOT,
+        Optional[Path], typer.Option("--melee-root", "-m", help="Path to melee submodule (auto-detects agent worktree if not specified)")
+    ] = None,
     api_url: Annotated[
         str, typer.Option("--api-url", help="Decomp.me API URL")
     ] = DEFAULT_API_URL,
@@ -52,8 +52,19 @@ def commit_apply(
     Use --min-match to adjust the minimum match percentage (default: 95%).
     Use --force to bypass the match check entirely (use with caution).
     Use --dry-run to preview changes and verify compilation without modifying files.
+
+    If --melee-root is not specified, automatically uses the agent's worktree
+    to keep work isolated from other parallel agents.
     """
     require_api_url(api_url)
+
+    # Auto-detect agent worktree if not explicitly specified
+    melee_root = resolve_melee_root(melee_root)
+
+    # Warn if committing to main repo instead of worktree
+    if AGENT_ID and "melee-worktrees" not in str(melee_root):
+        console.print(f"[yellow]Warning: Committing to main melee repo, not agent worktree[/yellow]")
+        console.print(f"[dim]Agent {AGENT_ID} should use: melee-worktrees/{AGENT_ID}/[/dim]")
     from src.client import DecompMeAPIClient
     from src.commit import auto_detect_and_commit
     from src.commit.configure import get_file_path_from_function
