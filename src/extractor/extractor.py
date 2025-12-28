@@ -229,6 +229,7 @@ class FunctionExtractor:
         Build a lookup table mapping function names to source files.
 
         This is computed once and cached for O(1) lookups.
+        Uses O(log n) binary search for address lookups.
 
         Args:
             object_map: Map of file paths to ObjectStatus
@@ -240,45 +241,35 @@ class FunctionExtractor:
             return self._function_to_file_cache
 
         function_to_file = {}
+        unresolved_funcs = []
 
         # Parse all symbols once
         symbols = self.symbol_parser.parse_symbols()
 
-        # Parse splits.txt once to get file ranges
-        file_ranges = self.splits_parser.parse_splits()
+        # Build interval index once for O(log n) lookups
+        self.splits_parser._build_interval_index()
 
-        # For each symbol, find its source file using splits.txt
+        # For each symbol, find its source file using O(log n) binary search
         for func_name, symbol in symbols.items():
             try:
                 addr = int(symbol.address, 16)
             except ValueError:
                 continue
 
-            # Find the file that contains this address
-            found = False
-            for file_path, ranges in file_ranges.items():
-                # Check if file is in object_map
-                if file_path not in object_map:
-                    continue
+            # O(log n) lookup using interval index
+            file_path = self.splits_parser.get_file_for_address_fast(addr, symbol.section)
 
-                # Check if function address falls within any range for this file
-                for range_info in ranges:
-                    if (range_info["section"] == symbol.section and
-                        range_info["start"] <= addr < range_info["end"]):
-                        function_to_file[func_name] = file_path
-                        found = True
-                        break
+            if file_path and file_path in object_map:
+                function_to_file[func_name] = file_path
+            else:
+                unresolved_funcs.append(func_name)
 
-                if found:
-                    break
-
-            # Fallback: Try to find the function in ASM files (heuristic)
-            if not found:
-                for source_file in object_map.keys():
-                    functions = self.asm_extractor.get_functions_in_asm_file(source_file)
-                    if func_name in functions:
-                        function_to_file[func_name] = source_file
-                        break
+        # Fallback: Build ASM index once for all unresolved functions
+        if unresolved_funcs:
+            asm_index = self.asm_extractor.build_function_to_file_index(list(object_map.keys()))
+            for func_name in unresolved_funcs:
+                if func_name in asm_index:
+                    function_to_file[func_name] = asm_index[func_name]
 
         # Cache the result
         self._function_to_file_cache = function_to_file

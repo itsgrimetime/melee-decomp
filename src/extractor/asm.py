@@ -17,6 +17,10 @@ class AsmExtractor:
         """
         self.melee_root = Path(melee_root)
         self.asm_dir = self.melee_root / "build" / "GALE01" / "asm"
+        # Cache for file contents to avoid repeated disk reads
+        self._file_cache: dict[str, Optional[str]] = {}
+        # Cache for functions-per-file index
+        self._functions_index: Optional[dict[str, list[str]]] = None
 
     def get_asm_for_file(self, source_file: str) -> Optional[str]:
         """
@@ -28,17 +32,25 @@ class AsmExtractor:
         Returns:
             Assembly code or None if file not found
         """
+        # Check cache first
+        if source_file in self._file_cache:
+            return self._file_cache[source_file]
+
         # Convert source path to asm path
         # src/melee/lb/lbfile.c -> build/GALE01/asm/melee/lb/lbfile.s
         asm_path = self.asm_dir / Path(source_file).with_suffix(".s")
 
         if not asm_path.exists():
+            self._file_cache[source_file] = None
             return None
 
         try:
             with open(asm_path, "r", encoding="utf-8") as f:
-                return f.read()
+                content = f.read()
+                self._file_cache[source_file] = content
+                return content
         except Exception:
+            self._file_cache[source_file] = None
             return None
 
     def get_asm_for_function(
@@ -161,6 +173,10 @@ class AsmExtractor:
         if not asm_content:
             return []
 
+        return self._parse_functions_from_asm(asm_content)
+
+    def _parse_functions_from_asm(self, asm_content: str) -> list[str]:
+        """Parse function names from ASM content."""
         functions = []
         # Look for .fn directives (DTK format) or .global directives (traditional)
         fn_pattern = re.compile(r"^\s*\.fn\s+(\w+)(?:,\s*\w+)?\s*$")
@@ -182,6 +198,37 @@ class AsmExtractor:
                     functions.append(func_name)
 
         return functions
+
+    def build_function_to_file_index(self, source_files: list[str]) -> dict[str, str]:
+        """
+        Build a complete index mapping function names to source files.
+
+        This scans all ASM files once and builds a lookup table.
+
+        Args:
+            source_files: List of source file paths to index
+
+        Returns:
+            Dictionary mapping function names to source file paths
+        """
+        if self._functions_index is not None:
+            # Return flattened index
+            result = {}
+            for source_file, funcs in self._functions_index.items():
+                for func in funcs:
+                    result[func] = source_file
+            return result
+
+        self._functions_index = {}
+        result = {}
+
+        for source_file in source_files:
+            funcs = self.get_functions_in_asm_file(source_file)
+            self._functions_index[source_file] = funcs
+            for func in funcs:
+                result[func] = source_file
+
+        return result
 
 
 async def extract_asm_for_function(

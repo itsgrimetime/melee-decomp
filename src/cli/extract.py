@@ -151,7 +151,8 @@ def extract_list(
         age_hours = report_parser.get_report_age_seconds() / 3600
         console.print(f"[dim]Note: report.json is {age_hours:.0f}h old. Run 'ninja build/GALE01/report.json' to refresh.[/dim]")
 
-    result = asyncio.run(extract_unmatched_functions(melee_root))
+    # Don't load ASM for listing - it's not needed and adds significant overhead
+    result = asyncio.run(extract_unmatched_functions(melee_root, include_asm=False))
 
     # Load completed functions to exclude
     completed = set()

@@ -1,5 +1,6 @@
 """Parse splits.txt to get accurate function-to-file mapping."""
 
+import bisect
 import re
 from pathlib import Path
 from typing import Optional
@@ -18,6 +19,8 @@ class SplitsParser:
         self.melee_root = Path(melee_root)
         self.splits_path = self.melee_root / "config" / "GALE01" / "splits.txt"
         self._file_ranges = None
+        # Sorted interval index for O(log n) lookups: {section: [(start, end, file_path), ...]}
+        self._interval_index: Optional[dict[str, list[tuple[int, int, str]]]] = None
 
     def parse_splits(self) -> dict[str, list[dict]]:
         """
@@ -75,6 +78,68 @@ class SplitsParser:
         self._file_ranges = file_ranges
         return file_ranges
 
+    def _build_interval_index(self) -> dict[str, list[tuple[int, int, str]]]:
+        """
+        Build a sorted interval index for O(log n) address lookups.
+
+        Returns:
+            Dictionary mapping section names to sorted lists of (start, end, file_path)
+        """
+        if self._interval_index is not None:
+            return self._interval_index
+
+        file_ranges = self.parse_splits()
+        index: dict[str, list[tuple[int, int, str]]] = {}
+
+        for file_path, ranges in file_ranges.items():
+            for range_info in ranges:
+                section = range_info["section"]
+                if section not in index:
+                    index[section] = []
+                index[section].append((
+                    range_info["start"],
+                    range_info["end"],
+                    file_path
+                ))
+
+        # Sort each section's intervals by start address
+        for section in index:
+            index[section].sort(key=lambda x: x[0])
+
+        self._interval_index = index
+        return index
+
+    def get_file_for_address_fast(self, address: int, section: str = "text") -> Optional[str]:
+        """
+        Get the source file for an address using O(log n) binary search.
+
+        Args:
+            address: Memory address (as integer)
+            section: Section name (default: "text")
+
+        Returns:
+            Source file path or None if not found
+        """
+        index = self._build_interval_index()
+        intervals = index.get(section, [])
+
+        if not intervals:
+            return None
+
+        # Binary search for the interval containing this address
+        # Find the rightmost interval where start <= address
+        starts = [iv[0] for iv in intervals]
+        pos = bisect.bisect_right(starts, address) - 1
+
+        if pos < 0:
+            return None
+
+        start, end, file_path = intervals[pos]
+        if start <= address < end:
+            return file_path
+
+        return None
+
     def get_file_for_address(self, address: int) -> Optional[str]:
         """
         Get the source file that contains a given address.
@@ -98,7 +163,7 @@ class SplitsParser:
         self, function_address: str, section: str = "text"
     ) -> Optional[str]:
         """
-        Get the source file that contains a function.
+        Get the source file that contains a function using O(log n) lookup.
 
         Args:
             function_address: Function address as hex string (e.g., "0x80005940")
@@ -112,16 +177,7 @@ class SplitsParser:
         except ValueError:
             return None
 
-        file_ranges = self.parse_splits()
-
-        for file_path, ranges in file_ranges.items():
-            for range_info in ranges:
-                # Match section and address range
-                if (range_info["section"] == section and
-                    range_info["start"] <= addr < range_info["end"]):
-                    return file_path
-
-        return None
+        return self.get_file_for_address_fast(addr, section)
 
     def get_functions_in_file(
         self, source_file: str, symbols: dict
