@@ -75,11 +75,16 @@ def _load_cookies() -> dict[str, str]:
         return {}
 
 
-def _save_cookies(cookies: dict[str, str]) -> None:
+def _save_cookies(cookies: dict[str, str], preserve_sessionid: bool = True) -> None:
     """Save cookies to file with locking.
 
     Uses exclusive lock to prevent race conditions when multiple
     agents try to update cookies simultaneously.
+
+    Args:
+        cookies: New cookies to save
+        preserve_sessionid: If True (default), don't overwrite an existing
+            sessionid. This ensures all agents share the same anonymous identity.
     """
     cookies_path = Path(DECOMP_COOKIES_FILE)
     cookies_path.parent.mkdir(parents=True, exist_ok=True)
@@ -99,6 +104,12 @@ def _save_cookies(cookies: dict[str, str]) -> None:
                         existing = json.load(f)
                 except (json.JSONDecodeError, IOError):
                     pass
+
+            # Preserve existing sessionid to maintain shared identity
+            # This check happens UNDER the lock to prevent race conditions
+            if preserve_sessionid and "sessionid" in existing and "sessionid" in cookies:
+                logger.debug(f"Preserving existing sessionid (not overwriting)")
+                del cookies["sessionid"]
 
             # Merge new cookies into existing
             existing.update(cookies)
@@ -173,12 +184,18 @@ class DecompMeAPIClient:
         )
 
     def _update_cookies_from_response(self, response: httpx.Response) -> None:
-        """Extract and persist session cookies from response."""
-        cookies = _load_cookies()
+        """Extract and persist session cookies from response.
+
+        Note: _save_cookies() will preserve existing sessionid to ensure
+        all agents share the same anonymous identity.
+        """
+        cookies = {}
         for cookie in response.cookies.jar:
             if cookie.name in ("sessionid", "csrftoken", "cf_clearance"):
                 cookies[cookie.name] = cookie.value
-        _save_cookies(cookies)
+
+        if cookies:
+            _save_cookies(cookies)  # Will preserve existing sessionid
 
     async def __aenter__(self) -> "DecompMeAPIClient":
         """Async context manager entry."""
