@@ -183,11 +183,16 @@ class DecompMeAPIClient:
             cookies=cookies,
         )
 
-    def _update_cookies_from_response(self, response: httpx.Response) -> None:
+    def _update_cookies_from_response(
+        self, response: httpx.Response, force_save_session: bool = False
+    ) -> None:
         """Extract and persist session cookies from response.
 
-        Note: _save_cookies() will preserve existing sessionid to ensure
-        all agents share the same anonymous identity.
+        Args:
+            response: HTTP response that may contain Set-Cookie headers
+            force_save_session: If True, always save sessionid even if one exists.
+                Use this for critical operations like scratch creation where
+                the new session establishes ownership.
         """
         cookies = {}
         for cookie in response.cookies.jar:
@@ -195,7 +200,8 @@ class DecompMeAPIClient:
                 cookies[cookie.name] = cookie.value
 
         if cookies:
-            _save_cookies(cookies)  # Will preserve existing sessionid
+            # For scratch creation, we must save the new session to establish ownership
+            _save_cookies(cookies, preserve_sessionid=not force_save_session)
 
     async def __aenter__(self) -> "DecompMeAPIClient":
         """Async context manager entry."""
@@ -254,7 +260,8 @@ class DecompMeAPIClient:
             "/api/scratch",
             json=scratch.model_dump(exclude_none=True, mode="json"),
         )
-        self._update_cookies_from_response(response)
+        # Force save session - this establishes ownership for the new scratch
+        self._update_cookies_from_response(response, force_save_session=True)
         data = self._handle_response(response)
         return Scratch.model_validate(data)
 
@@ -293,7 +300,8 @@ class DecompMeAPIClient:
             f"/api/scratch/{slug}/claim",
             json={"token": claim_token},
         )
-        self._update_cookies_from_response(response)
+        # Force save session - claiming establishes ownership with THIS session
+        self._update_cookies_from_response(response, force_save_session=True)
         data = self._handle_response(response)
         return data.get("success", False)
 

@@ -105,7 +105,10 @@ async def _handle_403_error(client, slug: str, error: Exception, operation: str 
     # Try to get scratch info to understand the ownership situation
     try:
         scratch = await client.get_scratch(slug)
-        owner_info = f"owned by '{scratch.owner.get('username', 'unknown')}'" if scratch.owner else "no owner info"
+        if scratch.owner:
+            owner_info = f"owned by '{scratch.owner.username}'"
+        else:
+            owner_info = "no owner info"
     except Exception:
         owner_info = "unable to fetch owner info"
 
@@ -114,9 +117,12 @@ async def _handle_403_error(client, slug: str, error: Exception, operation: str 
     if slug in tokens:
         console.print("[dim]Found saved token, attempting to re-claim...[/dim]")
         try:
-            await client.claim_scratch(slug, tokens[slug])
-            console.print("[green]Re-claimed successfully![/green]")
-            return True
+            success = await client.claim_scratch(slug, tokens[slug])
+            if success:
+                console.print("[green]Re-claimed successfully![/green]")
+                return True
+            else:
+                console.print("[red]Re-claim returned false - token may be invalid[/red]")
         except DecompMeAPIError as claim_error:
             console.print(f"[red]Re-claim failed:[/red] {claim_error}")
 
@@ -146,10 +152,10 @@ async def _verify_scratch_ownership(client, slug: str) -> tuple[bool, str]:
         scratch = await client.get_scratch(slug)
         # If scratch has an owner and we have a token, we should be able to update
         # (The actual check happens server-side, but this helps detect obvious issues)
-        if scratch.owner and scratch.owner.get('is_anonymous', True):
+        if scratch.owner and scratch.owner.is_anonymous:
             return True, "Anonymous owner with saved token"
         elif scratch.owner:
-            return True, f"Owned by {scratch.owner.get('username', 'unknown')}"
+            return True, f"Owned by {scratch.owner.username}"
         else:
             return False, "Scratch has no owner"
     except Exception as e:
