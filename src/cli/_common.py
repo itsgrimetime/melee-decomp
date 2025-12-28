@@ -21,14 +21,10 @@ console = Console()
 DECOMP_CONFIG_DIR = Path.home() / ".config" / "decomp-me"
 DECOMP_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
-# Get agent ID for session isolation - use same logic as api.py
+# Get agent ID for worktree AND session isolation
+# Each agent gets its own worktree (for git) and its own session (for decomp.me)
+# This prevents conflicts when parallel agents each claim their own scratches
 AGENT_ID = _get_agent_id()
-_cookies_suffix = f"_{AGENT_ID}" if AGENT_ID else ""
-
-DECOMP_COOKIES_FILE = os.environ.get(
-    "DECOMP_COOKIES_FILE",
-    str(DECOMP_CONFIG_DIR / f"cookies{_cookies_suffix}.json")
-)
 DECOMP_COMPLETED_FILE = os.environ.get(
     "DECOMP_COMPLETED_FILE",
     str(DECOMP_CONFIG_DIR / "completed_functions.json")

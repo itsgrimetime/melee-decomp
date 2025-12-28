@@ -13,16 +13,6 @@ from pydantic import TypeAdapter
 # Persistent config directory
 DECOMP_CONFIG_DIR = Path.home() / ".config" / "decomp-me"
 
-# Shared cookies file - all agents use the same session
-# File locking prevents race conditions when parallel agents access it
-DECOMP_COOKIES_FILE = os.environ.get(
-    "DECOMP_COOKIES_FILE",
-    str(DECOMP_CONFIG_DIR / "cookies.json")
-)
-
-# Lock file for cookie operations
-_COOKIES_LOCK_FILE = DECOMP_CONFIG_DIR / "cookies.lock"
-
 
 def _get_agent_id() -> str:
     """Get agent ID for worktree isolation.
@@ -48,6 +38,33 @@ def _get_agent_id() -> str:
 
     # Fallback to PID (not ideal - creates worktree per CLI call)
     return f"pid{os.getpid()}"
+
+
+def _get_cookies_file() -> Path:
+    """Get the cookies file path for the current agent.
+
+    Each agent gets its own cookies file to maintain its own anonymous identity.
+    This prevents conflicts when parallel agents each claim their own scratches -
+    each scratch is owned by the agent's session, and sessions don't collide.
+
+    Returns:
+        Path to the agent's cookies file
+    """
+    agent_id = _get_agent_id()
+    if agent_id:
+        return DECOMP_CONFIG_DIR / f"cookies_{agent_id}.json"
+    return DECOMP_CONFIG_DIR / "cookies.json"
+
+
+# Per-agent cookies file - each agent maintains its own identity
+DECOMP_COOKIES_FILE = os.environ.get(
+    "DECOMP_COOKIES_FILE",
+    str(_get_cookies_file())
+)
+
+# Lock file for cookie operations (shared - just prevents concurrent writes)
+_COOKIES_LOCK_FILE = DECOMP_CONFIG_DIR / "cookies.lock"
+
 
 from .models import (
     CompilationResult,
@@ -91,15 +108,16 @@ def _load_cookies() -> dict[str, str]:
 
 
 def _save_cookies(cookies: dict[str, str], preserve_sessionid: bool = True) -> None:
-    """Save cookies to file with locking.
+    """Save cookies to agent's file with locking.
 
-    Uses exclusive lock to prevent race conditions when multiple
-    agents try to update cookies simultaneously.
+    Each agent has its own cookies file, so this prevents race conditions
+    within a single agent's operations (e.g., concurrent API calls).
 
     Args:
         cookies: New cookies to save
         preserve_sessionid: If True (default), don't overwrite an existing
-            sessionid. This ensures all agents share the same anonymous identity.
+            sessionid. Set to False when claiming scratches, which creates
+            a new session that owns the scratch.
     """
     cookies_path = Path(DECOMP_COOKIES_FILE)
     cookies_path.parent.mkdir(parents=True, exist_ok=True)
@@ -163,6 +181,7 @@ class DecompMeAPIClient:
         transport = httpx.AsyncHTTPTransport(retries=max_retries)
 
         # Headers matching Firefox browser for Cloudflare bypass
+        # X-API-Client header triggers shared profile on self-hosted decomp.me
         headers = {
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:146.0) Gecko/20100101 Firefox/146.0",
             "Accept": "application/json",
@@ -170,6 +189,7 @@ class DecompMeAPIClient:
             "Sec-Fetch-Dest": "empty",
             "Sec-Fetch-Mode": "cors",
             "Sec-Fetch-Site": "same-origin",
+            "X-API-Client": "melee-agent",
         }
 
         # Load persistent cookies from file
@@ -270,13 +290,17 @@ class DecompMeAPIClient:
         Raises:
             DecompMeAPIError: If creation fails
         """
+        # Check if we have a session - if not, we need to save the new one
+        had_session = bool(_load_cookies().get("sessionid"))
+
         logger.info(f"Creating scratch: {scratch.name or 'Untitled'}")
         response = await self._client.post(
             "/api/scratch",
             json=scratch.model_dump(exclude_none=True, mode="json"),
         )
-        # Force save session - this establishes ownership for the new scratch
-        self._update_cookies_from_response(response, force_save_session=True)
+        # Only force save if we didn't have a session before
+        # This ensures the first agent's session is shared by all
+        self._update_cookies_from_response(response, force_save_session=not had_session)
         data = self._handle_response(response)
         return Scratch.model_validate(data)
 
@@ -315,7 +339,9 @@ class DecompMeAPIClient:
             f"/api/scratch/{slug}/claim",
             json={"token": claim_token},
         )
-        # Force save session - claiming establishes ownership with THIS session
+        # WORKAROUND: The server's claim endpoint creates a NEW session that owns
+        # the scratch, replacing our original session. We must save this new session
+        # or subsequent requests will fail with 403.
         self._update_cookies_from_response(response, force_save_session=True)
         data = self._handle_response(response)
         return data.get("success", False)
