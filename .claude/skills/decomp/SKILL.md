@@ -46,10 +46,10 @@ Then read the source file in `melee/src/` for context. Look for:
 
 Write code to `/tmp/decomp_<slug>.c`, then compile:
 ```bash
-melee-agent scratch compile <slug> -s /tmp/decomp_<slug>.c
+melee-agent scratch compile <slug> -s /tmp/decomp_<slug>.c --diff
 ```
 
-The compile output now shows **match history** tracking your progress:
+The compile also shows **match % history**:
 ```
 Compiled successfully!
 Match: 85.0%
@@ -72,14 +72,52 @@ History: 45% → 71.5% → 85%  # Shows your progress over iterations
 - **Match achieved:** score = 0
 - **Stop iterating:** Stuck at 95%+ with only `r`/`i` diffs, or same changes oscillating
 
-### Step 5: Commit
+### Step 5: Commit (REQUIRED - DO NOT SKIP)
 
 **Threshold:** 95%+ with only register/offset differences.
 
+> **WARNING:** Using `complete mark` WITHOUT `commit apply` does NOT save your work!
+> The function will appear in your tracking file but will NOT be in the repository.
+> Your match will be LOST when the scratch expires or you move on.
+
+**RECOMMENDED: Use the workflow command (combines both steps):**
+```bash
+melee-agent workflow finish <function_name> <slug>
+```
+
+This single command:
+1. Verifies the scratch meets the match threshold
+2. Tests compilation with --dry-run
+3. Applies the code to the melee repo
+4. Records the function as committed
+5. Releases any claims
+
+**Alternative: Manual two-step process:**
 ```bash
 melee-agent commit apply <function_name> <slug> --dry-run  # Always verify first
 melee-agent commit apply <function_name> <slug>            # Then commit
 melee-agent complete mark <function_name> <slug> <pct> --committed
+```
+
+**CRITICAL: Commit Requirements**
+
+Before committing, you MUST ensure:
+
+1. **Header signatures match implementations** - If you implement `void foo(int x)`, the header MUST declare `void foo(int)`, not `UNK_RET foo(UNK_PARAMS)`. The CI uses `-requireprotos` which fails on mismatches.
+
+2. **No merge conflict markers** - Files must not contain `<<<<<<<`, `=======`, or `>>>>>>>` markers.
+
+3. **Build passes locally** - Run `ninja` in the melee directory to verify the build succeeds before committing.
+
+4. **Test with require-protos** - Run `python configure.py --require-protos && ninja` to catch missing prototypes early.
+
+**Common header fixes needed:**
+```c
+// Before (stub declaration):
+/* 0D7268 */ UNK_RET ftCo_800D7268(UNK_PARAMS);
+
+// After (matches implementation):
+/* 0D7268 */ M2C_UNK ftCo_800D7268(void* arg0);
 ```
 
 **Improved commit diagnostics:** When `--dry-run` fails, the CLI now:
@@ -162,16 +200,27 @@ melee-agent extract get lbColl_80008440 --create-scratch
 # → Created scratch `xYz12`
 
 # Read source file for context, then write and compile
-melee-agent scratch compile xYz12 -s /tmp/decomp_xYz12.c
+melee-agent scratch compile xYz12 -s /tmp/decomp_xYz12.c --diff
 # → 45% match, analyze diff, iterate...
 
 # If stuck, check for type issues
 melee-agent struct issues
 melee-agent struct offset 0x1898  # What field is at this offset?
 
-# At 97% with only register diffs, commit and complete
-melee-agent commit apply lbColl_80008440 xYz12
-melee-agent complete mark lbColl_80008440 xYz12 97.0 --committed
+# Search for struct definitions in the scratch context
+melee-agent scratch search-context xYz12 "CollData" "HSD_GObj"
+
+# At 97% with only register diffs, FINISH THE FUNCTION (commits + records)
+melee-agent workflow finish lbColl_80008440 xYz12
+```
+
+## Checking for Uncommitted Work
+
+If you're unsure whether you've committed your matches:
+
+```bash
+melee-agent workflow status              # Shows all uncommitted 95%+ matches
+melee-agent workflow status <func_name>  # Check specific function
 ```
 
 ## What NOT to Do
@@ -181,6 +230,9 @@ melee-agent complete mark lbColl_80008440 xYz12 97.0 --committed
 3. **Don't ignore file-local types** - they must be included in source
 4. **Don't commit to repo until 95%+ match** - only Step 5 touches the melee repo
 5. **Don't keep trying the same changes** - if reordering doesn't help after 3-4 attempts, the issue is likely context-related
+6. **Don't use `complete mark` without `--committed`** - this only records in a tracking file, NOT the repo!
+7. **Don't continue working if `claim add` fails** - pick a different function
+8. **Don't use raw curl/API calls** - use CLI tools like `scratch search-context` instead
 
 ## Troubleshooting
 

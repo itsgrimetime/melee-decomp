@@ -123,6 +123,30 @@ def claim_add(
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
+def _release_claim(function_name: str) -> bool:
+    """Internal function to release a claim. Returns True if released, False if not claimed."""
+    claims_path = Path(DECOMP_CLAIMS_FILE)
+    if not claims_path.exists():
+        return False
+
+    lock_path = Path(str(claims_path) + ".lock")
+    lock_path.touch(exist_ok=True)
+
+    with open(lock_path, 'r') as lock_file:
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            claims = _load_claims()
+
+            if function_name not in claims:
+                return False
+
+            del claims[function_name]
+            _save_claims(claims)
+            return True
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
 @claim_app.command("release")
 def claim_release(
     function_name: Annotated[str, typer.Argument(help="Function name to release")],

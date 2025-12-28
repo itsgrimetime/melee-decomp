@@ -146,6 +146,21 @@ def complete_mark(
         branch_info = f" on {branch}" if branch else ""
         console.print(f"[green]Completed ({status}):[/green] {function_name} at {match_percent:.1f}%{branch_info}")
 
+        # CRITICAL WARNING: Remind users that non-committed work is NOT saved
+        if not committed and match_percent >= 95.0:
+            console.print()
+            console.print("[bold red]" + "=" * 60 + "[/bold red]")
+            console.print("[bold red]WARNING: This function is NOT committed to the repository![/bold red]")
+            console.print("[bold red]" + "=" * 60 + "[/bold red]")
+            console.print()
+            console.print("[yellow]Your work will be LOST unless you run:[/yellow]")
+            console.print(f"  [cyan]melee-agent workflow finish {function_name} <scratch_slug>[/cyan]")
+            console.print()
+            console.print("[dim]Or use the two-step process:[/dim]")
+            console.print(f"  [dim]melee-agent commit apply {function_name} <scratch_slug>[/dim]")
+            console.print(f"  [dim]melee-agent complete mark {function_name} <slug> {match_percent:.1f} --committed[/dim]")
+            console.print()
+
 
 @complete_app.command("list")
 def complete_list(
