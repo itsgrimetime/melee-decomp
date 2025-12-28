@@ -25,13 +25,28 @@ _COOKIES_LOCK_FILE = DECOMP_CONFIG_DIR / "cookies.lock"
 
 
 def _get_agent_id() -> str:
-    """Get agent ID for logging/debugging purposes.
+    """Get agent ID for worktree isolation.
 
-    Note: This is no longer used for session isolation - all agents share
-    a single session. Kept for backwards compatibility and debugging.
+    Priority:
+    1. DECOMP_AGENT_ID env var (explicit override for parallel subagents)
+    2. TERM_SESSION_ID (stable per terminal/Claude Code session)
+    3. PID fallback (creates new worktree per CLI call - avoid)
+
+    For parallel subagents needing separate worktrees, explicitly set
+    DECOMP_AGENT_ID to a unique value for each.
     """
+    # Explicit override takes priority
     if os.environ.get("DECOMP_AGENT_ID"):
         return os.environ["DECOMP_AGENT_ID"]
+
+    # Use terminal session ID for stability (works in Claude Code + subagents)
+    term_session = os.environ.get("TERM_SESSION_ID") or os.environ.get("ITERM_SESSION_ID")
+    if term_session:
+        # Extract the short prefix before ':' (e.g., "w0t2p4" from "w0t2p4:UUID")
+        short_id = term_session.split(":")[0] if ":" in term_session else term_session[:8]
+        return f"claude-{short_id}"
+
+    # Fallback to PID (not ideal - creates worktree per CLI call)
     return f"pid{os.getpid()}"
 
 from .models import (
