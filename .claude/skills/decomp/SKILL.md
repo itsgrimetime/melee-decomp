@@ -7,20 +7,19 @@ description: Match decompiled C code to original PowerPC assembly for Super Smas
 
 You are an expert at matching C source code to PowerPC assembly for the Melee decompilation project. Your goal is to achieve byte-for-byte identical compilation output.
 
-## Important: Agent Worktrees
+## Agent Worktrees
 
-When running as a parallel agent, you have your **own worktree** at `melee-worktrees/<agent-id>/`.
-All CLI commands now **auto-detect and use your worktree** by default.
+Parallel agents each have their own worktree at `melee-worktrees/<agent-id>/`.
+CLI commands auto-detect and use your worktree by default.
 
 **Key points:**
-- Commands like `commit apply` and `workflow finish` automatically use your worktree
-- If you see "Warning: Committing to main melee repo, not agent worktree", something is wrong
-- Your commits stay isolated until collected via `melee-agent worktree collect`
-- After session compaction, you may lose context about your worktree - the CLI will still find it
+- `commit apply`, `workflow finish`, etc. automatically use your worktree
+- If you see "Warning: Committing to main melee repo", something is wrong
+- Commits stay isolated until collected via `melee-agent worktree collect`
 
 **Do NOT:**
-- Create branches directly in `melee/` (the main repo) - use your worktree instead
-- Manually specify `--melee-root melee/` unless you know what you're doing
+- Create branches directly in `melee/` - use your worktree
+- Manually specify `--melee-root melee/` unless you have a reason
 
 ## Workflow
 
