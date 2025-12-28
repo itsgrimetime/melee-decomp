@@ -1,5 +1,6 @@
 """Async HTTP client for the decomp.me REST API."""
 
+import fcntl
 import json
 import logging
 import os
@@ -12,50 +13,26 @@ from pydantic import TypeAdapter
 # Persistent config directory
 DECOMP_CONFIG_DIR = Path.home() / ".config" / "decomp-me"
 
-# Persistent cookies file for session management
-# Supports per-agent isolation via DECOMP_AGENT_ID env var
-# Auto-generates ID from Claude Code's PID if not set
-def _get_agent_id() -> str:
-    """Get or generate a unique agent ID for session isolation.
-
-    Walks up the process tree to find Claude Code's PID, which is stable
-    for the entire conversation. Different Claude windows have different
-    PIDs = automatic isolation.
-    """
-    # Explicit ID takes priority (for manual parallel agent coordination)
-    if os.environ.get("DECOMP_AGENT_ID"):
-        return os.environ["DECOMP_AGENT_ID"]
-
-    # Walk up process tree to find 'claude' process
-    import subprocess
-    pid = os.getpid()
-    for _ in range(10):  # Max 10 levels up
-        try:
-            result = subprocess.run(
-                ['ps', '-p', str(pid), '-o', 'ppid=,comm='],
-                capture_output=True, text=True, timeout=1
-            )
-            if result.returncode != 0:
-                break
-            parts = result.stdout.strip().split(None, 1)
-            if len(parts) < 2:
-                break
-            ppid, comm = int(parts[0]), parts[1]
-            if 'claude' in comm.lower():
-                return f"claude{pid}"  # Use the claude process PID
-            pid = ppid
-        except Exception:
-            break
-
-    # Fallback to immediate parent PID
-    return f"ppid{os.getppid()}"
-
-_agent_id = _get_agent_id()
-_cookies_suffix = f"_{_agent_id}" if _agent_id else ""
+# Shared cookies file - all agents use the same session
+# File locking prevents race conditions when parallel agents access it
 DECOMP_COOKIES_FILE = os.environ.get(
     "DECOMP_COOKIES_FILE",
-    str(DECOMP_CONFIG_DIR / f"cookies{_cookies_suffix}.json")
+    str(DECOMP_CONFIG_DIR / "cookies.json")
 )
+
+# Lock file for cookie operations
+_COOKIES_LOCK_FILE = DECOMP_CONFIG_DIR / "cookies.lock"
+
+
+def _get_agent_id() -> str:
+    """Get agent ID for logging/debugging purposes.
+
+    Note: This is no longer used for session isolation - all agents share
+    a single session. Kept for backwards compatibility and debugging.
+    """
+    if os.environ.get("DECOMP_AGENT_ID"):
+        return os.environ["DECOMP_AGENT_ID"]
+    return f"pid{os.getpid()}"
 
 from .models import (
     CompilationResult,
@@ -80,23 +57,57 @@ class DecompMeAPIError(Exception):
 
 
 def _load_cookies() -> dict[str, str]:
-    """Load persistent cookies from file."""
+    """Load persistent cookies from file with locking."""
     cookies_path = Path(DECOMP_COOKIES_FILE)
+    cookies_path.parent.mkdir(parents=True, exist_ok=True)
+
     if not cookies_path.exists():
         return {}
+
     try:
         with open(cookies_path, 'r') as f:
-            return json.load(f)
+            fcntl.flock(f.fileno(), fcntl.LOCK_SH)  # Shared lock for reading
+            try:
+                return json.load(f)
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
     except (json.JSONDecodeError, IOError):
         return {}
 
 
 def _save_cookies(cookies: dict[str, str]) -> None:
-    """Save cookies to file."""
+    """Save cookies to file with locking.
+
+    Uses exclusive lock to prevent race conditions when multiple
+    agents try to update cookies simultaneously.
+    """
     cookies_path = Path(DECOMP_COOKIES_FILE)
     cookies_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(cookies_path, 'w') as f:
-        json.dump(cookies, f, indent=2)
+
+    # Use lock file for atomic updates
+    lock_path = _COOKIES_LOCK_FILE
+    lock_path.touch(exist_ok=True)
+
+    with open(lock_path, 'r') as lock_f:
+        fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)  # Exclusive lock
+        try:
+            # Read existing cookies first (merge, don't overwrite)
+            existing = {}
+            if cookies_path.exists():
+                try:
+                    with open(cookies_path, 'r') as f:
+                        existing = json.load(f)
+                except (json.JSONDecodeError, IOError):
+                    pass
+
+            # Merge new cookies into existing
+            existing.update(cookies)
+
+            # Write atomically
+            with open(cookies_path, 'w') as f:
+                json.dump(existing, f, indent=2)
+        finally:
+            fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
 
 
 class DecompMeAPIClient:

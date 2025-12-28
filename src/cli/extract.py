@@ -15,6 +15,7 @@ from ._common import (
     DECOMP_COMPLETED_FILE,
     get_agent_melee_root,
     get_agent_context_file,
+    check_duplicate_operation,
 )
 
 # API URL from environment
@@ -287,6 +288,21 @@ def extract_get(
             console.print("[red]Cannot create scratch - ASM not available[/red]")
             raise typer.Exit(1)
 
+        # Check for duplicate scratch creation (prevent redundant API calls)
+        if check_duplicate_operation("scratch_create", function_name, warn=False):
+            # Check if we already have a scratch for this function
+            from src.cli.scratch import _load_scratch_tokens
+            tokens = _load_scratch_tokens()
+            existing_slug = None
+            for slug in tokens:
+                # Simple heuristic: check if function name is in scratch slug's context
+                # (decomp.me uses function name as the scratch name)
+                if slug:  # Just check we have saved tokens
+                    existing_slug = slug
+                    break
+            if existing_slug:
+                console.print(f"[yellow]Note:[/yellow] A scratch was recently created. Use existing scratch if appropriate.")
+
         ctx_path = _get_context_file()
         if not ctx_path.exists():
             console.print(f"[red]Context file not found: {ctx_path}[/red]")
@@ -323,4 +339,6 @@ def extract_get(
                 return scratch
 
         scratch = asyncio.run(create())
+        # Record the operation for duplicate detection
+        check_duplicate_operation("scratch_create", function_name, warn=False)
         console.print(f"[green]Created scratch:[/green] {api_url}/scratch/{scratch.slug}")

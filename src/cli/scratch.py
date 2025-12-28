@@ -4,6 +4,7 @@ This module handles all scratch operations: create, compile, update, get, search
 """
 
 import asyncio
+import fcntl
 import json
 import os
 import re
@@ -14,16 +15,16 @@ import typer
 from rich.table import Table
 
 from ._common import console, DEFAULT_MELEE_ROOT, DECOMP_CONFIG_DIR, get_agent_context_file, DEFAULT_API_URL, require_api_url, record_match_score, format_match_history
-from src.client.api import _get_agent_id
 
-# Paths - use same agent ID logic as api.py for session isolation
-_agent_id = _get_agent_id()
-_agent_suffix = f"_{_agent_id}" if _agent_id else ""
-
+# Shared scratch tokens file - all agents use the same file
+# Tokens are keyed by scratch slug, so no conflicts between agents
 DECOMP_SCRATCH_TOKENS_FILE = os.environ.get(
     "DECOMP_SCRATCH_TOKENS_FILE",
-    str(DECOMP_CONFIG_DIR / f"scratch_tokens{_agent_suffix}.json")
+    str(DECOMP_CONFIG_DIR / "scratch_tokens.json")
 )
+
+# Lock file for token operations
+_TOKENS_LOCK_FILE = DECOMP_CONFIG_DIR / "scratch_tokens.lock"
 
 # Context file override from environment
 _context_env = os.environ.get("DECOMP_CONTEXT_FILE", "")
@@ -39,25 +40,120 @@ scratch_app = typer.Typer(help="Manage decomp.me scratches")
 
 
 def _load_scratch_tokens() -> dict[str, str]:
-    """Load scratch claim tokens from file."""
+    """Load scratch claim tokens from file with locking."""
     tokens_path = Path(DECOMP_SCRATCH_TOKENS_FILE)
+    tokens_path.parent.mkdir(parents=True, exist_ok=True)
+
     if not tokens_path.exists():
         return {}
+
     try:
         with open(tokens_path, 'r') as f:
-            return json.load(f)
+            fcntl.flock(f.fileno(), fcntl.LOCK_SH)  # Shared lock for reading
+            try:
+                return json.load(f)
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
     except (json.JSONDecodeError, IOError):
         return {}
 
 
 def _save_scratch_token(slug: str, token: str) -> None:
-    """Save a scratch claim token."""
-    tokens = _load_scratch_tokens()
-    tokens[slug] = token
+    """Save a scratch claim token with locking.
+
+    Uses exclusive lock to prevent race conditions when multiple
+    agents create scratches simultaneously.
+    """
     tokens_path = Path(DECOMP_SCRATCH_TOKENS_FILE)
     tokens_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(tokens_path, 'w') as f:
-        json.dump(tokens, f, indent=2)
+
+    # Use lock file for atomic updates
+    lock_path = _TOKENS_LOCK_FILE
+    lock_path.touch(exist_ok=True)
+
+    with open(lock_path, 'r') as lock_f:
+        fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)  # Exclusive lock
+        try:
+            # Load existing tokens
+            tokens = {}
+            if tokens_path.exists():
+                try:
+                    with open(tokens_path, 'r') as f:
+                        tokens = json.load(f)
+                except (json.JSONDecodeError, IOError):
+                    pass
+
+            # Add/update the token for this slug
+            tokens[slug] = token
+
+            # Write atomically
+            with open(tokens_path, 'w') as f:
+                json.dump(tokens, f, indent=2)
+        finally:
+            fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
+
+
+async def _handle_403_error(client, slug: str, error: Exception, operation: str = "update") -> bool:
+    """Handle 403 Forbidden errors with helpful messaging and recovery attempts.
+
+    Returns True if recovery succeeded, False if it failed.
+    """
+    from src.client import DecompMeAPIError
+
+    tokens = _load_scratch_tokens()
+
+    # Try to get scratch info to understand the ownership situation
+    try:
+        scratch = await client.get_scratch(slug)
+        owner_info = f"owned by '{scratch.owner.get('username', 'unknown')}'" if scratch.owner else "no owner info"
+    except Exception:
+        owner_info = "unable to fetch owner info"
+
+    console.print(f"\n[red]403 Forbidden:[/red] Cannot {operation} scratch '{slug}' ({owner_info})")
+
+    if slug in tokens:
+        console.print("[dim]Found saved token, attempting to re-claim...[/dim]")
+        try:
+            await client.claim_scratch(slug, tokens[slug])
+            console.print("[green]Re-claimed successfully![/green]")
+            return True
+        except DecompMeAPIError as claim_error:
+            console.print(f"[red]Re-claim failed:[/red] {claim_error}")
+
+    # Provide actionable suggestions
+    console.print("\n[yellow]Possible causes and solutions:[/yellow]")
+    console.print("  1. [bold]Session mismatch:[/bold] Another process created this scratch")
+    console.print("     → Create a new scratch: [cyan]melee-agent extract get <func> --create-scratch[/cyan]")
+    console.print("  2. [bold]Token expired:[/bold] The claim token is no longer valid")
+    console.print("     → Fork the scratch: [cyan]melee-agent scratch fork {slug}[/cyan]")
+    console.print("  3. [bold]Wrong scratch:[/bold] You may be trying to edit someone else's scratch")
+    console.print("     → Check scratch URL and create your own copy")
+
+    return False
+
+
+async def _verify_scratch_ownership(client, slug: str) -> tuple[bool, str]:
+    """Check if we can likely update a scratch before attempting.
+
+    Returns (can_update, reason) tuple.
+    """
+    tokens = _load_scratch_tokens()
+
+    if slug not in tokens:
+        return False, "No saved token for this scratch"
+
+    try:
+        scratch = await client.get_scratch(slug)
+        # If scratch has an owner and we have a token, we should be able to update
+        # (The actual check happens server-side, but this helps detect obvious issues)
+        if scratch.owner and scratch.owner.get('is_anonymous', True):
+            return True, "Anonymous owner with saved token"
+        elif scratch.owner:
+            return True, f"Owned by {scratch.owner.get('username', 'unknown')}"
+        else:
+            return False, "Scratch has no owner"
+    except Exception as e:
+        return False, f"Could not verify: {e}"
 
 
 @scratch_app.command("create")
@@ -210,22 +306,24 @@ def scratch_compile(
 
     async def compile_scratch():
         async with DecompMeAPIClient(base_url=api_url) as client:
+            # Early ownership verification if we're going to update
+            if source_code is not None:
+                can_update, reason = await _verify_scratch_ownership(client, slug)
+                if not can_update:
+                    console.print(f"[yellow]Warning:[/yellow] {reason}")
+                    console.print("[dim]Update may fail - consider creating a new scratch if it does[/dim]")
+
             # Update source first if provided
             if source_code is not None:
                 try:
                     await client.update_scratch(slug, ScratchUpdate(source_code=source_code))
                 except DecompMeAPIError as e:
                     if "403" in str(e):
-                        tokens = _load_scratch_tokens()
-                        if slug in tokens:
-                            console.print("[dim]Session mismatch, re-claiming...[/dim]")
-                            try:
-                                await client.claim_scratch(slug, tokens[slug])
-                                await client.update_scratch(slug, ScratchUpdate(source_code=source_code))
-                            except Exception:
-                                raise e
+                        # Use improved error handler with recovery attempt
+                        if await _handle_403_error(client, slug, e, "update"):
+                            # Recovery succeeded, retry the update
+                            await client.update_scratch(slug, ScratchUpdate(source_code=source_code))
                         else:
-                            console.print("[red]No saved token - cannot update[/red]")
                             raise typer.Exit(1)
                     else:
                         raise
@@ -274,20 +372,21 @@ def scratch_update(
 
     async def update():
         async with DecompMeAPIClient(base_url=api_url) as client:
+            # Early ownership verification
+            can_update, reason = await _verify_scratch_ownership(client, slug)
+            if not can_update:
+                console.print(f"[yellow]Warning:[/yellow] {reason}")
+                console.print("[dim]Update may fail - consider creating a new scratch if it does[/dim]")
+
             try:
                 scratch = await client.update_scratch(slug, ScratchUpdate(source_code=source_code))
             except DecompMeAPIError as e:
                 if "403" in str(e):
-                    tokens = _load_scratch_tokens()
-                    if slug in tokens:
-                        console.print("[dim]Session mismatch, re-claiming...[/dim]")
-                        try:
-                            await client.claim_scratch(slug, tokens[slug])
-                            scratch = await client.update_scratch(slug, ScratchUpdate(source_code=source_code))
-                        except Exception:
-                            raise e
+                    # Use improved error handler with recovery attempt
+                    if await _handle_403_error(client, slug, e, "update"):
+                        # Recovery succeeded, retry the update
+                        scratch = await client.update_scratch(slug, ScratchUpdate(source_code=source_code))
                     else:
-                        console.print("[red]No saved token - cannot update[/red]")
                         raise typer.Exit(1)
                 else:
                     raise
