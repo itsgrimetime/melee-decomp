@@ -19,7 +19,7 @@ CLI commands auto-detect and use your worktree by default.
 
 **Do NOT:**
 - Create branches directly in `melee/` - use your worktree
-- Manually specify `--melee-root melee/` unless you have a reason
+- Manually specify `--melee-root` - if you think you need to, stop and ask the user for confirmation, stating your justification
 
 ## Workflow
 
