@@ -15,12 +15,12 @@ from ._common import (
     DECOMP_CONFIG_DIR,
     LOCAL_DECOMP_ME,
     PRODUCTION_DECOMP_ME,
-    SLUG_MAP_FILE,
     console,
     extract_pr_info,
     get_pr_status_from_gh,
     load_completed_functions,
     load_slug_map,
+    save_completed_functions,
 )
 from src.db import get_db, StateDB
 
@@ -162,6 +162,7 @@ def state_status(
     table = Table(title=f"Functions ({category})")
     table.add_column("Function", style="cyan", max_width=30)
     table.add_column("Match", justify="right")
+    table.add_column("Slug", style="dim")
     table.add_column("Status")
     table.add_column("Agent", style="dim", max_width=15)
     table.add_column("Updated", style="dim")
@@ -181,9 +182,15 @@ def state_status(
         elif status == 'claimed':
             status = "[yellow]claimed[/yellow]"
 
+        # Extract slug from local_scratch_slug (could be URL or just slug)
+        local_slug = func.get('local_scratch_slug', '') or ''
+        if '/' in local_slug:
+            local_slug = local_slug.rstrip('/').split('/')[-1]
+
         table.add_row(
             func['function_name'],
             match_str,
+            local_slug or '-',
             status,
             func.get('claimed_by_agent', '-') or '-',
             _format_age(func.get('updated_at')),
@@ -417,120 +424,478 @@ def state_stale(
 
 @state_app.command("validate")
 def state_validate(
-    function_name: Annotated[
-        Optional[str], typer.Argument(help="Function to validate (optional)")
+    verify_server: Annotated[
+        bool, typer.Option("--verify-server", help="Verify scratches exist on server and match % is correct")
+    ] = False,
+    verify_git: Annotated[
+        bool, typer.Option("--verify-git", help="Verify committed functions exist in git repo")
+    ] = False,
+    melee_root: Annotated[
+        Optional[Path], typer.Option("--melee-root", "-r", help="Path to melee repo for --verify-git")
     ] = None,
+    limit: Annotated[
+        int, typer.Option("--limit", "-n", help="Limit entries to verify")
+    ] = 100,
     fix: Annotated[
-        bool, typer.Option("--fix", help="Automatically fix inconsistencies")
+        bool, typer.Option("--fix", help="Automatically fix issues where possible")
     ] = False,
     verbose: Annotated[
         bool, typer.Option("--verbose", "-v", help="Show detailed output")
     ] = False,
+    output_json: Annotated[
+        bool, typer.Option("--json", help="Output as JSON")
+    ] = False,
 ):
-    """Validate database state against source data.
+    """Validate database state for consistency and correctness (bidirectional).
 
-    Checks:
-    - Claims in DB match /tmp/decomp_claims.json
-    - Functions in DB match completed_functions.json
-    - Scratches exist (if --fix, verifies via API)
+    Basic checks (always run):
+    - Status consistency (matches is_committed, pr_state, match_percent)
+    - All functions linked to local scratch
+    - All 95%+ functions synced to production
+    - All committed functions linked to PRs
+    - All PR links have state
+
+    With --verify-server:
+    - Scratches exist on server with correct match %
+    - Scratch names match function names
+
+    With --verify-git:
+    - Committed functions have MATCHING marker in repo
+    - Functions marked MATCHING in repo are tracked as committed
+
+    To link functions to PRs, run: melee-agent audit discover-prs
     """
     db = get_db()
-    issues: list[tuple[str, str, str]] = []  # (type, entity, message)
+    issues: list[dict] = []
+    fixes_applied = 0
 
-    # Check 1: Claims consistency
-    claims_file = Path(os.environ.get("DECOMP_CLAIMS_FILE", "/tmp/decomp_claims.json"))
-    if claims_file.exists():
-        try:
-            with open(claims_file) as f:
-                file_claims = json.load(f)
-            # Filter expired
-            now = time.time()
-            file_claims = {
-                k: v for k, v in file_claims.items()
-                if now - v.get('timestamp', 0) < 3600
-            }
-        except (json.JSONDecodeError, IOError):
-            file_claims = {}
-    else:
-        file_claims = {}
-
-    db_claims = {c['function_name']: c for c in db.get_active_claims()}
-
-    # Claims in file but not DB
-    for func in set(file_claims.keys()) - set(db_claims.keys()):
-        issues.append(('claim', func, 'In JSON but not DB'))
-        if fix:
-            info = file_claims[func]
-            db.add_claim(func, info.get('agent_id', 'unknown'))
-
-    # Claims in DB but not file
-    for func in set(db_claims.keys()) - set(file_claims.keys()):
-        issues.append(('claim', func, 'In DB but not JSON'))
-        if fix:
-            db.release_claim(func)
-
-    # Check 2: Completed functions consistency
-    file_completed = load_completed_functions()
     with db.connection() as conn:
-        cursor = conn.execute("SELECT function_name FROM functions")
-        db_functions = {row['function_name'] for row in cursor.fetchall()}
+        # Get all functions for validation
+        cursor = conn.execute("""
+            SELECT function_name, match_percent, status, local_scratch_slug,
+                   production_scratch_slug, is_committed, pr_url, pr_state, pr_number, branch
+            FROM functions
+        """)
+        all_functions = [dict(row) for row in cursor.fetchall()]
 
-    # Functions in file but not DB
-    for func in set(file_completed.keys()) - db_functions:
-        issues.append(('function', func, 'In JSON but not DB'))
-        if fix:
-            info = file_completed[func]
-            db.upsert_function(
-                func,
-                agent_id=AGENT_ID,
-                match_percent=info.get('match_percent', 0),
-                local_scratch_slug=info.get('scratch_slug'),
-                production_scratch_slug=info.get('production_slug'),
-                is_committed=info.get('committed', False),
-                branch=info.get('branch'),
-                pr_url=info.get('pr_url'),
-                pr_state=info.get('pr_state'),
-                notes=info.get('notes'),
-            )
+    console.print("[bold]Validating database state...[/bold]\n")
 
-    # Check 3: Slug map consistency
-    slug_map = load_slug_map()
+    # === Check 1: Status consistency ===
+    for func in all_functions:
+        name = func['function_name']
+        status = func.get('status') or 'unclaimed'
+        is_committed = func.get('is_committed', False)
+        pr_state = func.get('pr_state')
+        match_pct = func.get('match_percent', 0)
+
+        # Determine what status SHOULD be based on available data
+        if pr_state == 'MERGED':
+            expected_status = 'merged'
+        elif pr_state == 'OPEN':
+            expected_status = 'in_review'
+        elif pr_state == 'CLOSED':
+            # Closed but not merged - work was rejected/abandoned
+            expected_status = 'matched' if match_pct >= 95 else 'in_progress' if match_pct > 0 else 'unclaimed'
+        elif is_committed:
+            expected_status = 'committed'
+        elif match_pct >= 95:
+            expected_status = 'matched'
+        elif match_pct > 0:
+            expected_status = 'in_progress'
+        else:
+            expected_status = 'unclaimed'
+
+        if status != expected_status:
+            issues.append({
+                'type': 'status_mismatch',
+                'severity': 'warning',
+                'function': name,
+                'message': f'Status "{status}" should be "{expected_status}"',
+                'fix': {'status': expected_status},
+            })
+
+    # === Check 2: Missing local scratch ===
+    for func in all_functions:
+        if func.get('match_percent', 0) > 0 and not func.get('local_scratch_slug'):
+            issues.append({
+                'type': 'missing_local_scratch',
+                'severity': 'error',
+                'function': func['function_name'],
+                'message': f'Has {func["match_percent"]:.0f}% but no local scratch slug',
+            })
+
+    # === Check 3: Missing production scratch for 95%+ ===
+    for func in all_functions:
+        if func.get('match_percent', 0) >= 95 and not func.get('production_scratch_slug'):
+            issues.append({
+                'type': 'missing_prod_scratch',
+                'severity': 'info',
+                'function': func['function_name'],
+                'message': f'{func["match_percent"]:.0f}% match not synced to production',
+            })
+
+    # === Check 4: Committed but no PR ===
+    for func in all_functions:
+        if func.get('is_committed') and not func.get('pr_url'):
+            issues.append({
+                'type': 'committed_no_pr',
+                'severity': 'warning',
+                'function': func['function_name'],
+                'message': 'Committed but not linked to a PR',
+            })
+
+    # === Check 5: PR linked but no state ===
+    for func in all_functions:
+        if func.get('pr_url') and not func.get('pr_state'):
+            issues.append({
+                'type': 'pr_no_state',
+                'severity': 'warning',
+                'function': func['function_name'],
+                'message': f'PR linked but state unknown',
+                'pr_url': func['pr_url'],
+            })
+
+    # === Check 6: 100% match not committed ===
+    # Note: When --verify-git is enabled, we'll cross-check these against the build report
+    # and provide more accurate fixes. Store them for now, we'll process them later.
+    uncommitted_100_funcs = [f for f in all_functions if f.get('match_percent', 0) >= 100 and not f.get('is_committed')]
+
+    # If not verifying against git, just add basic issues without fixes
+    if not verify_git:
+        for func in uncommitted_100_funcs:
+            issues.append({
+                'type': 'uncommitted_100',
+                'severity': 'info',
+                'function': func['function_name'],
+                'message': '100% match but not committed',
+            })
+
+    # === Check 7: Verify scratches on server (optional) ===
+    if verify_server:
+        import asyncio
+        import httpx
+
+        api_base = os.environ.get("DECOMP_API_BASE", "")
+        if not api_base:
+            console.print("[yellow]DECOMP_API_BASE not set - skipping server verification[/yellow]")
+        else:
+            # Normalize base URL - remove /api suffix if present (we add it in requests)
+            if api_base.endswith("/api"):
+                api_base = api_base[:-4]
+
+            funcs_with_scratch = [f for f in all_functions if f.get('local_scratch_slug')][:limit]
+            console.print(f"[dim]Verifying {len(funcs_with_scratch)} scratches on {api_base}...[/dim]")
+
+            async def verify_scratches():
+                results = []
+                checked = 0
+                errors = 0
+                async with httpx.AsyncClient(base_url=api_base, timeout=10.0) as client:
+                    for i, func in enumerate(funcs_with_scratch):
+                        slug = func['local_scratch_slug']
+                        name = func['function_name']
+                        recorded_pct = func.get('match_percent', 0)
+
+                        # Progress every 10 or on verbose
+                        if verbose or (i + 1) % 10 == 0 or i == 0:
+                            console.print(f"[dim]  Checking ({i+1}/{len(funcs_with_scratch)}) {name}...[/dim]", end="" if verbose else "\n")
+
+                        try:
+                            resp = await asyncio.wait_for(
+                                client.get(f'/api/scratch/{slug}'),
+                                timeout=5.0
+                            )
+                            checked += 1
+                            if resp.status_code == 404:
+                                results.append({
+                                    'type': 'scratch_not_found',
+                                    'severity': 'error',
+                                    'function': name,
+                                    'message': f'Scratch {slug} not found on server',
+                                })
+                                if verbose:
+                                    console.print(" [red]NOT FOUND[/red]")
+                            elif resp.status_code == 200:
+                                data = resp.json()
+                                score = data.get('score', 0)
+                                max_score = data.get('max_score', 1)
+                                actual_pct = ((max_score - score) / max_score * 100) if max_score > 0 else 0
+
+                                # Check if match % differs significantly
+                                if abs(actual_pct - recorded_pct) > 1.0:
+                                    results.append({
+                                        'type': 'match_pct_mismatch',
+                                        'severity': 'warning',
+                                        'function': name,
+                                        'message': f'Recorded {recorded_pct:.1f}% but server shows {actual_pct:.1f}%',
+                                        'fix': {'match_percent': actual_pct},
+                                    })
+                                    if verbose:
+                                        console.print(f" [yellow]{recorded_pct:.0f}% -> {actual_pct:.0f}%[/yellow]")
+                                elif verbose:
+                                    console.print(" [green]OK[/green]")
+
+                                # Check scratch name matches function name
+                                scratch_name = data.get('name', '')
+                                if scratch_name and scratch_name != name:
+                                    results.append({
+                                        'type': 'scratch_name_mismatch',
+                                        'severity': 'error',
+                                        'function': name,
+                                        'message': f'Scratch named "{scratch_name}" but tracking as "{name}"',
+                                    })
+                            else:
+                                errors += 1
+                                if verbose:
+                                    console.print(f" [yellow]HTTP {resp.status_code}[/yellow]")
+                        except asyncio.TimeoutError:
+                            errors += 1
+                            if verbose:
+                                console.print(" [yellow]timeout[/yellow]")
+                        except Exception as e:
+                            errors += 1
+                            if verbose:
+                                console.print(f" [red]error: {e}[/red]")
+
+                console.print(f"[dim]  Checked {checked}, errors {errors}[/dim]")
+                return results
+
+            server_issues = asyncio.run(verify_scratches())
+            issues.extend(server_issues)
+
+    # === Check 8: Verify against build report (optional) ===
+    if verify_git:
+        from ._common import DEFAULT_MELEE_ROOT
+
+        repo_path = melee_root or DEFAULT_MELEE_ROOT
+        report_path = repo_path / "build" / "GALE01" / "report.json"
+
+        if not report_path.exists():
+            console.print(f"[yellow]Build report not found at {report_path}[/yellow]")
+            console.print(f"[dim]Run 'ninja' in melee repo to generate report.json[/dim]")
+        else:
+            console.print(f"[dim]Verifying against build report...[/dim]")
+
+            # Parse report.json
+            try:
+                with open(report_path) as f:
+                    report = json.load(f)
+
+                # Build map of function name -> match percent from report
+                report_funcs: dict[str, float] = {}
+                for unit in report.get('units', []):
+                    for func in unit.get('functions', []):
+                        name = func.get('name')
+                        pct = func.get('fuzzy_match_percent', 0)
+                        if name:
+                            report_funcs[name] = pct
+
+                console.print(f"[dim]  Found {len(report_funcs)} functions in build report[/dim]")
+
+                # Get DB functions
+                db_committed = {f['function_name']: f for f in all_functions if f.get('is_committed')}
+                db_by_name = {f['function_name']: f for f in all_functions}
+
+                # Check 1: DB committed functions should be 100% in report
+                mismatch_count = 0
+                for func_name, func in list(db_committed.items())[:limit]:
+                    if func_name in report_funcs:
+                        report_pct = report_funcs[func_name]
+                        if report_pct < 100:
+                            mismatch_count += 1
+                            # Determine new status based on report percentage
+                            if report_pct >= 95:
+                                new_status = 'matched'  # High match but not committed
+                            elif report_pct > 0:
+                                new_status = 'in_progress'
+                            else:
+                                new_status = 'unclaimed'
+                            issues.append({
+                                'type': 'committed_not_100_in_build',
+                                'severity': 'warning',
+                                'function': func_name,
+                                'message': f'Marked committed but build shows {report_pct:.1f}%',
+                                'fix': {
+                                    'match_percent': report_pct,
+                                    'is_committed': False,
+                                    'status': new_status,
+                                },
+                            })
+                    else:
+                        issues.append({
+                            'type': 'committed_not_in_build',
+                            'severity': 'warning',
+                            'function': func_name,
+                            'message': 'Marked committed but not found in build report',
+                        })
+
+                # Check 2: 100% functions in report should be committed in DB
+                not_tracked = 0
+                for func_name, pct in report_funcs.items():
+                    if pct >= 100:
+                        if func_name in db_by_name:
+                            if not db_by_name[func_name].get('is_committed'):
+                                issues.append({
+                                    'type': 'build_100_not_committed',
+                                    'severity': 'info',
+                                    'function': func_name,
+                                    'message': '100% in build but not marked committed in DB',
+                                    'fix': {'is_committed': True, 'match_percent': 100, 'status': 'committed'},
+                                })
+                        else:
+                            not_tracked += 1
+
+                console.print(f"[dim]  {mismatch_count} committed functions not 100% in build[/dim]")
+                console.print(f"[dim]  {not_tracked} 100% functions in build not tracked in DB[/dim]")
+
+                # Check 3: Cross-check uncommitted_100 from DB against build report
+                # These are functions our DB says are 100% but not committed
+                db_correct = 0
+                db_wrong = 0
+                for func in uncommitted_100_funcs:
+                    func_name = func['function_name']
+                    if func_name in report_funcs:
+                        report_pct = report_funcs[func_name]
+                        if report_pct >= 100:
+                            # Build confirms 100% - can safely mark as committed
+                            db_correct += 1
+                            issues.append({
+                                'type': 'uncommitted_100',
+                                'severity': 'info',
+                                'function': func_name,
+                                'message': '100% in DB and build, not marked committed',
+                                'fix': {'is_committed': True, 'match_percent': 100, 'status': 'committed'},
+                            })
+                        else:
+                            # Build shows different % - our DB is wrong
+                            db_wrong += 1
+                            if report_pct >= 95:
+                                new_status = 'matched'
+                            elif report_pct > 0:
+                                new_status = 'in_progress'
+                            else:
+                                new_status = 'unclaimed'
+                            issues.append({
+                                'type': 'db_100_but_build_differs',
+                                'severity': 'warning',
+                                'function': func_name,
+                                'message': f'DB shows 100% but build shows {report_pct:.1f}%',
+                                'fix': {'match_percent': report_pct, 'status': new_status},
+                            })
+                    else:
+                        # Function not in build report - can't verify
+                        issues.append({
+                            'type': 'uncommitted_100',
+                            'severity': 'info',
+                            'function': func_name,
+                            'message': '100% in DB but not found in build report',
+                        })
+
+                console.print(f"[dim]  {db_correct} uncommitted 100% confirmed by build[/dim]")
+                console.print(f"[dim]  {db_wrong} uncommitted 100% contradicted by build[/dim]")
+
+            except Exception as e:
+                console.print(f"[yellow]Error parsing report.json: {e}[/yellow]")
+
+    # === Apply fixes if requested ===
+    if fix:
+        for issue in issues:
+            if 'fix' in issue:
+                fix_data = issue['fix']
+                func_name = issue['function']
+                with db.connection() as conn:
+                    sets = ', '.join(f"{k} = ?" for k in fix_data.keys())
+                    values = list(fix_data.values()) + [func_name]
+                    conn.execute(f"UPDATE functions SET {sets}, updated_at = ? WHERE function_name = ?",
+                                 values[:-1] + [time.time(), func_name])
+                fixes_applied += 1
+
+    # === Summary stats ===
     with db.connection() as conn:
-        cursor = conn.execute(
-            "SELECT local_slug, production_slug FROM sync_state"
-        )
-        db_syncs = {(row['local_slug'], row['production_slug']) for row in cursor.fetchall()}
+        cursor = conn.execute("SELECT COUNT(*) as cnt FROM functions")
+        total_functions = cursor.fetchone()['cnt']
+        cursor = conn.execute("SELECT COUNT(*) as cnt FROM functions WHERE is_committed = TRUE")
+        committed = cursor.fetchone()['cnt']
+        cursor = conn.execute("SELECT COUNT(*) as cnt FROM functions WHERE match_percent >= 95")
+        matched = cursor.fetchone()['cnt']
+        cursor = conn.execute("SELECT COUNT(*) as cnt FROM functions WHERE pr_url IS NOT NULL")
+        with_pr = cursor.fetchone()['cnt']
+        cursor = conn.execute("SELECT COUNT(*) as cnt FROM functions WHERE production_scratch_slug IS NOT NULL")
+        with_prod = cursor.fetchone()['cnt']
 
-    for prod_slug, info in slug_map.items():
-        local_slug = info.get('local_slug')
-        if local_slug and (local_slug, prod_slug) not in db_syncs:
-            issues.append(('sync', f"{local_slug}->{prod_slug}", 'In JSON but not DB'))
-            if fix:
-                db.record_sync(local_slug, prod_slug, info.get('function'))
-
-    # Report
-    if verbose or issues:
-        console.print(f"\n[bold]Validation Results[/bold]")
-        console.print(f"Claims checked: {len(file_claims)} (file) vs {len(db_claims)} (db)")
-        console.print(f"Functions checked: {len(file_completed)} (file) vs {len(db_functions)} (db)")
-        console.print(f"Sync mappings checked: {len(slug_map)} (file)")
-
-    if not issues:
-        console.print("[green]No issues found[/green]")
+    if output_json:
+        print(json.dumps({
+            'summary': {
+                'total_functions': total_functions,
+                'committed': committed,
+                'matched_95plus': matched,
+                'with_pr': with_pr,
+                'with_production_scratch': with_prod,
+            },
+            'issues': issues,
+            'fixes_applied': fixes_applied,
+        }, indent=2))
         return
 
+    console.print("[bold]Summary:[/bold]")
+    console.print(f"  Total functions: {total_functions}")
+    console.print(f"  95%+ matches: {matched}")
+    console.print(f"  Committed: {committed}")
+    console.print(f"  Linked to PR: {with_pr}")
+    console.print(f"  Synced to production: {with_prod}")
+
+    if not issues:
+        console.print("\n[green]No issues found[/green]")
+        return
+
+    # Group issues by type
+    by_type: dict[str, list] = {}
+    for issue in issues:
+        t = issue['type']
+        if t not in by_type:
+            by_type[t] = []
+        by_type[t].append(issue)
+
     console.print(f"\n[yellow]Found {len(issues)} issue(s):[/yellow]")
-    for issue_type, entity, message in issues[:20]:  # Limit output
-        if fix:
-            console.print(f"  [green]Fixed[/green] {issue_type}: {entity} - {message}")
+
+    for issue_type, type_issues in by_type.items():
+        severity = type_issues[0]['severity']
+        if severity == 'error':
+            color = 'red'
+        elif severity == 'warning':
+            color = 'yellow'
         else:
-            console.print(f"  [yellow]Issue[/yellow] {issue_type}: {entity} - {message}")
+            color = 'dim'
 
-    if len(issues) > 20:
-        console.print(f"  ... and {len(issues) - 20} more")
+        console.print(f"\n[{color}]{issue_type}[/{color}] ({len(type_issues)}):")
+        for issue in type_issues[:5]:
+            console.print(f"  {issue['function']}: {issue['message']}")
+        if len(type_issues) > 5:
+            console.print(f"  [dim]... and {len(type_issues) - 5} more[/dim]")
 
-    if not fix:
-        console.print(f"\n[dim]Run with --fix to repair these issues[/dim]")
+    if fixes_applied:
+        console.print(f"\n[green]Applied {fixes_applied} fixes[/green]")
+    elif any('fix' in i for i in issues):
+        fixable = sum(1 for i in issues if 'fix' in i)
+        console.print(f"\n[dim]{fixable} issues are auto-fixable. Run with --fix to apply.[/dim]")
+
+    # Show suggestions for non-auto-fixable issues
+    suggestions = []
+    if 'committed_no_pr' in by_type:
+        suggestions.append("committed_no_pr: run 'melee-agent audit discover-prs'")
+    if 'missing_prod_scratch' in by_type:
+        suggestions.append("missing_prod_scratch: run 'melee-agent sync production'")
+    if 'uncommitted_100' in by_type:
+        suggestions.append("uncommitted_100: run 'melee-agent commit apply <func> <slug>'")
+    if 'git_not_committed' in by_type:
+        suggestions.append("git_not_committed: run with --fix to mark as committed")
+    if 'committed_not_in_git' in by_type:
+        suggestions.append("committed_not_in_git: check if function was renamed or pragma format differs")
+
+    if suggestions:
+        console.print("\n[dim]To fix:[/dim]")
+        for s in suggestions:
+            console.print(f"[dim]  {s}[/dim]")
 
 
 @state_app.command("rebuild")
@@ -864,6 +1229,241 @@ def state_prs(
     total_funcs = len(functions)
     merged = sum(1 for _, funcs in by_pr.items() if funcs[0].get("pr_state") == "MERGED")
     console.print(f"[dim]Total: {total_prs} PRs, {total_funcs} functions, {merged} merged[/dim]")
+
+
+@state_app.command("cleanup")
+def state_cleanup(
+    remove_recovered: Annotated[
+        bool, typer.Option("--remove-recovered", help="Remove bulk-imported entries (from scratches.txt)")
+    ] = False,
+    remove_no_scratch: Annotated[
+        bool, typer.Option("--remove-no-scratch", help="Remove all entries without a scratch slug")
+    ] = False,
+    verify_server: Annotated[
+        bool, typer.Option("--verify-server", help="Verify scratches exist on server (requires API access)")
+    ] = False,
+    limit: Annotated[
+        int, typer.Option("--limit", "-n", help="Limit entries to check for --verify-server")
+    ] = 100,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run/--no-dry-run", help="Show what would be removed without actually removing")
+    ] = True,
+    output_json: Annotated[
+        bool, typer.Option("--json", help="Output as JSON")
+    ] = False,
+):
+    """Identify and clean up orphaned tracking entries.
+
+    Shows entries that appear to be bulk-imported or have no actual scratch:
+    - "recovered" entries: bulk-imported from some recovery process
+    - No scratch slug: tracked but never worked on
+
+    Use --remove-recovered or --remove-no-scratch with --no-dry-run to clean up.
+    """
+    db = get_db()
+
+    # Analyze the database
+    with db.connection() as conn:
+        # Count by notes type
+        cursor = conn.execute("""
+            SELECT
+                CASE
+                    WHEN notes LIKE 'Recovered from scratches%' THEN 'recovered_scratches'
+                    WHEN notes LIKE 'Recovered from slug_map%' THEN 'recovered_slug_map'
+                    WHEN notes LIKE 'committed%' THEN 'committed'
+                    WHEN notes IS NULL OR notes = '' THEN 'no_notes'
+                    ELSE 'has_notes'
+                END as note_type,
+                COUNT(*) as cnt
+            FROM functions
+            GROUP BY note_type
+        """)
+        by_notes = {row['note_type']: row['cnt'] for row in cursor.fetchall()}
+
+        # Count with/without scratches
+        cursor = conn.execute("""
+            SELECT
+                CASE
+                    WHEN local_scratch_slug IS NOT NULL AND local_scratch_slug != '' THEN 'has_scratch'
+                    ELSE 'no_scratch'
+                END as scratch_status,
+                COUNT(*) as cnt
+            FROM functions
+            GROUP BY scratch_status
+        """)
+        by_scratch = {row['scratch_status']: row['cnt'] for row in cursor.fetchall()}
+
+        # Get recovered entries with no scratch (from scratches.txt)
+        cursor = conn.execute("""
+            SELECT function_name, notes, match_percent, is_committed, pr_state
+            FROM functions
+            WHERE notes LIKE 'Recovered from scratches%'
+            AND (local_scratch_slug IS NULL OR local_scratch_slug = '')
+        """)
+        recovered_no_scratch = [dict(row) for row in cursor.fetchall()]
+
+        # Get recovered from scratches.txt (all, even with slugs - for analysis)
+        cursor = conn.execute("""
+            SELECT function_name, notes, match_percent, local_scratch_slug
+            FROM functions
+            WHERE notes LIKE 'Recovered from scratches%'
+        """)
+        all_recovered_scratches = [dict(row) for row in cursor.fetchall()]
+
+        # Get all entries with no scratch
+        cursor = conn.execute("""
+            SELECT function_name, notes, match_percent, is_committed, pr_state
+            FROM functions
+            WHERE (local_scratch_slug IS NULL OR local_scratch_slug = '')
+        """)
+        all_no_scratch = [dict(row) for row in cursor.fetchall()]
+
+        # Get total
+        cursor = conn.execute("SELECT COUNT(*) as cnt FROM functions")
+        total = cursor.fetchone()['cnt']
+
+    if output_json:
+        print(json.dumps({
+            'total': total,
+            'by_notes': by_notes,
+            'by_scratch': by_scratch,
+            'recovered_no_scratch_count': len(recovered_no_scratch),
+            'all_no_scratch_count': len(all_no_scratch),
+            'recovered_scratches_total': len(all_recovered_scratches),
+        }, indent=2))
+        return
+
+    console.print("[bold]Tracking Entry Analysis[/bold]\n")
+    console.print(f"Total entries: {total}\n")
+
+    console.print("[bold]By source (notes type):[/bold]")
+    for note_type, cnt in sorted(by_notes.items(), key=lambda x: -x[1]):
+        pct = cnt / total * 100 if total > 0 else 0
+        if note_type == 'recovered_scratches':
+            console.print(f"  [yellow]{note_type}[/yellow]: {cnt} ({pct:.1f}%) - bulk import from scratches.txt")
+        elif note_type == 'recovered_slug_map':
+            console.print(f"  [green]{note_type}[/green]: {cnt} ({pct:.1f}%) - synced to production")
+        elif note_type == 'committed':
+            console.print(f"  [green]{note_type}[/green]: {cnt} ({pct:.1f}%) - committed to git")
+        else:
+            console.print(f"  {note_type}: {cnt} ({pct:.1f}%)")
+
+    console.print(f"\n[bold]By scratch status:[/bold]")
+    for status, cnt in sorted(by_scratch.items(), key=lambda x: -x[1]):
+        pct = cnt / total * 100 if total > 0 else 0
+        console.print(f"  {status}: {cnt} ({pct:.1f}%)")
+
+    console.print(f"\n[bold]Bulk-imported entries (from scratches.txt):[/bold]")
+    console.print(f"  Total: {len(all_recovered_scratches)}")
+    console.print(f"  Without scratch slug: {len(recovered_no_scratch)}")
+    console.print(f"  With scratch slug: {len(all_recovered_scratches) - len(recovered_no_scratch)}")
+
+    console.print(f"\n[bold]Orphaned entries (no scratch slug):[/bold]")
+    console.print(f"  Total: {len(all_no_scratch)}")
+
+    # Verify scratches on server if requested
+    if verify_server:
+        import asyncio
+        import httpx
+
+        api_base = os.environ.get("DECOMP_API_BASE", "")
+        if not api_base:
+            console.print("\n[red]DECOMP_API_BASE not set - cannot verify server[/red]")
+        else:
+            console.print(f"\n[bold]Verifying scratches on server ({api_base})...[/bold]")
+
+            # Get entries to check (recovered_scratches entries with slugs)
+            entries_to_check = all_recovered_scratches[:limit]
+
+            async def check_scratches():
+                missing = []
+                found = []
+                errors = 0
+
+                async with httpx.AsyncClient(base_url=api_base, timeout=10.0) as client:
+                    for i, entry in enumerate(entries_to_check):
+                        slug = entry.get('local_scratch_slug')
+                        if not slug:
+                            continue
+
+                        console.print(f"[dim]Checking {entry['function_name']} ({i+1}/{len(entries_to_check)})...[/dim]", end="")
+
+                        try:
+                            resp = await asyncio.wait_for(
+                                client.get(f'/scratch/{slug}'),
+                                timeout=5.0
+                            )
+                            if resp.status_code == 200:
+                                console.print(" [green]exists[/green]")
+                                found.append(entry)
+                            elif resp.status_code == 404:
+                                console.print(" [red]NOT FOUND[/red]")
+                                missing.append(entry)
+                            else:
+                                console.print(f" [yellow]{resp.status_code}[/yellow]")
+                                errors += 1
+                        except asyncio.TimeoutError:
+                            console.print(" [yellow]timeout[/yellow]")
+                            errors += 1
+                        except Exception as e:
+                            console.print(f" [red]error[/red]")
+                            errors += 1
+
+                return {'missing': missing, 'found': found, 'errors': errors}
+
+            verify_results = asyncio.run(check_scratches())
+
+            console.print(f"\n[bold]Server verification results:[/bold]")
+            console.print(f"  Found on server: {len(verify_results['found'])}")
+            console.print(f"  [red]Missing on server: {len(verify_results['missing'])}[/red]")
+            console.print(f"  Errors: {verify_results['errors']}")
+
+            if verify_results['missing'] and not output_json:
+                console.print("\n[yellow]Missing scratches (first 10):[/yellow]")
+                for entry in verify_results['missing'][:10]:
+                    console.print(f"  {entry['function_name']} (slug: {entry.get('local_scratch_slug')})")
+
+    # Handle cleanup
+    to_remove = []
+    if remove_recovered:
+        # Remove all bulk-imported entries (from scratches.txt)
+        to_remove = all_recovered_scratches
+        console.print(f"\n[yellow]Will remove {len(to_remove)} bulk-imported entries (from scratches.txt)[/yellow]")
+    elif remove_no_scratch:
+        to_remove = all_no_scratch
+        console.print(f"\n[yellow]Will remove {len(to_remove)} entries without scratches[/yellow]")
+
+    if to_remove:
+        if dry_run:
+            console.print("\n[dim]Dry run - showing first 10 entries that would be removed:[/dim]")
+            for entry in to_remove[:10]:
+                console.print(f"  {entry['function_name']} (notes={entry.get('notes')})")
+            if len(to_remove) > 10:
+                console.print(f"  [dim]... and {len(to_remove) - 10} more[/dim]")
+            console.print("\n[dim]Run with --no-dry-run to actually remove[/dim]")
+        else:
+            removed = 0
+            with db.connection() as conn:
+                for entry in to_remove:
+                    conn.execute(
+                        "DELETE FROM functions WHERE function_name = ?",
+                        (entry['function_name'],)
+                    )
+                    removed += 1
+            console.print(f"\n[green]Removed {removed} entries from database[/green]")
+
+            # Also update completed_functions.json
+            completed = load_completed_functions()
+            removed_from_json = 0
+            for entry in to_remove:
+                if entry['function_name'] in completed:
+                    del completed[entry['function_name']]
+                    removed_from_json += 1
+            if removed_from_json > 0:
+                save_completed_functions(completed)
+                console.print(f"[green]Removed {removed_from_json} entries from completed_functions.json[/green]")
+    else:
+        console.print("\n[dim]Use --remove-recovered or --remove-no-scratch to clean up[/dim]")
 
 
 @state_app.command("refresh-prs")

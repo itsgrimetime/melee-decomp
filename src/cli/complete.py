@@ -16,10 +16,6 @@ from ._common import console, db_upsert_function, db_release_claim
 # File paths
 DECOMP_CLAIMS_FILE = os.environ.get("DECOMP_CLAIMS_FILE", "/tmp/decomp_claims.json")
 DECOMP_CLAIM_TIMEOUT = int(os.environ.get("DECOMP_CLAIM_TIMEOUT", "3600"))
-DECOMP_COMPLETED_FILE = os.environ.get(
-    "DECOMP_COMPLETED_FILE",
-    str(Path.home() / ".config" / "decomp-me" / "completed_functions.json")
-)
 
 complete_app = typer.Typer(help="Track completed/attempted functions")
 
@@ -52,24 +48,15 @@ def _save_claims(claims: dict[str, Any]) -> None:
 
 
 def _load_completed() -> dict[str, Any]:
-    """Load completed functions from file."""
-    completed_path = Path(DECOMP_COMPLETED_FILE)
-    if not completed_path.exists():
-        return {}
-
-    try:
-        with open(completed_path, 'r') as f:
-            return json.load(f)
-    except (json.JSONDecodeError, IOError):
-        return {}
+    """Load completed functions from database."""
+    from ._common import load_completed_functions
+    return load_completed_functions()
 
 
 def _save_completed(completed: dict[str, Any]) -> None:
-    """Save completed functions to file."""
-    completed_path = Path(DECOMP_COMPLETED_FILE)
-    completed_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(completed_path, 'w') as f:
-        json.dump(completed, f, indent=2)
+    """Save completed functions to database."""
+    from ._common import save_completed_functions
+    save_completed_functions(completed)
 
 
 def _get_current_branch(repo_path: Path | None = None) -> str | None:

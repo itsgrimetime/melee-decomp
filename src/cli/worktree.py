@@ -73,6 +73,13 @@ def _get_worktree_info(melee_root: Path) -> List[dict]:
         ret, out, _ = _run_git(["status", "--porcelain"], wt_path)
         has_uncommitted = bool(out) if ret == 0 else False
 
+        # Get the base commit (merge-base with upstream/master)
+        ret, out, _ = _run_git(
+            ["merge-base", "upstream/master", branch],
+            melee_root
+        )
+        base_commit = out[:7] if ret == 0 and out else None
+
         worktrees.append({
             "name": name,
             "path": wt_path,
@@ -81,6 +88,7 @@ def _get_worktree_info(melee_root: Path) -> List[dict]:
             "commit_subjects": commit_subjects,
             "last_commit_date": last_commit_date,
             "has_uncommitted": has_uncommitted,
+            "base_commit": base_commit,
         })
 
     return worktrees
@@ -112,6 +120,7 @@ def worktree_list(
 
     table = Table(title="Agent Worktrees")
     table.add_column("Name", style="cyan")
+    table.add_column("Base", style="dim")
     table.add_column("Commits", justify="right")
     table.add_column("Last Activity", style="dim")
     table.add_column("Status")
@@ -142,6 +151,7 @@ def worktree_list(
 
         table.add_row(
             wt["name"],
+            wt.get("base_commit", "?"),
             str(wt["commits_ahead"]),
             age_str,
             " ".join(status_parts),
@@ -150,7 +160,7 @@ def worktree_list(
         # Show commits if requested
         if show_commits and wt["commit_subjects"]:
             for subject in wt["commit_subjects"]:
-                table.add_row("", "", "", f"  [dim]{subject}[/dim]")
+                table.add_row("", "", "", "", f"  [dim]{subject}[/dim]")
 
     console.print(table)
     console.print(f"\nTotal: {len(worktrees)} worktrees, {total_pending} pending commits")

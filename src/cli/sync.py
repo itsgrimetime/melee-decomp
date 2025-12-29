@@ -4,18 +4,75 @@ import asyncio
 import json
 import os
 import time
+import random
 from pathlib import Path
 from typing import Annotated, Optional
 
 import typer
 from rich.table import Table
 
+
+# Rate limiting configuration for production API
+RATE_LIMIT_DELAY = 1.0  # Base delay between requests (seconds)
+RATE_LIMIT_MAX_RETRIES = 5  # Max retries on 429
+RATE_LIMIT_BACKOFF_FACTOR = 2.0  # Exponential backoff multiplier
+
+
+async def rate_limited_request(client, method: str, url: str, max_retries: int = RATE_LIMIT_MAX_RETRIES, **kwargs):
+    """Make a rate-limited request with 429 handling and exponential backoff.
+
+    Args:
+        client: httpx.AsyncClient instance
+        method: HTTP method (get, post, etc.)
+        url: URL to request
+        max_retries: Maximum number of retries on 429
+        **kwargs: Additional arguments to pass to the request
+
+    Returns:
+        httpx.Response object
+
+    Raises:
+        Exception if max retries exceeded
+    """
+    delay = RATE_LIMIT_DELAY
+
+    for attempt in range(max_retries + 1):
+        request_method = getattr(client, method.lower())
+        response = await request_method(url, **kwargs)
+
+        if response.status_code == 429:
+            # Rate limited - check for Retry-After header
+            retry_after = response.headers.get('Retry-After')
+            if retry_after:
+                try:
+                    wait_time = float(retry_after)
+                except ValueError:
+                    wait_time = delay * RATE_LIMIT_BACKOFF_FACTOR
+            else:
+                wait_time = delay * RATE_LIMIT_BACKOFF_FACTOR
+
+            if attempt < max_retries:
+                console.print(f"[yellow]Rate limited (429). Waiting {wait_time:.1f}s before retry {attempt + 1}/{max_retries}...[/yellow]")
+                await asyncio.sleep(wait_time)
+                delay = wait_time * RATE_LIMIT_BACKOFF_FACTOR  # Increase delay for next attempt
+                continue
+            else:
+                raise Exception(f"Rate limit exceeded after {max_retries} retries")
+
+        # Add delay after successful request to be polite to the server
+        jitter = random.uniform(0, delay * 0.1)
+        await asyncio.sleep(delay + jitter)
+
+        return response
+
+    raise Exception("Unexpected: loop completed without returning")
+
 from ._common import (
     console,
     DEFAULT_MELEE_ROOT,
     PRODUCTION_COOKIES_FILE,
     PRODUCTION_DECOMP_ME,
-    SLUG_MAP_FILE,
+    get_local_api_url,
     load_slug_map,
     save_slug_map,
     load_completed_functions,
@@ -25,18 +82,7 @@ from ._common import (
     db_upsert_scratch,
 )
 
-# API URL from environment
-_api_base = os.environ.get("DECOMP_API_BASE", "")
-DEFAULT_DECOMP_ME_URL = _api_base[:-4] if _api_base.endswith("/api") else _api_base
-
 sync_app = typer.Typer(help="Sync scratches to production decomp.me")
-
-
-def _require_api_url(api_url: str) -> None:
-    """Validate that API URL is configured."""
-    if not api_url:
-        console.print("[red]Error: DECOMP_API_BASE environment variable is required[/red]")
-        raise typer.Exit(1)
 
 
 def _load_production_cookies() -> dict[str, str]:
@@ -212,8 +258,8 @@ def sync_production(
         Path, typer.Option("--melee-root", "-m", help="Path to melee submodule")
     ] = DEFAULT_MELEE_ROOT,
     local_url: Annotated[
-        str, typer.Option("--local-url", help="Local decomp.me instance URL")
-    ] = DEFAULT_DECOMP_ME_URL,
+        Optional[str], typer.Option("--local-url", help="Local decomp.me instance URL (auto-detected if not specified)")
+    ] = None,
     min_match: Annotated[
         float, typer.Option("--min-match", help="Minimum match percentage to sync")
     ] = 95.0,
@@ -232,7 +278,10 @@ def sync_production(
     Reads from completed_functions.json to find functions with local slugs
     that haven't been synced to production yet.
     """
-    _require_api_url(local_url)
+    # Auto-detect local URL if not provided
+    if local_url is None:
+        local_url = get_local_api_url()
+        console.print(f"[dim]Auto-detected local server: {local_url}[/dim]")
 
     prod_cookies = _load_production_cookies()
     if not prod_cookies.get('cf_clearance'):
@@ -283,7 +332,9 @@ def sync_production(
     if force and not to_sync:
         to_sync = already_synced_list[:limit]
 
-    console.print(f"[bold]Syncing {len(to_sync)} functions to production...[/bold]\n")
+    console.print(f"[bold]Syncing {len(to_sync)} functions to production...[/bold]")
+    console.print(f"[dim]  Local: {local_url}[/dim]")
+    console.print(f"[dim]  Production: {PRODUCTION_DECOMP_ME}[/dim]\n")
 
     if dry_run:
         console.print("[cyan]DRY RUN - no changes will be made[/cyan]\n")
@@ -335,10 +386,12 @@ def sync_production(
                     # Search for existing scratches on production with same function name
                     skip_creation = False
                     try:
-                        search_resp = await prod_client.get(
-                            '/api/scratch',
+                        console.print(f"[dim]  Searching production for existing scratch...[/dim]")
+                        search_resp = await rate_limited_request(
+                            prod_client, 'get', '/api/scratch',
                             params={'search': func_name, 'platform': 'gc_wii', 'page_size': 5}
                         )
+                        console.print(f"[dim]  Search complete (status {search_resp.status_code})[/dim]")
                         if search_resp.status_code == 200:
                             search_data = search_resp.json()
                             existing = search_data.get('results', [])
@@ -399,7 +452,9 @@ def sync_production(
                         continue
 
                     try:
+                        console.print(f"[dim]  Fetching local scratch data...[/dim]")
                         local_scratch = await local_client.get_scratch(local_slug)
+                        console.print(f"[dim]  Local scratch fetched[/dim]")
 
                         create_data = {
                             'name': local_scratch.name,
@@ -416,7 +471,9 @@ def sync_production(
                         try:
                             import zipfile
                             import io
+                            console.print(f"[dim]  Exporting target ASM...[/dim]")
                             export_data = await local_client.export_scratch(local_slug, target_only=True)
+                            console.print(f"[dim]  Export complete[/dim]")
                             with zipfile.ZipFile(io.BytesIO(export_data)) as zf:
                                 for name in zf.namelist():
                                     if 'target' in name.lower() and name.endswith('.s'):
@@ -428,7 +485,11 @@ def sync_production(
                         if not create_data['target_asm']:
                             console.print(f"[yellow]  Warning: No target ASM, scratch may not work correctly[/yellow]")
 
-                        resp = await prod_client.post('/api/scratch', json=create_data)
+                        console.print(f"[dim]  Creating scratch on production...[/dim]")
+                        resp = await rate_limited_request(
+                            prod_client, 'post', '/api/scratch', json=create_data
+                        )
+                        console.print(f"[dim]  Create complete (status {resp.status_code})[/dim]")
 
                         if resp.status_code == 201 or resp.status_code == 200:
                             prod_data = resp.json()
@@ -532,7 +593,7 @@ def sync_slugs(
             )
 
         console.print(table)
-        console.print(f"\n[dim]{len(slug_map)} mappings stored in {SLUG_MAP_FILE}[/dim]")
+        console.print(f"\n[dim]{len(slug_map)} mappings stored in database[/dim]")
 
 
 @sync_app.command("clear")
@@ -547,16 +608,21 @@ def sync_clear():
         synced_file.unlink()
         console.print(f"[green]Removed {synced_file}[/green]")
 
-    if SLUG_MAP_FILE.exists():
-        SLUG_MAP_FILE.unlink()
-        console.print(f"[green]Removed {SLUG_MAP_FILE}[/green]")
+    # Clear sync_state from database
+    from src.db import get_db
+    db = get_db()
+    with db.connection() as conn:
+        cursor = conn.execute("DELETE FROM sync_state")
+        count = cursor.rowcount
+    if count > 0:
+        console.print(f"[green]Cleared {count} sync mappings from database[/green]")
 
 
 @sync_app.command("validate")
 def sync_validate(
     local_url: Annotated[
-        str, typer.Option("--local-url", "-u", help="Local decomp.me instance URL")
-    ] = DEFAULT_DECOMP_ME_URL,
+        Optional[str], typer.Option("--local-url", "-u", help="Local decomp.me instance URL (auto-detected if not specified)")
+    ] = None,
     min_match: Annotated[
         float, typer.Option("--min-match", help="Minimum match percentage to validate")
     ] = 95.0,
@@ -581,7 +647,10 @@ def sync_validate(
 
     Use --fix to automatically resolve issues where possible.
     """
-    _require_api_url(local_url)
+    # Auto-detect local URL if not provided
+    if local_url is None:
+        local_url = get_local_api_url()
+        console.print(f"[dim]Auto-detected local server: {local_url}[/dim]")
 
     completed = load_completed_functions()
     slug_map = load_slug_map()
@@ -776,8 +845,8 @@ def sync_validate(
 @sync_app.command("dedup")
 def sync_dedup(
     local_url: Annotated[
-        str, typer.Option("--local-url", "-u", help="Local decomp.me instance URL")
-    ] = DEFAULT_DECOMP_ME_URL,
+        Optional[str], typer.Option("--local-url", "-u", help="Local decomp.me instance URL (auto-detected if not specified)")
+    ] = None,
     min_match: Annotated[
         float, typer.Option("--min-match", help="Minimum match percentage")
     ] = 95.0,
@@ -798,7 +867,10 @@ def sync_dedup(
 
     Updates completed_functions.json to use the winning scratch.
     """
-    _require_api_url(local_url)
+    # Auto-detect local URL if not provided
+    if local_url is None:
+        local_url = get_local_api_url()
+        console.print(f"[dim]Auto-detected local server: {local_url}[/dim]")
 
     completed = load_completed_functions()
 
@@ -954,8 +1026,8 @@ def sync_dedup(
 @sync_app.command("find-duplicates")
 def sync_find_duplicates(
     local_url: Annotated[
-        str, typer.Option("--local-url", "-u", help="Local decomp.me instance URL")
-    ] = DEFAULT_DECOMP_ME_URL,
+        Optional[str], typer.Option("--local-url", "-u", help="Local decomp.me instance URL (auto-detected if not specified)")
+    ] = None,
     min_match: Annotated[
         float, typer.Option("--min-match", help="Minimum match percentage to check")
     ] = 95.0,
@@ -980,19 +1052,28 @@ def sync_find_duplicates(
     - Match percentages for each scratch
     - Which scratch is currently tracked
     """
-    _require_api_url(local_url)
+    # Auto-detect local URL if not provided
+    if local_url is None:
+        local_url = get_local_api_url()
+        console.print(f"[dim]Auto-detected local server: {local_url}[/dim]")
 
-    completed = load_completed_functions()
+    from src.db import get_db
+    db = get_db()
 
-    # Get functions to check
+    # Get functions to check from database
     candidates = []
-    for func_name, info in completed.items():
-        match_pct = info.get('match_percent', 0)
-        if match_pct >= min_match:
+    with db.connection() as conn:
+        cursor = conn.execute("""
+            SELECT function_name, local_scratch_slug, match_percent
+            FROM functions
+            WHERE match_percent >= ?
+            ORDER BY match_percent DESC
+        """, (min_match,))
+        for row in cursor.fetchall():
             candidates.append({
-                'function': func_name,
-                'tracked_slug': info.get('scratch_slug'),
-                'match_pct': match_pct,
+                'function': row['function_name'],
+                'tracked_slug': row['local_scratch_slug'],
+                'match_pct': row['match_percent'] or 0,
             })
 
     candidates.sort(key=lambda x: -x['match_pct'])

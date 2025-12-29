@@ -16,11 +16,6 @@ from ._common import AGENT_ID, console, db_add_claim, db_release_claim
 DECOMP_CLAIMS_FILE = os.environ.get("DECOMP_CLAIMS_FILE", "/tmp/decomp_claims.json")
 DECOMP_CLAIM_TIMEOUT = int(os.environ.get("DECOMP_CLAIM_TIMEOUT", "3600"))  # 1 hour
 
-# Completed functions file path
-DECOMP_COMPLETED_FILE = os.environ.get(
-    "DECOMP_COMPLETED_FILE",
-    str(Path.home() / ".config" / "decomp-me" / "completed_functions.json")
-)
 
 claim_app = typer.Typer(help="Manage function claims for parallel agents")
 
@@ -54,16 +49,9 @@ def _save_claims(claims: dict[str, Any]) -> None:
 
 
 def _load_completed() -> dict[str, Any]:
-    """Load completed functions from file."""
-    completed_path = Path(DECOMP_COMPLETED_FILE)
-    if not completed_path.exists():
-        return {}
-
-    try:
-        with open(completed_path, 'r') as f:
-            return json.load(f)
-    except (json.JSONDecodeError, IOError):
-        return {}
+    """Load completed functions from database."""
+    from ._common import load_completed_functions
+    return load_completed_functions()
 
 
 @claim_app.command("add")

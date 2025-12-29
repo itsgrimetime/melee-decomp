@@ -545,50 +545,81 @@ def _list_github_prs(repo: str, author: str, state: str, limit: int) -> list[dic
         return []
 
 
-def _extract_functions_from_pr(pr: dict) -> list[dict]:
-    """Extract function matches from PR body and title.
+def _get_pr_diff(repo: str, pr_number: int) -> str:
+    """Get the diff for a PR."""
+    try:
+        result = subprocess.run(
+            ["gh", "pr", "diff", str(pr_number), "--repo", repo],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode == 0:
+            return result.stdout
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+    return ""
 
-    Looks for patterns like:
-    - func_name (100%)
-    - Match: func_name
-    - func_name = 100%
+
+def _extract_functions_from_pr(pr: dict, repo: str = "doldecomp/melee") -> list[dict]:
+    """Extract function matches from PR diff.
+
+    Looks for functions that were implemented (stub removed, definition added):
+    - Removed stub comment: -/// #func_name
+    - Added function definition: +type func_name(
+
+    Also falls back to parsing PR body for percentages if available.
     """
     functions = []
     seen = set()
 
-    text = (pr.get("title", "") + "\n" + pr.get("body", "") or "")
+    pr_number = pr.get("number")
+    if not pr_number:
+        return functions
 
-    # Pattern 1: func_name (100%) or func_name (95.5%)
-    for match in re.finditer(r'(\w+)\s*\((\d+(?:\.\d+)?%)\)', text):
-        func_name = match.group(1)
-        pct_str = match.group(2).rstrip('%')
-        if func_name not in seen:
-            seen.add(func_name)
-            functions.append({
-                "function": func_name,
-                "match_percent": float(pct_str),
-            })
+    # Get the actual diff
+    diff = _get_pr_diff(repo, pr_number)
 
-    # Pattern 2: Match: func_name or Match func_name
-    for match in re.finditer(r'[Mm]atch[:\s]+(\w+)', text):
-        func_name = match.group(1)
-        if func_name not in seen:
-            seen.add(func_name)
-            functions.append({
-                "function": func_name,
-                "match_percent": 100.0,  # Assume 100% if just "Match:"
-            })
+    if diff:
+        # Pattern 1: Look for removed stub comments (most reliable indicator of a match)
+        # Format: -/// #func_name or -// #func_name
+        for match in re.finditer(r'^-\s*///?\s*#(\w+)', diff, re.MULTILINE):
+            func_name = match.group(1)
+            if func_name not in seen and '_' in func_name:
+                seen.add(func_name)
+                functions.append({
+                    "function": func_name,
+                    "match_percent": 100.0,  # Stub removed = matched
+                })
 
-    # Pattern 3: func_name = 100% (scratches.txt format)
-    for match in re.finditer(r'^(\w+)\s*=\s*(\d+(?:\.\d+)?)%', text, re.MULTILINE):
-        func_name = match.group(1)
-        pct_str = match.group(2)
-        if func_name not in seen:
-            seen.add(func_name)
-            functions.append({
-                "function": func_name,
-                "match_percent": float(pct_str),
-            })
+        # Pattern 2: Look for added C function definitions in .c files
+        # Must be in a C file context (after diff --git a/.../*.c)
+        # Function names must match melee patterns: prefix_address or camelCase_name
+        # Only match lines with C-style return types, not Python def
+        c_types = r'(?:void|s8|s16|s32|s64|u8|u16|u32|u64|f32|f64|int|char|float|double|bool|BOOL|size_t|UNK_T|HSD_\w+|Fighter\w*|Item\w*|Ground\w*|\w+_t\*?)'
+        for match in re.finditer(rf'^\+\s*{c_types}\s+(\w+_\w+)\s*\(', diff, re.MULTILINE):
+            func_name = match.group(1)
+            # Melee function names: lowercase prefix + underscore + hex OR CamelCase_name
+            if func_name not in seen and re.match(r'^[a-z]+[A-Z_]', func_name):
+                seen.add(func_name)
+                functions.append({
+                    "function": func_name,
+                    "match_percent": 100.0,
+                })
+
+    # Fallback: Parse PR body for explicit percentages
+    body = pr.get("body", "") or ""
+    if body:
+        # Pattern: func_name (100%) or func_name (95.5%)
+        for match in re.finditer(r'(\w+_\w+)\s*\((\d+(?:\.\d+)?%)\)', body):
+            func_name = match.group(1)
+            pct_str = match.group(2).rstrip('%')
+            if func_name not in seen:
+                seen.add(func_name)
+                functions.append({
+                    "function": func_name,
+                    "match_percent": float(pct_str),
+                })
 
     return functions
 
@@ -617,7 +648,7 @@ def audit_discover_prs(
     """Discover functions from GitHub PRs and link them.
 
     Scans PRs by the specified author and parses function names from
-    PR titles and bodies. Updates completed_functions.json with PR associations.
+    PR diffs to find matched functions. Updates state database with PR associations.
 
     Example: melee-agent audit discover-prs --author itsgrimetime --state merged
     """
@@ -627,9 +658,9 @@ def audit_discover_prs(
     console.print(f"  State: {state}")
     console.print()
 
-    # Handle 'all' state by querying both merged and open
+    # Handle 'all' state by querying merged, open, and closed
     if state == "all":
-        states_to_query = ["merged", "open"]
+        states_to_query = ["merged", "open", "closed"]
     else:
         states_to_query = [state]
 
@@ -648,7 +679,8 @@ def audit_discover_prs(
     console.print(f"Found {len(all_prs)} PRs\n")
 
     completed = load_completed_functions()
-    results = []
+    results = []          # PRs with updates (for display)
+    all_discovered = []   # All PRs with functions (for JSON)
     total_linked = 0
     total_updated = 0
 
@@ -658,16 +690,25 @@ def audit_discover_prs(
         pr_state = pr.get("state", "UNKNOWN")
         is_merged = pr.get("mergedAt") is not None or pr.get("_queried_state") == "merged"
 
-        functions = _extract_functions_from_pr(pr)
+        functions = _extract_functions_from_pr(pr, repo)
         if not functions:
             continue
 
         linked_funcs = []
+        all_funcs_in_pr = []
         # Determine actual PR state
         actual_pr_state = "MERGED" if is_merged else pr_state.upper() if pr_state else "OPEN"
 
         for func_info in functions:
             func = func_info["function"]
+            match_pct = func_info.get("match_percent")
+            func_entry = {
+                "function": func,
+                "match_percent": match_pct,
+                "in_db": func in completed,
+                "action": None,
+            }
+
             if func in completed:
                 current = completed[func]
                 needs_update = False
@@ -680,6 +721,7 @@ def audit_discover_prs(
                     current["pr_state"] = actual_pr_state
                     needs_update = True
                     total_linked += 1
+                    func_entry["action"] = "linked"
 
                 # Update state if this is the same PR and state changed
                 elif current.get("pr_url") == pr_url:
@@ -687,20 +729,39 @@ def audit_discover_prs(
                         current["pr_state"] = actual_pr_state
                         needs_update = True
                         total_updated += 1
+                        func_entry["action"] = "updated"
+                    else:
+                        func_entry["action"] = "already_linked"
+                else:
+                    func_entry["action"] = "linked_to_other_pr"
+                    func_entry["other_pr"] = current.get("pr_url")
 
                 if needs_update:
                     linked_funcs.append(func)
+            else:
+                func_entry["action"] = "not_in_db"
+
+            all_funcs_in_pr.append(func_entry)
+
+        # Track all discovered PRs with functions
+        all_discovered.append({
+            "pr_number": pr_number,
+            "pr_url": pr_url,
+            "pr_title": pr.get("title", ""),
+            "state": actual_pr_state,
+            "functions": all_funcs_in_pr,
+        })
 
         if linked_funcs:
             results.append({
                 "pr_number": pr_number,
                 "pr_url": pr_url,
-                "state": "MERGED" if is_merged else pr_state,
+                "state": actual_pr_state,
                 "functions": linked_funcs,
             })
 
     if output_json:
-        print(json.dumps(results, indent=2))
+        print(json.dumps(all_discovered, indent=2))
         return
 
     if results:
@@ -733,7 +794,7 @@ def audit_discover_prs(
                     status='merged' if info.get("pr_state") == "MERGED" else None,
                 )
 
-        console.print(f"\n[green]Saved changes to completed_functions.json and state database[/green]")
+        console.print(f"\n[green]Saved changes to state database[/green]")
     elif dry_run:
         console.print(f"\n[cyan](dry run - no changes saved)[/cyan]")
 

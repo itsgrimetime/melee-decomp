@@ -41,7 +41,6 @@ from .compilers import list_compilers
 from ._common import (
     console,
     DEFAULT_MELEE_ROOT,
-    DECOMP_COMPLETED_FILE,
 )
 
 # Create main app
