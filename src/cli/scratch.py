@@ -26,6 +26,7 @@ from ._common import (
     db_upsert_scratch,
     db_record_match_score,
     db_upsert_function,
+    get_compiler_for_source,
 )
 
 # Shared scratch tokens file - all agents use the same file
@@ -205,12 +206,92 @@ def scratch_create(
     # Get context file using the function's source file path
     ctx_path = context_file or _get_context_file(source_file=func.file_path)
     if not ctx_path.exists():
-        console.print(f"[red]Context file not found: {ctx_path}[/red]")
-        console.print(f"[dim]Run 'ninja {ctx_path}' to generate it[/dim]")
+        console.print(f"[yellow]Context file not found, building...[/yellow]")
+        import subprocess
+        # Build the context file - need relative path from melee_root
+        try:
+            ctx_relative = ctx_path.relative_to(melee_root)
+            ninja_cwd = melee_root
+        except ValueError:
+            # ctx_path might be in a worktree, find the melee root for that worktree
+            # The ctx_path looks like: .../melee-worktrees/<name>/build/GALE01/src/...
+            # We need to run ninja from the worktree root
+            parts = ctx_path.parts
+            ninja_cwd = None
+            for i, part in enumerate(parts):
+                if part == "build" and i > 0:
+                    ninja_cwd = Path(*parts[:i])
+                    ctx_relative = Path(*parts[i:])
+                    break
+            if ninja_cwd is None:
+                console.print(f"[red]Cannot determine ninja target for: {ctx_path}[/red]")
+                raise typer.Exit(1)
+
+        try:
+            result = subprocess.run(
+                ["ninja", str(ctx_relative)],
+                cwd=ninja_cwd,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            if result.returncode != 0:
+                console.print(f"[red]Failed to build context file:[/red]")
+                console.print(result.stderr or result.stdout)
+                raise typer.Exit(1)
+            console.print(f"[green]Built context file[/green]")
+        except subprocess.TimeoutExpired:
+            console.print(f"[red]Timeout building context file[/red]")
+            raise typer.Exit(1)
+        except FileNotFoundError:
+            console.print(f"[red]ninja not found - please install it[/red]")
+            raise typer.Exit(1)
+
+    if not ctx_path.exists():
+        console.print(f"[red]Context file still not found after build: {ctx_path}[/red]")
         raise typer.Exit(1)
 
     melee_context = ctx_path.read_text()
     console.print(f"[dim]Loaded {len(melee_context):,} bytes of context from {ctx_path.name}[/dim]")
+
+    # Strip function definition (but keep declaration) to avoid redefinition errors
+    if function_name in melee_context:
+        lines = melee_context.split('\n')
+        filtered = []
+        in_func = False
+        depth = 0
+        for line in lines:
+            if not in_func and function_name in line and '(' in line:
+                s = line.strip()
+                # Skip comments, control flow
+                if s.startswith('//') or s.startswith('if') or s.startswith('while'):
+                    filtered.append(line)
+                    continue
+                # Keep declarations (prototypes) - they end with );
+                if s.endswith(';'):
+                    filtered.append(line)
+                    continue
+                # This is a function definition
+                in_func = True
+                depth = line.count('{') - line.count('}')
+                filtered.append(f'// {function_name} definition stripped')
+                if '{' not in line:
+                    depth = 0
+                elif depth <= 0:
+                    in_func = False
+                continue
+            if in_func:
+                depth += line.count('{') - line.count('}')
+                if depth <= 0:
+                    in_func = False
+                continue
+            filtered.append(line)
+        melee_context = '\n'.join(filtered)
+        console.print(f"[dim]Stripped {function_name} definition from context[/dim]")
+
+    # Detect correct compiler for this source file
+    compiler = get_compiler_for_source(func.file_path, melee_root)
+    console.print(f"[dim]Using compiler: {compiler}[/dim]")
 
     async def create():
 
@@ -221,7 +302,7 @@ def scratch_create(
                     name=func.name,
                     target_asm=func.asm,
                     context=melee_context,
-                    compiler="mwcc_233_163n",
+                    compiler=compiler,
                     compiler_flags="-O4,p -nodefaults -fp hard -Cpp_exceptions off -enum int -fp_contract on -inline auto",
                     source_code="// TODO: Decompile this function\n",
                     diff_label=func.name,
@@ -618,3 +699,168 @@ def scratch_search_context(
 
         if len(matches) > 5:
             console.print(f"[dim]... and {len(matches) - 5} more matches[/dim]")
+
+
+@scratch_app.command("sync-from-repo")
+def scratch_sync_from_repo(
+    function_name: Annotated[str, typer.Argument(help="Function name to sync")],
+    melee_root: Annotated[
+        Optional[Path], typer.Option("--melee-root", "-m", help="Path to melee submodule")
+    ] = DEFAULT_MELEE_ROOT,
+    api_url: Annotated[
+        Optional[str], typer.Option("--api-url", help="Decomp.me API URL (auto-detected)")
+    ] = None,
+):
+    """Update a scratch's source code from the repo.
+
+    Finds the function in the melee repo, extracts its code, and updates
+    the corresponding scratch. Useful when a function is 100% in the repo
+    but the scratch has placeholder/outdated code.
+
+    Example: melee-agent scratch sync-from-repo ft_8008A1FC
+    """
+    api_url = api_url or get_local_api_url()
+    from src.client import DecompMeAPIClient, ScratchUpdate, DecompMeAPIError
+    from src.commit.configure import get_file_path_from_function
+    from src.commit.update import _extract_function_from_code
+    from ._common import load_completed_functions
+
+    # Look up the scratch slug from the DB
+    completed = load_completed_functions()
+    if function_name not in completed:
+        console.print(f"[red]Function '{function_name}' not found in tracking database[/red]")
+        console.print("[dim]Use 'melee-agent state status' to see tracked functions[/dim]")
+        raise typer.Exit(1)
+
+    func_info = completed[function_name]
+    slug = func_info.get('scratch_slug')
+    if not slug:
+        console.print(f"[red]No local scratch found for '{function_name}'[/red]")
+        console.print("[dim]Use 'melee-agent extract get --create-scratch' to create one first[/dim]")
+        raise typer.Exit(1)
+
+    console.print(f"[bold]Syncing {function_name}[/bold] from repo to scratch {slug}")
+
+    async def sync():
+        # Find the source file
+        file_path = await get_file_path_from_function(function_name, melee_root)
+        if not file_path:
+            console.print(f"[red]Could not find file containing '{function_name}'[/red]")
+            raise typer.Exit(1)
+
+        full_path = melee_root / "src" / file_path
+        if not full_path.exists():
+            console.print(f"[red]Source file not found: {full_path}[/red]")
+            raise typer.Exit(1)
+
+        console.print(f"[dim]Found in: src/{file_path}[/dim]")
+
+        # Read and extract the function
+        source_content = full_path.read_text(encoding='utf-8')
+        function_code = _extract_function_from_code(source_content, function_name)
+
+        if not function_code:
+            console.print(f"[red]Could not extract function '{function_name}' from source[/red]")
+            console.print("[dim]The function may be a stub or use non-standard formatting[/dim]")
+            raise typer.Exit(1)
+
+        console.print(f"[dim]Extracted {len(function_code)} bytes of code[/dim]")
+
+        # Load fresh context and strip the function definition from it
+        ctx_path = melee_root / "build" / "GALE01" / "src" / file_path.replace('.c', '.ctx')
+        fresh_context = None
+        if ctx_path.exists():
+            fresh_context = ctx_path.read_text(encoding='utf-8')
+            original_len = len(fresh_context)
+
+            # Strip function definition (but keep declaration) to avoid redefinition
+            if function_name in fresh_context:
+                lines = fresh_context.split('\n')
+                filtered_lines = []
+                in_function = False
+                brace_depth = 0
+                for line in lines:
+                    if not in_function and function_name in line and '(' in line:
+                        s = line.strip()
+                        # Skip comments, control flow, and declarations (end with ;)
+                        if s.startswith('//') or s.startswith('if') or s.startswith('while'):
+                            filtered_lines.append(line)
+                            continue
+                        # Keep declarations (prototypes) - they end with );
+                        if s.endswith(';'):
+                            filtered_lines.append(line)
+                            continue
+                        # This is a function definition
+                        in_function = True
+                        brace_depth = line.count('{') - line.count('}')
+                        filtered_lines.append(f'// {function_name} definition stripped')
+                        # If no brace on this line, wait for it
+                        if '{' not in line:
+                            brace_depth = 0
+                        elif brace_depth <= 0:
+                            in_function = False
+                        continue
+                    if in_function:
+                        brace_depth += line.count('{') - line.count('}')
+                        if brace_depth <= 0:
+                            in_function = False
+                        continue
+                    filtered_lines.append(line)
+                fresh_context = '\n'.join(filtered_lines)
+
+            stripped_bytes = original_len - len(fresh_context)
+            console.print(f"[dim]Loaded fresh context ({len(fresh_context):,} bytes, stripped {stripped_bytes:,})[/dim]")
+        else:
+            console.print(f"[yellow]Context file not found: {ctx_path}[/yellow]")
+            console.print(f"[dim]Run 'ninja {ctx_path.relative_to(melee_root)}' to generate[/dim]")
+
+        # Update the scratch
+        async with DecompMeAPIClient(base_url=api_url) as client:
+            # Verify ownership
+            can_update, reason = await _verify_scratch_ownership(client, slug)
+            if not can_update:
+                console.print(f"[yellow]Warning:[/yellow] {reason}")
+
+            update_data = ScratchUpdate(source_code=function_code)
+            if fresh_context:
+                update_data.context = fresh_context
+
+            try:
+                scratch = await client.update_scratch(slug, update_data)
+            except DecompMeAPIError as e:
+                if "403" in str(e):
+                    if await _handle_403_error(client, slug, e, "update"):
+                        scratch = await client.update_scratch(slug, update_data)
+                    else:
+                        raise typer.Exit(1)
+                else:
+                    raise
+
+            # Compile to get new match %
+            result = await client.compile_scratch(slug)
+            return scratch, result
+
+    scratch, result = asyncio.run(sync())
+
+    if result.success and result.diff_output:
+        match_pct = (
+            100.0 if result.diff_output.current_score == 0
+            else (1.0 - result.diff_output.current_score / result.diff_output.max_score) * 100
+        )
+
+        # Record match score
+        record_match_score(slug, result.diff_output.current_score, result.diff_output.max_score)
+
+        # Update DB with new match %
+        db_upsert_function(
+            function_name,
+            match_percent=match_pct,
+            status='matched' if match_pct >= 95 else 'in_progress',
+        )
+
+        console.print(f"[green]Synced![/green] Match: {match_pct:.1f}%")
+
+        if match_pct >= 100:
+            console.print("[green]Function is now 100% - ready to sync to production[/green]")
+    else:
+        console.print(f"[yellow]Updated but compilation failed[/yellow]")

@@ -75,8 +75,6 @@ from ._common import (
     get_local_api_url,
     load_slug_map,
     save_slug_map,
-    load_completed_functions,
-    save_completed_functions,
     db_record_sync,
     db_upsert_function,
     db_upsert_scratch,
@@ -195,36 +193,32 @@ def sync_list(
         int, typer.Option("--limit", "-n", help="Maximum entries to show")
     ] = 50,
 ):
-    """List completed functions that can be synced to production.
+    """List functions that can be synced to production.
 
-    Reads from completed_functions.json (our structured tracking file).
+    Reads from the state database.
     """
-    completed = load_completed_functions()
-    slug_map = load_slug_map()
+    from src.db import get_db
 
-    # Build set of already-synced local slugs
-    synced_local_slugs = {v.get('local_slug') for v in slug_map.values()}
-
-    # Filter and prepare entries
+    db = get_db()
     entries = []
-    for func_name, info in completed.items():
-        match_pct = info.get('match_percent', 0)
-        local_slug = info.get('scratch_slug', '')
 
-        if match_pct < min_match:
-            continue
-        if not local_slug:
-            continue
+    with db.connection() as conn:
+        cursor = conn.execute("""
+            SELECT function_name, match_percent, local_scratch_slug, production_scratch_slug
+            FROM functions
+            WHERE match_percent >= ?
+            AND local_scratch_slug IS NOT NULL
+            ORDER BY match_percent DESC
+            LIMIT ?
+        """, (min_match, limit))
 
-        entries.append({
-            'name': func_name,
-            'match_pct': match_pct,
-            'slug': local_slug,
-            'synced': local_slug in synced_local_slugs,
-        })
-
-    entries.sort(key=lambda x: -x['match_pct'])
-    entries = entries[:limit]
+        for row in cursor.fetchall():
+            entries.append({
+                'name': row['function_name'],
+                'match_pct': row['match_percent'] or 0,
+                'slug': row['local_scratch_slug'],
+                'synced': row['production_scratch_slug'] is not None,
+            })
 
     if not entries:
         console.print("[yellow]No matching functions found[/yellow]")
@@ -272,6 +266,9 @@ def sync_production(
     force: Annotated[
         bool, typer.Option("--force", "-f", help="Re-sync even if already exists on production")
     ] = False,
+    function: Annotated[
+        Optional[str], typer.Option("--function", help="Only sync this specific function")
+    ] = None,
 ):
     """Sync completed functions from local instance to production decomp.me.
 
@@ -289,36 +286,41 @@ def sync_production(
         console.print("[dim]Run 'melee-agent sync auth' first[/dim]")
         raise typer.Exit(1)
 
-    completed = load_completed_functions()
-    slug_map = load_slug_map()
+    # Query functions from database
+    from src.db import get_db
 
-    # Build set of already-synced local slugs
-    synced_local_slugs = {v.get('local_slug') for v in slug_map.values()}
-
-    # Filter entries from completed_functions.json
+    db = get_db()
     to_sync = []
     already_synced_list = []
-    for func_name, info in completed.items():
-        match_pct = info.get('match_percent', 0)
-        local_slug = info.get('scratch_slug', '')
 
-        if match_pct < min_match:
-            continue
-        if not local_slug:
-            continue
+    with db.connection() as conn:
+        # Build query based on options
+        query = """
+            SELECT function_name, match_percent, local_scratch_slug, production_scratch_slug
+            FROM functions
+            WHERE match_percent >= ?
+            AND local_scratch_slug IS NOT NULL
+        """
+        params = [min_match]
 
-        entry = {
-            'name': func_name,
-            'slug': local_slug,
-            'match_pct': match_pct,
-        }
+        if function:
+            query += " AND function_name = ?"
+            params.append(function)
 
-        if local_slug in synced_local_slugs:
-            already_synced_list.append(entry)
-        else:
-            to_sync.append(entry)
+        query += " ORDER BY match_percent DESC"
+        cursor = conn.execute(query, params)
 
-    to_sync.sort(key=lambda x: -x['match_pct'])
+        for row in cursor.fetchall():
+            entry = {
+                'name': row['function_name'],
+                'slug': row['local_scratch_slug'],
+                'match_pct': row['match_percent'] or 0,
+            }
+            if row['production_scratch_slug']:
+                already_synced_list.append(entry)
+            else:
+                to_sync.append(entry)
+
     to_sync = to_sync[:limit]
 
     if not to_sync and not force:
@@ -418,13 +420,8 @@ def sync_production(
                                     'note': 'linked to existing production scratch',
                                 }
                                 save_slug_map(current_slug_map)
-                                # Update completed_functions.json
-                                current_completed = load_completed_functions()
-                                if func_name in current_completed:
-                                    current_completed[func_name]['production_slug'] = existing_slug
-                                    save_completed_functions(current_completed)
 
-                                # Also write to state database (non-blocking)
+                                # Update state database
                                 db_record_sync(local_slug, existing_slug, func_name)
                                 db_upsert_scratch(existing_slug, 'production', PRODUCTION_DECOMP_ME, function_name=func_name, match_percent=100.0)
                                 db_upsert_function(func_name, production_scratch_slug=existing_slug)
@@ -456,14 +453,102 @@ def sync_production(
                         local_scratch = await local_client.get_scratch(local_slug)
                         console.print(f"[dim]  Local scratch fetched[/dim]")
 
+                        source_code = local_scratch.source_code
+
+                        # Check if source code is placeholder/empty
+                        is_placeholder = (
+                            not source_code or
+                            len(source_code.strip()) < 50 or
+                            'TODO' in source_code or
+                            source_code.strip().startswith('//')
+                        )
+
+                        # Only refresh context for placeholder code
+                        # For real matches, keep the original context that produced the match
+                        needs_fresh_context = is_placeholder
+
+                        context = local_scratch.context
+                        if not needs_fresh_context:
+                            console.print(f"[dim]  Using local scratch context ({len(context):,} bytes)[/dim]")
+                        if needs_fresh_context:
+                            console.print(f"[yellow]  Local scratch has placeholder code, refreshing from repo...[/yellow]")
+                            try:
+                                from src.commit.configure import get_file_path_from_function
+                                from src.commit.update import _extract_function_from_code
+
+                                file_path = await get_file_path_from_function(func_name, melee_root)
+                                if file_path:
+                                    full_path = melee_root / "src" / file_path
+                                    if full_path.exists():
+                                        # Extract source from repo for placeholder scratches
+                                        repo_content = full_path.read_text(encoding='utf-8')
+                                        extracted_code = _extract_function_from_code(repo_content, func_name)
+                                        if extracted_code:
+                                            source_code = extracted_code
+                                            console.print(f"[green]  Extracted {len(source_code)} bytes from repo[/green]")
+                                        else:
+                                            console.print(f"[yellow]  Could not extract function from repo[/yellow]")
+
+                                        # Get fresh context and strip the function
+                                        ctx_path = melee_root / "build" / "GALE01" / "src" / file_path.replace('.c', '.ctx')
+                                        if ctx_path.exists():
+                                            context = ctx_path.read_text(encoding='utf-8')
+                                            original_len = len(context)
+
+                                            # Strip function definition (but keep declaration) to avoid redefinition
+                                            if func_name in context:
+                                                lines = context.split('\n')
+                                                filtered = []
+                                                in_func = False
+                                                depth = 0
+                                                for line in lines:
+                                                    if not in_func and func_name in line and '(' in line:
+                                                        s = line.strip()
+                                                        # Skip comments, control flow, and declarations (end with ;)
+                                                        if s.startswith('//') or s.startswith('if') or s.startswith('while'):
+                                                            filtered.append(line)
+                                                            continue
+                                                        # Keep declarations (prototypes) - they end with );
+                                                        if s.endswith(';'):
+                                                            filtered.append(line)
+                                                            continue
+                                                        # This is a function definition
+                                                        in_func = True
+                                                        depth = line.count('{') - line.count('}')
+                                                        filtered.append(f'// {func_name} definition stripped')
+                                                        # If no brace on this line, wait for it
+                                                        if '{' not in line:
+                                                            depth = 0
+                                                        elif depth <= 0:
+                                                            in_func = False
+                                                        continue
+                                                    if in_func:
+                                                        depth += line.count('{') - line.count('}')
+                                                        if depth <= 0:
+                                                            in_func = False
+                                                        continue
+                                                    filtered.append(line)
+                                                context = '\n'.join(filtered)
+
+                                            console.print(f"[green]  Loaded fresh context ({len(context):,} bytes, stripped {original_len - len(context):,})[/green]")
+                                        else:
+                                            console.print(f"[yellow]  Context file not found: {ctx_path}[/yellow]")
+                                            console.print(f"[dim]  Run 'ninja {ctx_path.relative_to(melee_root)}' to generate[/dim]")
+                                    else:
+                                        console.print(f"[yellow]  Source file not found: {full_path}[/yellow]")
+                                else:
+                                    console.print(f"[yellow]  Could not locate source file for {func_name}[/yellow]")
+                            except Exception as e:
+                                console.print(f"[yellow]  Could not fetch from repo: {e}[/yellow]")
+
                         create_data = {
                             'name': local_scratch.name,
                             'compiler': local_scratch.compiler,
                             'platform': local_scratch.platform,
                             'compiler_flags': local_scratch.compiler_flags,
                             'diff_flags': local_scratch.diff_flags,
-                            'source_code': local_scratch.source_code,
-                            'context': local_scratch.context,
+                            'source_code': source_code,
+                            'context': context,
                             'diff_label': local_scratch.diff_label,
                             'target_asm': '',
                         }
@@ -506,13 +591,7 @@ def sync_production(
                             }
                             save_slug_map(current_slug_map)
 
-                            # Update completed_functions.json with production slug
-                            current_completed = load_completed_functions()
-                            if func_name in current_completed:
-                                current_completed[func_name]['production_slug'] = prod_slug
-                                save_completed_functions(current_completed)
-
-                            # Also write to state database (non-blocking)
+                            # Update state database
                             db_record_sync(local_slug, prod_slug, func_name)
                             db_upsert_scratch(prod_slug, 'production', PRODUCTION_DECOMP_ME, function_name=func_name, match_percent=match_pct)
                             db_upsert_function(func_name, production_scratch_slug=prod_slug)
@@ -652,31 +731,29 @@ def sync_validate(
         local_url = get_local_api_url()
         console.print(f"[dim]Auto-detected local server: {local_url}[/dim]")
 
-    completed = load_completed_functions()
-    slug_map = load_slug_map()
-    synced_local_slugs = {v.get('local_slug') for v in slug_map.values()}
+    # Query from database
+    from src.db import get_db
 
-    # Find candidates to validate
+    db = get_db()
     candidates = []
-    for func_name, info in completed.items():
-        match_pct = info.get('match_percent', 0)
-        local_slug = info.get('scratch_slug', '')
 
-        if match_pct < min_match:
-            continue
-        if not local_slug:
-            continue
-        if local_slug in synced_local_slugs:
-            continue  # Already synced, skip
+    with db.connection() as conn:
+        cursor = conn.execute("""
+            SELECT function_name, match_percent, local_scratch_slug, production_scratch_slug
+            FROM functions
+            WHERE match_percent >= ?
+            AND local_scratch_slug IS NOT NULL
+            AND production_scratch_slug IS NULL
+            ORDER BY match_percent DESC
+            LIMIT ?
+        """, (min_match, limit))
 
-        candidates.append({
-            'function': func_name,
-            'slug': local_slug,
-            'recorded_match': match_pct,
-        })
-
-    candidates.sort(key=lambda x: -x['recorded_match'])
-    candidates = candidates[:limit]
+        for row in cursor.fetchall():
+            candidates.append({
+                'function': row['function_name'],
+                'slug': row['local_scratch_slug'],
+                'recorded_match': row['match_percent'] or 0,
+            })
 
     if not candidates:
         console.print("[green]No unsynced scratches to validate[/green]")
@@ -865,19 +942,23 @@ def sync_dedup(
     2. Name matches function name
     3. Most recent update
 
-    Updates completed_functions.json to use the winning scratch.
+    Updates database to use the winning scratch.
     """
     # Auto-detect local URL if not provided
     if local_url is None:
         local_url = get_local_api_url()
         console.print(f"[dim]Auto-detected local server: {local_url}[/dim]")
 
-    completed = load_completed_functions()
-
-    # Find functions with multiple candidate scratches
-    # This requires checking the database for multiple scratches per function
+    # Query from database
     from src.db import get_db
     db = get_db()
+
+    # Get current function data for comparison
+    with db.connection() as conn:
+        cursor = conn.execute("SELECT function_name, local_scratch_slug FROM functions")
+        completed = {row['function_name']: {'scratch_slug': row['local_scratch_slug']} for row in cursor.fetchall()}
+
+    # Find functions with multiple candidate scratches
 
     with db.connection() as conn:
         cursor = conn.execute('''
@@ -1005,20 +1086,17 @@ def sync_dedup(
         for loser in r['losers']:
             console.print(f"  [dim]Loser:[/dim] {loser['slug']} ({loser['match_pct']:.1f}%)")
 
-        # Update completed_functions if needed
-        if func_name in completed:
-            current_slug = completed[func_name].get('scratch_slug')
-            if current_slug != winner['slug']:
-                console.print(f"  [yellow]→ Updating from {current_slug} to {winner['slug']}[/yellow]")
-                if not dry_run:
-                    completed[func_name]['scratch_slug'] = winner['slug']
-                    completed[func_name]['match_percent'] = winner['match_pct']
-                changes_made += 1
+        # Update DB if needed
+        current_slug = completed.get(func_name, {}).get('scratch_slug')
+        if current_slug != winner['slug']:
+            console.print(f"  [yellow]→ Updating from {current_slug} to {winner['slug']}[/yellow]")
+            if not dry_run:
+                db_upsert_function(func_name, local_scratch_slug=winner['slug'], match_percent=winner['match_pct'])
+            changes_made += 1
         console.print()
 
     if changes_made > 0 and not dry_run:
-        save_completed_functions(completed)
-        console.print(f"[green]Updated {changes_made} function(s) in completed_functions.json[/green]")
+        console.print(f"[green]Updated {changes_made} function(s) in database[/green]")
     elif dry_run and changes_made > 0:
         console.print(f"[yellow]Would update {changes_made} function(s) (dry run)[/yellow]")
 

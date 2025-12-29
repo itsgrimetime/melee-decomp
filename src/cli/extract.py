@@ -19,6 +19,9 @@ from ._common import (
     load_completed_functions,
     detect_local_api_url,
     AGENT_ID,
+    db_upsert_function,
+    db_upsert_scratch,
+    get_compiler_for_source,
 )
 
 # Context file override from environment
@@ -305,12 +308,92 @@ def extract_get(
 
         ctx_path = _get_context_file(source_file=func.file_path)
         if not ctx_path.exists():
-            console.print(f"[red]Context file not found: {ctx_path}[/red]")
-            console.print(f"[dim]Run 'ninja {ctx_path.relative_to(melee_root.parent) if str(ctx_path).startswith(str(melee_root.parent)) else ctx_path}' to generate it[/dim]")
+            console.print(f"[yellow]Context file not found, building...[/yellow]")
+            import subprocess
+            # Build the context file - need relative path from melee_root
+            try:
+                ctx_relative = ctx_path.relative_to(melee_root)
+            except ValueError:
+                # ctx_path might be in a worktree, find the melee root for that worktree
+                # The ctx_path looks like: .../melee-worktrees/<name>/build/GALE01/src/...
+                # We need to run ninja from the worktree root
+                parts = ctx_path.parts
+                for i, part in enumerate(parts):
+                    if part == "build" and i > 0:
+                        ninja_cwd = Path(*parts[:i])
+                        ctx_relative = Path(*parts[i:])
+                        break
+                else:
+                    console.print(f"[red]Cannot determine ninja target for: {ctx_path}[/red]")
+                    raise typer.Exit(1)
+            else:
+                ninja_cwd = melee_root
+
+            try:
+                result = subprocess.run(
+                    ["ninja", str(ctx_relative)],
+                    cwd=ninja_cwd,
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
+                if result.returncode != 0:
+                    console.print(f"[red]Failed to build context file:[/red]")
+                    console.print(result.stderr or result.stdout)
+                    raise typer.Exit(1)
+                console.print(f"[green]Built context file[/green]")
+            except subprocess.TimeoutExpired:
+                console.print(f"[red]Timeout building context file[/red]")
+                raise typer.Exit(1)
+            except FileNotFoundError:
+                console.print(f"[red]ninja not found - please install it[/red]")
+                raise typer.Exit(1)
+
+        if not ctx_path.exists():
+            console.print(f"[red]Context file still not found after build: {ctx_path}[/red]")
             raise typer.Exit(1)
 
         melee_context = ctx_path.read_text()
         console.print(f"\n[dim]Loaded {len(melee_context):,} bytes of context[/dim]")
+
+        # Strip function definition (but keep declaration) to avoid redefinition errors
+        if func.name in melee_context:
+            lines = melee_context.split('\n')
+            filtered = []
+            in_func = False
+            depth = 0
+            for line in lines:
+                if not in_func and func.name in line and '(' in line:
+                    s = line.strip()
+                    # Skip comments, control flow
+                    if s.startswith('//') or s.startswith('if') or s.startswith('while'):
+                        filtered.append(line)
+                        continue
+                    # Keep declarations (prototypes) - they end with );
+                    if s.endswith(';'):
+                        filtered.append(line)
+                        continue
+                    # This is a function definition
+                    in_func = True
+                    depth = line.count('{') - line.count('}')
+                    filtered.append(f'// {func.name} definition stripped')
+                    if '{' not in line:
+                        depth = 0
+                    elif depth <= 0:
+                        in_func = False
+                    continue
+                if in_func:
+                    depth += line.count('{') - line.count('}')
+                    if depth <= 0:
+                        in_func = False
+                    continue
+                filtered.append(line)
+            melee_context = '\n'.join(filtered)
+            console.print(f"[dim]Stripped {func.name} definition from context[/dim]")
+
+        # Detect correct compiler for this source file
+        compiler = get_compiler_for_source(func.file_path, melee_root)
+        console.print(f"[dim]Using compiler: {compiler}[/dim]")
 
         async def find_or_create():
             from src.client import DecompMeAPIClient, ScratchCreate
@@ -364,7 +447,7 @@ def extract_get(
                         name=func.name,
                         target_asm=func.asm,
                         context=melee_context,
-                        compiler="mwcc_233_163n",
+                        compiler=compiler,
                         compiler_flags="-O4,p -nodefaults -fp hard -Cpp_exceptions off -enum int -fp_contract on -inline auto",
                         source_code="// TODO: Decompile this function\n",
                         diff_label=func.name,
@@ -387,3 +470,26 @@ def extract_get(
             console.print(f"[green]Continuing from {starting_pct:.1f}% match:[/green] {api_url}/scratch/{scratch.slug}")
         else:
             console.print(f"[green]Created scratch:[/green] {api_url}/scratch/{scratch.slug}")
+
+        # Write to state database (non-blocking)
+        db_upsert_scratch(
+            scratch.slug,
+            instance='local',
+            base_url=api_url,
+            function_name=func.name,
+            claim_token=scratch.claim_token,
+            match_percent=starting_pct,
+        )
+        # Determine status based on match percentage
+        if starting_pct >= 95:
+            status = 'matched'
+        elif starting_pct > 0:
+            status = 'in_progress'
+        else:
+            status = 'in_progress'
+        db_upsert_function(
+            func.name,
+            local_scratch_slug=scratch.slug,
+            match_percent=starting_pct,
+            status=status,
+        )

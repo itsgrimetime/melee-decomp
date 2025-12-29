@@ -34,6 +34,94 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent
 DEFAULT_MELEE_ROOT = PROJECT_ROOT / "melee"
 MELEE_WORKTREES_DIR = PROJECT_ROOT / "melee-worktrees"
 
+# Compiler version mapping: GC SDK version -> decomp.me compiler ID
+# From melee/build/compilers/info.txt
+GC_TO_DECOMP_COMPILER = {
+    "GC/1.0": "mwcc_233_144",
+    "GC/1.1": "mwcc_233_159",
+    "GC/1.1p1": "mwcc_233_159p1",
+    "GC/1.2.5": "mwcc_233_163",
+    "GC/1.2.5n": "mwcc_233_163n",
+    "GC/1.3": "mwcc_242_53",
+    "GC/1.3.2": "mwcc_242_81",
+    "GC/1.3.2r": "mwcc_242_81r",
+    "GC/2.0": "mwcc_247_92",
+    "GC/2.0p1": "mwcc_247_92p1",
+    "GC/2.5": "mwcc_247_105",
+    "GC/2.6": "mwcc_247_107",
+    "GC/2.7": "mwcc_247_108",
+}
+
+# Default compiler if detection fails
+DEFAULT_DECOMP_COMPILER = "mwcc_247_92"
+
+
+def get_compiler_for_source(source_file: str, melee_root: Path) -> str:
+    """Get the decomp.me compiler ID for a source file by parsing build.ninja.
+
+    Args:
+        source_file: Relative path to source file (e.g., "src/melee/lb/lbcollision.c")
+        melee_root: Path to melee repo root
+
+    Returns:
+        decomp.me compiler ID (e.g., "mwcc_233_163n")
+    """
+    build_ninja = melee_root / "build.ninja"
+    if not build_ninja.exists():
+        console.print(f"[yellow]build.ninja not found, using default compiler[/yellow]")
+        return DEFAULT_DECOMP_COMPILER
+
+    # Normalize source path
+    if source_file.startswith("src/"):
+        source_rel = source_file
+    else:
+        source_rel = f"src/{source_file}"
+
+    # Parse build.ninja to find mw_version for this file
+    # Format:
+    #   # melee/lb/lbcollision.c: lb (Library) (linked False)
+    #   build build/GALE01/src/melee/lb/lbcollision.o: mwcc_sjis $
+    #       src/melee/lb/lbcollision.c | ...
+    #     mw_version = GC/1.2.5n
+    #
+    # We match the comment line "# path/to/file.c:" to find the right section
+    try:
+        content = build_ninja.read_text()
+        lines = content.split('\n')
+
+        # Convert source_rel to the format used in comments (without src/ prefix)
+        # e.g., "src/melee/lb/lbcollision.c" -> "melee/lb/lbcollision.c"
+        comment_path = source_rel
+        if comment_path.startswith("src/"):
+            comment_path = comment_path[4:]
+
+        in_target = False
+        for i, line in enumerate(lines):
+            # Look for comment line that marks the start of this file's section
+            # Format: "# melee/lb/lbcollision.c: lb (Library) ..."
+            if line.startswith(f'# {comment_path}:'):
+                in_target = True
+                continue
+
+            if in_target:
+                # Look for mw_version in the following lines
+                if line.startswith('  mw_version = '):
+                    mw_version = line.split('=', 1)[1].strip()
+                    if mw_version in GC_TO_DECOMP_COMPILER:
+                        return GC_TO_DECOMP_COMPILER[mw_version]
+                    else:
+                        console.print(f"[yellow]Unknown compiler version {mw_version}, using default[/yellow]")
+                        return DEFAULT_DECOMP_COMPILER
+                # Stop at next comment (new file section) or blank line after non-continuation
+                elif line.startswith('# ') and ':' in line:
+                    break
+
+    except Exception as e:
+        console.print(f"[yellow]Error parsing build.ninja: {e}[/yellow]")
+
+    return DEFAULT_DECOMP_COMPILER
+
+
 # decomp.me instances
 PRODUCTION_DECOMP_ME = "https://decomp.me"
 
