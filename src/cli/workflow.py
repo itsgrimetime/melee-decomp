@@ -12,7 +12,7 @@ from typing import Annotated, Optional
 import typer
 from rich.console import Console
 
-from ._common import console, DEFAULT_MELEE_ROOT, DEFAULT_API_URL, require_api_url, resolve_melee_root, AGENT_ID
+from ._common import console, DEFAULT_MELEE_ROOT, get_local_api_url, resolve_melee_root, AGENT_ID
 from .complete import _load_completed, _save_completed, _get_current_branch
 
 workflow_app = typer.Typer(help="High-level workflow commands (recommended)")
@@ -26,8 +26,8 @@ def workflow_finish(
         Optional[Path], typer.Option("--melee-root", "-m", help="Path to melee submodule (auto-detects agent worktree)")
     ] = None,
     api_url: Annotated[
-        str, typer.Option("--api-url", help="Decomp.me API URL")
-    ] = DEFAULT_API_URL,
+        Optional[str], typer.Option("--api-url", help="Decomp.me API URL (auto-detected)")
+    ] = None,
     full_code: Annotated[
         bool, typer.Option("--full-code", help="Use full scratch code (including struct defs)")
     ] = False,
@@ -66,7 +66,7 @@ def workflow_finish(
     Automatically uses the agent's worktree to keep work isolated from other
     parallel agents. Use --melee-root to override.
     """
-    require_api_url(api_url)
+    api_url = api_url or get_local_api_url()
 
     # Auto-detect agent worktree
     melee_root = resolve_melee_root(melee_root)

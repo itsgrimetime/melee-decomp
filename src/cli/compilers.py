@@ -8,7 +8,7 @@ from typing import Annotated, Optional
 import typer
 from rich.table import Table
 
-from ._common import console, DEFAULT_API_URL, require_api_url
+from ._common import console, get_local_api_url
 
 
 def list_compilers(
@@ -16,14 +16,14 @@ def list_compilers(
         Optional[str], typer.Argument(help="Filter by platform (e.g., gc_wii)")
     ] = None,
     api_url: Annotated[
-        str, typer.Option("--api-url", help="Decomp.me API URL")
-    ] = DEFAULT_API_URL,
+        Optional[str], typer.Option("--api-url", help="Decomp.me API URL (auto-detected)")
+    ] = None,
     output_json: Annotated[
         bool, typer.Option("--json", help="Output as JSON")
     ] = False,
 ):
     """List available compilers."""
-    require_api_url(api_url)
+    api_url = api_url or get_local_api_url()
     from src.client import DecompMeAPIClient
 
     async def get():

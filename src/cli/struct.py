@@ -10,7 +10,7 @@ from rich.table import Table
 from rich.panel import Panel
 from rich.text import Text
 
-from ._common import console, get_agent_melee_root, DEFAULT_API_URL, require_api_url
+from ._common import console, get_agent_melee_root, get_local_api_url
 
 struct_app = typer.Typer(help="Lookup struct layouts and field offsets")
 
@@ -359,7 +359,7 @@ def struct_callback(
     slug: Annotated[
         Optional[str], typer.Option("--slug", help="Search scratch context for callback type")
     ] = None,
-    api_url: Annotated[str, typer.Option("--api-url", help="Decomp.me API URL")] = DEFAULT_API_URL,
+    api_url: Annotated[Optional[str], typer.Option("--api-url", help="Decomp.me API URL (auto-detected)")] = None,
 ):
     """Look up callback function signatures.
 
@@ -376,7 +376,7 @@ def struct_callback(
             console.print("[red]--search is required when using --slug[/red]")
             raise typer.Exit(1)
 
-        require_api_url(api_url)
+        api_url = api_url or get_local_api_url()
         from src.client import DecompMeAPIClient
 
         async def get():

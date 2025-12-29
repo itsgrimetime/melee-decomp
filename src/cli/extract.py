@@ -12,27 +12,28 @@ from rich.table import Table
 from ._common import (
     console,
     DEFAULT_MELEE_ROOT,
-    DECOMP_COMPLETED_FILE,
     get_agent_melee_root,
     get_agent_context_file,
     check_duplicate_operation,
     resolve_melee_root,
+    load_completed_functions,
+    detect_local_api_url,
     AGENT_ID,
 )
-
-# API URL from environment
-_api_base = os.environ.get("DECOMP_API_BASE", "")
-DEFAULT_DECOMP_ME_URL = _api_base[:-4] if _api_base.endswith("/api") else _api_base
 
 # Context file override from environment
 _context_env = os.environ.get("DECOMP_CONTEXT_FILE", "")
 
 
-def _get_context_file() -> Path:
-    """Get context file path, using agent's worktree if available."""
+def _get_context_file(source_file: str | None = None) -> Path:
+    """Get context file path, using agent's worktree if available.
+
+    Args:
+        source_file: Optional source file path to find per-file .ctx context.
+    """
     if _context_env:
         return Path(_context_env)
-    return get_agent_context_file()
+    return get_agent_context_file(source_file=source_file)
 
 extract_app = typer.Typer(help="Extract and list unmatched functions")
 
@@ -163,13 +164,7 @@ def extract_list(
     # Load completed functions to exclude
     completed = set()
     if not include_completed:
-        completed_path = Path(DECOMP_COMPLETED_FILE)
-        if completed_path.exists():
-            try:
-                with open(completed_path, 'r') as f:
-                    completed = set(json.load(f).keys())
-            except (json.JSONDecodeError, IOError):
-                pass
+        completed = set(load_completed_functions().keys())
 
     # Filter functions
     functions = [
@@ -246,8 +241,8 @@ def extract_get(
         bool, typer.Option("--create-scratch", "-s", help="Create a decomp.me scratch")
     ] = False,
     api_url: Annotated[
-        str, typer.Option("--api-url", help="Decomp.me API URL (for --create-scratch)")
-    ] = DEFAULT_DECOMP_ME_URL,
+        Optional[str], typer.Option("--api-url", help="Decomp.me API URL (auto-detected if not provided)")
+    ] = None,
 ):
     """Extract a specific function's ASM and context.
 
@@ -256,6 +251,18 @@ def extract_get(
     """
     # Auto-detect agent worktree
     melee_root = resolve_melee_root(melee_root)
+
+    # Auto-detect API URL if creating scratch
+    if create_scratch and not api_url:
+        api_url = detect_local_api_url()
+        if not api_url:
+            console.print("[red]Error: Could not find local decomp.me server[/red]")
+            console.print("[dim]Tried: nzxt-discord.local, 10.200.0.1, localhost:8000[/dim]")
+            console.print("")
+            console.print("[yellow]STOP: The decomp.me server should always be available.[/yellow]")
+            console.print("[yellow]Report this issue to the user - do NOT attempt local-only workarounds.[/yellow]")
+            raise typer.Exit(1)
+        console.print(f"[dim]Using decomp.me server: {api_url}[/dim]")
 
     from src.extractor import extract_function
 
@@ -311,10 +318,10 @@ def extract_get(
             if existing_slug:
                 console.print(f"[yellow]Note:[/yellow] A scratch was recently created. Use existing scratch if appropriate.")
 
-        ctx_path = _get_context_file()
+        ctx_path = _get_context_file(source_file=func.file_path)
         if not ctx_path.exists():
             console.print(f"[red]Context file not found: {ctx_path}[/red]")
-            console.print("[dim]Run 'ninja' in melee/ to generate build/ctx.c[/dim]")
+            console.print(f"[dim]Run 'ninja {ctx_path.relative_to(melee_root.parent) if str(ctx_path).startswith(str(melee_root.parent)) else ctx_path}' to generate it[/dim]")
             raise typer.Exit(1)
 
         melee_context = ctx_path.read_text()

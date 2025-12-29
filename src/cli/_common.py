@@ -5,6 +5,7 @@ import json
 import os
 import re
 import subprocess
+import time
 from pathlib import Path
 from typing import Annotated, Optional
 
@@ -25,25 +26,113 @@ DECOMP_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 # Each agent gets its own worktree (for git) and its own session (for decomp.me)
 # This prevents conflicts when parallel agents each claim their own scratches
 AGENT_ID = _get_agent_id()
-DECOMP_COMPLETED_FILE = os.environ.get(
-    "DECOMP_COMPLETED_FILE",
-    str(DECOMP_CONFIG_DIR / "completed_functions.json")
-)
 PRODUCTION_COOKIES_FILE = DECOMP_CONFIG_DIR / "production_cookies.json"
+LOCAL_API_CACHE_FILE = DECOMP_CONFIG_DIR / "local_api_cache.json"
 
 # Project paths
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 DEFAULT_MELEE_ROOT = PROJECT_ROOT / "melee"
 MELEE_WORKTREES_DIR = PROJECT_ROOT / "melee-worktrees"
-SLUG_MAP_FILE = PROJECT_ROOT / "config" / "scratches_slug_map.json"
 
 # decomp.me instances
-# Local: http://nzxt-discord.local (home network)
-# Remote: http://10.200.0.1 (via WireGuard VPN)
-LOCAL_DECOMP_ME = os.environ.get("DECOMP_ME_URL", "http://nzxt-discord.local")
 PRODUCTION_DECOMP_ME = "https://decomp.me"
 
-# API URL - derived from LOCAL_DECOMP_ME or DECOMP_API_BASE env var
+# Candidate local decomp.me URLs to try (in order of preference)
+# Can be overridden via .env file with LOCAL_DECOMP_CANDIDATES (comma-separated)
+DEFAULT_LOCAL_CANDIDATES = [
+    "http://nzxt-discord.local",  # Home network hostname
+    "http://10.200.0.1",          # WireGuard VPN
+    "http://localhost:8000",      # Local dev server
+]
+
+_env_candidates = os.environ.get("LOCAL_DECOMP_CANDIDATES", "")
+LOCAL_DECOMP_CANDIDATES = (
+    [url.strip() for url in _env_candidates.split(",") if url.strip()]
+    if _env_candidates else DEFAULT_LOCAL_CANDIDATES
+)
+
+# Cache for detected local URL (valid for 1 hour)
+LOCAL_API_CACHE_TTL = 3600
+
+
+def _probe_url(url: str, timeout: float = 2.0) -> bool:
+    """Check if a decomp.me URL is reachable."""
+    import httpx
+    try:
+        # Try to hit the API root
+        resp = httpx.get(f"{url}/api/", timeout=timeout)
+        return resp.status_code == 200
+    except Exception:
+        return False
+
+
+def detect_local_api_url(force_probe: bool = False) -> str | None:
+    """Auto-detect the local decomp.me API URL.
+
+    Tries candidate URLs in order and returns the first one that responds.
+    Results are cached for 1 hour to avoid repeated probing.
+
+    Args:
+        force_probe: If True, ignore cache and probe all candidates
+
+    Returns:
+        Working URL or None if none found
+    """
+    # Check environment variables first (explicit config takes precedence)
+    env_url = os.environ.get("DECOMP_API_BASE") or os.environ.get("DECOMP_ME_URL")
+    if env_url:
+        # Strip /api suffix if present
+        return env_url[:-4] if env_url.endswith("/api") else env_url
+
+    # Check cache
+    if not force_probe and LOCAL_API_CACHE_FILE.exists():
+        try:
+            with open(LOCAL_API_CACHE_FILE) as f:
+                cache = json.load(f)
+            cached_url = cache.get("url")
+            cached_at = cache.get("cached_at", 0)
+            if cached_url and (time.time() - cached_at) < LOCAL_API_CACHE_TTL:
+                # Verify cached URL still works
+                if _probe_url(cached_url, timeout=1.0):
+                    return cached_url
+        except (json.JSONDecodeError, IOError):
+            pass
+
+    # Probe candidates
+    for url in LOCAL_DECOMP_CANDIDATES:
+        if _probe_url(url):
+            # Cache the result
+            try:
+                with open(LOCAL_API_CACHE_FILE, 'w') as f:
+                    json.dump({"url": url, "cached_at": time.time()}, f)
+            except IOError:
+                pass
+            return url
+
+    return None
+
+
+def get_local_api_url() -> str:
+    """Get the local decomp.me API URL, auto-detecting if needed.
+
+    Returns:
+        URL string
+
+    Raises:
+        typer.Exit if no local server found
+    """
+    url = detect_local_api_url()
+    if not url:
+        console.print("[red]Error: Could not find local decomp.me server[/red]")
+        console.print(f"[dim]Tried: {', '.join(LOCAL_DECOMP_CANDIDATES)}[/dim]")
+        console.print("[dim]Set DECOMP_API_BASE or DECOMP_ME_URL environment variable,[/dim]")
+        console.print("[dim]or add LOCAL_DECOMP_CANDIDATES to your .env file[/dim]")
+        raise typer.Exit(1)
+    return url
+
+
+# Legacy compatibility - these now use auto-detection
+LOCAL_DECOMP_ME = os.environ.get("DECOMP_ME_URL", "http://nzxt-discord.local")  # Fallback
 _api_base = os.environ.get("DECOMP_API_BASE", "")
 DEFAULT_API_URL = _api_base[:-4] if _api_base.endswith("/api") else (_api_base or LOCAL_DECOMP_ME)
 
@@ -105,29 +194,59 @@ def resolve_melee_root(melee_root: Path | None) -> Path:
     return get_agent_melee_root()
 
 
-def get_agent_context_file(agent_id: str | None = None) -> Path:
+def get_agent_context_file(agent_id: str | None = None, source_file: str | None = None) -> Path:
     """Get the context file path for the current agent.
 
     Uses agent's worktree context if available, otherwise falls back to main melee.
     This allows agents to work without requiring a full build in their worktree.
 
+    The build system creates per-file .ctx files (e.g., build/GALE01/src/melee/ft/ftcoll.ctx).
+    If source_file is provided, we look for the corresponding .ctx file.
+    Otherwise we look for a consolidated build/ctx.c (legacy).
+
     Args:
         agent_id: Optional agent ID override. Uses AGENT_ID if not provided.
+        source_file: Optional source file path (e.g., "melee/ft/ftcoll.c") to find per-file context.
 
     Returns:
-        Path to the context file (build/ctx.c).
+        Path to the context file.
     """
     agent_root = get_agent_melee_root(agent_id)
-    agent_ctx = agent_root / "build" / "ctx.c"
 
-    # If agent's worktree has a built context, use it
+    # If source_file provided, look for per-file .ctx
+    if source_file:
+        # Convert source file path to .ctx path
+        # e.g., "melee/ft/ftcoll.c" -> "build/GALE01/src/melee/ft/ftcoll.ctx"
+        ctx_relative = source_file.replace(".c", ".ctx").replace(".cpp", ".ctx")
+        if not ctx_relative.startswith("src/"):
+            ctx_relative = f"src/{ctx_relative}"
+
+        # Try agent's worktree first
+        agent_ctx = agent_root / "build" / "GALE01" / ctx_relative
+        if agent_ctx.exists():
+            return agent_ctx
+
+        # Fall back to main melee
+        main_ctx = DEFAULT_MELEE_ROOT / "build" / "GALE01" / ctx_relative
+        if main_ctx.exists():
+            return main_ctx
+
+    # Fall back to consolidated ctx.c (legacy behavior)
+    agent_ctx = agent_root / "build" / "ctx.c"
     if agent_ctx.exists():
         return agent_ctx
 
-    # Fall back to main melee's context file
     main_ctx = DEFAULT_MELEE_ROOT / "build" / "ctx.c"
     if main_ctx.exists():
         return main_ctx
+
+    # If source_file was provided but not found, return the expected path
+    # so error message is helpful
+    if source_file:
+        ctx_relative = source_file.replace(".c", ".ctx").replace(".cpp", ".ctx")
+        if not ctx_relative.startswith("src/"):
+            ctx_relative = f"src/{ctx_relative}"
+        return agent_root / "build" / "GALE01" / ctx_relative
 
     # Return agent path so error message shows what needs to be built
     return agent_ctx
@@ -137,7 +256,7 @@ def _create_agent_worktree(agent_id: str, worktree_path: Path) -> Path:
     """Create a new worktree for an agent.
 
     Creates a new branch and worktree for the agent to work in isolation.
-    Also symlinks orig/ and runs configure.py + ninja to set up the build.
+    Also symlinks orig/, copies ctx.c, and runs build to generate report.json.
     """
     import subprocess
 
@@ -153,6 +272,28 @@ def _create_agent_worktree(agent_id: str, worktree_path: Path) -> Path:
         base_branch = result.stdout.strip()
     except subprocess.CalledProcessError:
         base_branch = "master"
+
+    # Get current commit SHA for reference
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=DEFAULT_MELEE_ROOT,
+            capture_output=True, text=True, check=True
+        )
+        base_commit = result.stdout.strip()
+    except subprocess.CalledProcessError:
+        base_commit = "unknown"
+
+    # Get remote URL for repo info
+    try:
+        result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=DEFAULT_MELEE_ROOT,
+            capture_output=True, text=True, check=True
+        )
+        remote_url = result.stdout.strip()
+    except subprocess.CalledProcessError:
+        remote_url = str(DEFAULT_MELEE_ROOT)
 
     # Create branch name for this agent
     branch_name = f"agent/{agent_id}"
@@ -200,10 +341,43 @@ def _create_agent_worktree(agent_id: str, worktree_path: Path) -> Path:
             import shutil
             shutil.copy2(main_ctx, worktree_ctx)
 
-        # Print clear instructions about the worktree
-        console.print(f"[bold cyan]WORKTREE CREATED:[/bold cyan] {worktree_path}")
-        console.print(f"[bold cyan]BRANCH:[/bold cyan] {branch_name}")
-        console.print(f"[yellow]Run all git commands in the worktree, not in melee/[/yellow]")
+        # Print worktree creation info with base details
+        console.print(f"\n[bold cyan]WORKTREE CREATED[/bold cyan]")
+        console.print(f"  [dim]Path:[/dim]   {worktree_path}")
+        console.print(f"  [dim]Branch:[/dim] {branch_name}")
+        console.print(f"  [dim]Base:[/dim]   {base_branch} @ {base_commit}")
+        console.print(f"  [dim]Repo:[/dim]   {remote_url}")
+
+        # Run build to generate report.json (needed for extract list)
+        configure_py = worktree_path / "configure.py"
+        if configure_py.exists():
+            console.print(f"\n[dim]Running initial build to generate report.json...[/dim]")
+            try:
+                # Run configure.py
+                subprocess.run(
+                    ["python", "configure.py"],
+                    cwd=worktree_path,
+                    capture_output=True, text=True, check=True
+                )
+                # Run ninja to build report.json
+                result = subprocess.run(
+                    ["ninja", "build/GALE01/report.json"],
+                    cwd=worktree_path,
+                    capture_output=True, text=True,
+                    timeout=300,  # 5 minute timeout
+                )
+                if result.returncode == 0:
+                    console.print(f"[green]Build complete - report.json generated[/green]")
+                else:
+                    console.print(f"[yellow]Build had issues: {result.stderr[:200]}[/yellow]")
+            except subprocess.TimeoutExpired:
+                console.print(f"[yellow]Build timed out - run 'ninja' manually in worktree[/yellow]")
+            except subprocess.CalledProcessError as e:
+                console.print(f"[yellow]Build setup failed: {e.stderr[:200] if e.stderr else str(e)}[/yellow]")
+            except FileNotFoundError:
+                console.print(f"[yellow]ninja not found - run 'ninja' manually in worktree[/yellow]")
+
+        console.print(f"\n[yellow]Run all git commands in the worktree, not in melee/[/yellow]")
 
         return worktree_path
 
@@ -214,74 +388,101 @@ def _create_agent_worktree(agent_id: str, worktree_path: Path) -> Path:
 
 
 def load_completed_functions() -> dict:
-    """Load completed functions tracking file with shared lock."""
-    completed_path = Path(DECOMP_COMPLETED_FILE)
-    if completed_path.exists():
-        try:
-            with open(completed_path, 'r') as f:
-                fcntl.flock(f.fileno(), fcntl.LOCK_SH)
-                try:
-                    return json.load(f)
-                finally:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-        except (json.JSONDecodeError, IOError):
-            pass
-    return {}
+    """Load completed functions from the SQLite database.
+
+    Returns a dict compatible with the old JSON format for backward compatibility.
+    """
+    from src.db import get_db
+    db = get_db()
+
+    result = {}
+    with db.connection() as conn:
+        cursor = conn.execute("""
+            SELECT function_name, match_percent, local_scratch_slug, production_scratch_slug,
+                   is_committed, branch, pr_url, pr_number, pr_state, notes
+            FROM functions
+        """)
+        for row in cursor.fetchall():
+            result[row['function_name']] = {
+                'match_percent': row['match_percent'] or 0,
+                'scratch_slug': row['local_scratch_slug'],
+                'production_slug': row['production_scratch_slug'],
+                'committed': bool(row['is_committed']),
+                'branch': row['branch'],
+                'pr_url': row['pr_url'],
+                'pr_number': row['pr_number'],
+                'pr_state': row['pr_state'],
+                'notes': row['notes'],
+            }
+    return result
 
 
 def save_completed_functions(data: dict) -> None:
-    """Save completed functions tracking file with exclusive lock.
+    """Save completed functions to the SQLite database.
 
-    Uses atomic write pattern: lock, read current, merge, write.
-    This prevents race conditions when multiple agents write simultaneously.
+    Accepts a dict in the old JSON format for backward compatibility.
+    SQLite handles concurrency natively, so no file locking is needed.
     """
-    completed_path = Path(DECOMP_COMPLETED_FILE)
-    completed_path.parent.mkdir(parents=True, exist_ok=True)
+    from src.db import get_db
+    db = get_db()
 
-    # Use a lock file for atomic read-modify-write
-    lock_path = completed_path.with_suffix('.lock')
-
-    with open(lock_path, 'w') as lock_file:
-        # Acquire exclusive lock (blocks until available)
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        try:
-            # Read current data (another process may have written)
-            current_data = {}
-            if completed_path.exists():
-                try:
-                    with open(completed_path, 'r') as f:
-                        current_data = json.load(f)
-                except (json.JSONDecodeError, IOError):
-                    pass
-
-            # Merge: incoming data takes precedence, but preserve entries not in incoming
-            merged_data = {**current_data, **data}
-
-            # Write atomically using temp file + rename
-            temp_path = completed_path.with_suffix('.tmp')
-            with open(temp_path, 'w') as f:
-                json.dump(merged_data, f, indent=2)
-            temp_path.rename(completed_path)
-        finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    for func_name, info in data.items():
+        db.upsert_function(
+            func_name,
+            agent_id=AGENT_ID,
+            match_percent=info.get('match_percent', 0),
+            local_scratch_slug=info.get('scratch_slug'),
+            production_scratch_slug=info.get('production_slug'),
+            is_committed=info.get('committed', False),
+            branch=info.get('branch'),
+            pr_url=info.get('pr_url'),
+            pr_number=info.get('pr_number'),
+            pr_state=info.get('pr_state'),
+            notes=info.get('notes'),
+        )
 
 
 def load_slug_map() -> dict:
-    """Load local->production slug mapping."""
-    if SLUG_MAP_FILE.exists():
-        try:
-            with open(SLUG_MAP_FILE, 'r') as f:
-                return json.load(f)
-        except (json.JSONDecodeError, IOError):
-            pass
-    return {}
+    """Load local->production slug mapping from the SQLite database.
+
+    Returns a dict keyed by production_slug for backward compatibility:
+    {production_slug: {local_slug, function, match_percent, synced_at}}
+    """
+    from src.db import get_db
+    db = get_db()
+
+    result = {}
+    with db.connection() as conn:
+        cursor = conn.execute("""
+            SELECT s.local_slug, s.production_slug, s.function_name, s.synced_at,
+                   f.match_percent
+            FROM sync_state s
+            LEFT JOIN functions f ON s.function_name = f.function_name
+        """)
+        for row in cursor.fetchall():
+            result[row['production_slug']] = {
+                'local_slug': row['local_slug'],
+                'function': row['function_name'],
+                'match_percent': row['match_percent'] or 0,
+                'synced_at': row['synced_at'],
+            }
+    return result
 
 
 def save_slug_map(data: dict) -> None:
-    """Save local->production slug mapping."""
-    SLUG_MAP_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(SLUG_MAP_FILE, 'w') as f:
-        json.dump(data, f, indent=2)
+    """Save local->production slug mapping to the SQLite database.
+
+    Accepts a dict keyed by production_slug for backward compatibility.
+    """
+    from src.db import get_db
+    db = get_db()
+
+    for prod_slug, info in data.items():
+        db.record_sync(
+            local_slug=info.get('local_slug'),
+            production_slug=prod_slug,
+            function_name=info.get('function'),
+        )
 
 
 def load_all_tracking_data(melee_root: Path) -> dict:

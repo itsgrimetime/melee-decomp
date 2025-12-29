@@ -19,11 +19,10 @@ from ._common import (
     DEFAULT_MELEE_ROOT,
     DECOMP_CONFIG_DIR,
     get_agent_context_file,
-    DEFAULT_API_URL,
-    require_api_url,
+    detect_local_api_url,
+    get_local_api_url,
     record_match_score,
     format_match_history,
-    LOCAL_DECOMP_ME,
     db_upsert_scratch,
     db_record_match_score,
     db_upsert_function,
@@ -43,11 +42,15 @@ _TOKENS_LOCK_FILE = DECOMP_CONFIG_DIR / "scratch_tokens.lock"
 _context_env = os.environ.get("DECOMP_CONTEXT_FILE", "")
 
 
-def _get_context_file() -> Path:
-    """Get context file path, using agent's worktree if available."""
+def _get_context_file(source_file: str | None = None) -> Path:
+    """Get context file path, using agent's worktree if available.
+
+    Args:
+        source_file: Optional source file path to find per-file .ctx context.
+    """
     if _context_env:
         return Path(_context_env)
-    return get_agent_context_file()
+    return get_agent_context_file(source_file=source_file)
 
 scratch_app = typer.Typer(help="Manage decomp.me scratches")
 
@@ -182,31 +185,34 @@ def scratch_create(
         Path, typer.Option("--melee-root", "-m", help="Path to melee submodule")
     ] = DEFAULT_MELEE_ROOT,
     api_url: Annotated[
-        str, typer.Option("--api-url", help="Decomp.me API URL")
-    ] = DEFAULT_API_URL,
+        Optional[str], typer.Option("--api-url", help="Decomp.me API URL (auto-detected)")
+    ] = None,
     context_file: Annotated[
         Optional[Path], typer.Option("--context", "-c", help="Path to context file")
     ] = None,
 ):
     """Create a new scratch for a function on decomp.me."""
-    require_api_url(api_url)
+    api_url = api_url or get_local_api_url()
     from src.client import DecompMeAPIClient
     from src.extractor import extract_function
 
-    ctx_path = context_file or _get_context_file()
+    # Extract function first to get source file path for context
+    func = asyncio.run(extract_function(melee_root, function_name))
+    if func is None:
+        console.print(f"[red]Function '{function_name}' not found[/red]")
+        raise typer.Exit(1)
+
+    # Get context file using the function's source file path
+    ctx_path = context_file or _get_context_file(source_file=func.file_path)
     if not ctx_path.exists():
         console.print(f"[red]Context file not found: {ctx_path}[/red]")
-        console.print("[dim]Run 'ninja' in melee/ to generate build/ctx.c[/dim]")
+        console.print(f"[dim]Run 'ninja {ctx_path}' to generate it[/dim]")
         raise typer.Exit(1)
 
     melee_context = ctx_path.read_text()
-    console.print(f"[dim]Loaded {len(melee_context):,} bytes of context[/dim]")
+    console.print(f"[dim]Loaded {len(melee_context):,} bytes of context from {ctx_path.name}[/dim]")
 
     async def create():
-        func = await extract_function(melee_root, function_name)
-        if func is None:
-            console.print(f"[red]Function '{function_name}' not found[/red]")
-            raise typer.Exit(1)
 
         async with DecompMeAPIClient(base_url=api_url) as client:
             from src.client import ScratchCreate
@@ -313,8 +319,8 @@ def scratch_compile(
         Optional[Path], typer.Option("--source", "-s", help="Update source from file before compiling")
     ] = None,
     api_url: Annotated[
-        str, typer.Option("--api-url", help="Decomp.me API URL")
-    ] = DEFAULT_API_URL,
+        Optional[str], typer.Option("--api-url", help="Decomp.me API URL (auto-detected)")
+    ] = None,
     show_diff: Annotated[
         bool, typer.Option("--diff", "-d", help="Show instruction diff")
     ] = False,
@@ -326,7 +332,7 @@ def scratch_compile(
 
     If --source is provided, updates the scratch source code before compiling.
     """
-    require_api_url(api_url)
+    api_url = api_url or get_local_api_url()
     from src.client import DecompMeAPIClient, ScratchUpdate, DecompMeAPIError
 
     # If source file provided, validate it exists
@@ -397,11 +403,11 @@ def scratch_update(
     slug: Annotated[str, typer.Argument(help="Scratch slug/ID")],
     source_file: Annotated[Path, typer.Argument(help="Path to C source file")],
     api_url: Annotated[
-        str, typer.Option("--api-url", help="Decomp.me API URL")
-    ] = DEFAULT_API_URL,
+        Optional[str], typer.Option("--api-url", help="Decomp.me API URL (auto-detected)")
+    ] = None,
 ):
     """Update a scratch's source code from a file."""
-    require_api_url(api_url)
+    api_url = api_url or get_local_api_url()
     from src.client import DecompMeAPIClient, ScratchUpdate, DecompMeAPIError
 
     source_code = source_file.read_text()
@@ -454,14 +460,14 @@ def scratch_update(
 def scratch_get(
     slug: Annotated[str, typer.Argument(help="Scratch slug/ID or URL")],
     api_url: Annotated[
-        str, typer.Option("--api-url", help="Decomp.me API URL")
-    ] = DEFAULT_API_URL,
+        Optional[str], typer.Option("--api-url", help="Decomp.me API URL (auto-detected)")
+    ] = None,
     output_json: Annotated[
         bool, typer.Option("--json", help="Output as JSON")
     ] = False,
 ):
     """Get full scratch information."""
-    require_api_url(api_url)
+    api_url = api_url or get_local_api_url()
     from src.client import DecompMeAPIClient
 
     # Extract slug from URL if needed
@@ -508,14 +514,14 @@ def scratch_search(
         int, typer.Option("--limit", "-n", help="Maximum results")
     ] = 10,
     api_url: Annotated[
-        str, typer.Option("--api-url", help="Decomp.me API URL")
-    ] = DEFAULT_API_URL,
+        Optional[str], typer.Option("--api-url", help="Decomp.me API URL (auto-detected)")
+    ] = None,
     output_json: Annotated[
         bool, typer.Option("--json", help="Output as JSON")
     ] = False,
 ):
     """Search for scratches on decomp.me."""
-    require_api_url(api_url)
+    api_url = api_url or get_local_api_url()
     from src.client import DecompMeAPIClient
 
     async def search():
@@ -545,14 +551,14 @@ def scratch_search_context(
     patterns: Annotated[list[str], typer.Argument(help="Regex pattern(s) to search for")],
     context_lines: Annotated[int, typer.Option("--context", "-C", help="Context lines")] = 3,
     max_results: Annotated[int, typer.Option("--max", "-n", help="Maximum matches per pattern")] = 10,
-    api_url: Annotated[str, typer.Option("--api-url", help="Decomp.me API URL")] = DEFAULT_API_URL,
+    api_url: Annotated[Optional[str], typer.Option("--api-url", help="Decomp.me API URL (auto-detected)")] = None,
 ):
     """Search through a scratch's context for patterns.
 
     Supports multiple patterns in a single call:
         melee-agent scratch search-context <slug> "HSD_GObj" "FtCmd2" "ColorOverlay"
     """
-    require_api_url(api_url)
+    api_url = api_url or get_local_api_url()
     from src.client import DecompMeAPIClient
 
     async def get():
