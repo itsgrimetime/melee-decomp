@@ -188,7 +188,7 @@ def sync_auth(
 def sync_list(
     min_match: Annotated[
         float, typer.Option("--min-match", help="Minimum match percentage to include")
-    ] = 95.0,
+    ] = 0.0,
     limit: Annotated[
         int, typer.Option("--limit", "-n", help="Maximum entries to show")
     ] = 50,
@@ -203,6 +203,8 @@ def sync_list(
     entries = []
 
     with db.connection() as conn:
+        # Filter by min_match, but always exclude 0% (no progress)
+        effective_min = max(min_match, 0.01)
         cursor = conn.execute("""
             SELECT function_name, match_percent, local_scratch_slug, production_scratch_slug
             FROM functions
@@ -210,7 +212,7 @@ def sync_list(
             AND local_scratch_slug IS NOT NULL
             ORDER BY match_percent DESC
             LIMIT ?
-        """, (min_match, limit))
+        """, (effective_min, limit))
 
         for row in cursor.fetchall():
             entries.append({
@@ -224,7 +226,8 @@ def sync_list(
         console.print("[yellow]No matching functions found[/yellow]")
         return
 
-    table = Table(title=f"Functions to Sync (>= {min_match}% match)")
+    title = "Functions to Sync" if min_match == 0 else f"Functions to Sync (>= {min_match}% match)"
+    table = Table(title=title)
     table.add_column("Function", style="cyan")
     table.add_column("Match %", justify="right")
     table.add_column("Local Slug")
@@ -256,7 +259,7 @@ def sync_production(
     ] = None,
     min_match: Annotated[
         float, typer.Option("--min-match", help="Minimum match percentage to sync")
-    ] = 95.0,
+    ] = 0.0,
     limit: Annotated[
         int, typer.Option("--limit", "-n", help="Maximum scratches to sync")
     ] = 10,
@@ -295,13 +298,15 @@ def sync_production(
 
     with db.connection() as conn:
         # Build query based on options
+        # Always exclude 0% (no progress) unless explicitly looking at a specific function
+        effective_min = max(min_match, 0.01) if not function else min_match
         query = """
             SELECT function_name, match_percent, local_scratch_slug, production_scratch_slug
             FROM functions
             WHERE match_percent >= ?
             AND local_scratch_slug IS NOT NULL
         """
-        params = [min_match]
+        params = [effective_min]
 
         if function:
             query += " AND function_name = ?"

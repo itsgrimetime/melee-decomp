@@ -574,9 +574,9 @@ def state_validate(
                     issue['message'] += f' (found {slug} at {pct:.1f}%)'
             issues.append(issue)
 
-    # === Check 3: Missing production scratch for 95%+ ===
+    # === Check 3: Missing production scratch (has local scratch with progress but not synced) ===
     for func in all_functions:
-        if func.get('match_percent', 0) >= 95 and not func.get('production_scratch_slug'):
+        if func.get('local_scratch_slug') and func.get('match_percent', 0) > 0 and not func.get('production_scratch_slug'):
             issues.append({
                 'type': 'missing_prod_scratch',
                 'severity': 'info',
