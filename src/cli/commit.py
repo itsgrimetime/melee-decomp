@@ -117,18 +117,18 @@ def commit_apply(
                     else:
                         console.print(format_signature_mismatch(sig_check))
 
-                # Show code preview
+                # Show code preview (markup=False to preserve brackets like [t0])
                 console.print(f"\n[bold]Code to insert ({len(source_code)} chars):[/bold]")
                 preview_lines = source_code.split('\n')
                 if len(preview_lines) > 20:
                     for line in preview_lines[:10]:
-                        console.print(f"  {line}")
+                        console.print(f"  {line}", markup=False)
                     console.print(f"  [dim]... ({len(preview_lines) - 20} more lines) ...[/dim]")
                     for line in preview_lines[-10:]:
-                        console.print(f"  {line}")
+                        console.print(f"  {line}", markup=False)
                 else:
                     for line in preview_lines:
-                        console.print(f"  {line}")
+                        console.print(f"  {line}", markup=False)
 
                 # Test compilation by temporarily applying and reverting
                 console.print("\n[bold]Testing compilation...[/bold]")
@@ -144,6 +144,7 @@ def commit_apply(
                     )
                     if not success:
                         console.print("[red]Failed to apply code (validation or insertion error)[/red]")
+                        console.print(f"[yellow]If the function stub is missing, run: melee-agent stub add {function_name}[/yellow]")
                         raise typer.Exit(1)
 
                     # Try to compile

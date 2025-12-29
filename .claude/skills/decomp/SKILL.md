@@ -25,6 +25,20 @@ CLI commands auto-detect and use your worktree by default.
 
 ## Workflow
 
+### Step 0: Automatic Build Validation
+
+When you first run a `melee-agent` command, the system automatically:
+1. Validates your worktree builds with `--require-protos`
+2. If the build fails, archives the broken worktree and creates a fresh one
+3. Caches the validation result for 30 minutes
+
+You'll see messages like:
+- `[dim]Running build validation (this may take a minute)...[/dim]`
+- `[green]Worktree build OK[/green]` - you're good to go
+- `[red]Worktree build FAILED - creating fresh worktree[/red]` - automatic recovery
+
+**No manual action needed** - just proceed with Step 1.
+
 ### Step 1: Choose and Claim a Function
 
 **If user specifies a function:** Skip to Step 2.

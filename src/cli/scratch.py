@@ -513,7 +513,9 @@ def scratch_get(
         console.print(f"[bold cyan]{scratch.name}[/bold cyan] ({scratch.slug})")
         console.print(f"Match: {match_pct:.1f}%")
         console.print(f"\n[bold]Source Code:[/bold]")
-        console.print(scratch.source_code[:2000] if len(scratch.source_code) > 2000 else scratch.source_code)
+        # Use markup=False to prevent Rich from interpreting brackets like [t0] as tags
+        source_display = scratch.source_code[:2000] if len(scratch.source_code) > 2000 else scratch.source_code
+        console.print(source_display, markup=False)
 
 
 @scratch_app.command("search")

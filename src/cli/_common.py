@@ -146,7 +146,106 @@ def require_api_url(api_url: str) -> None:
         raise SystemExit(1)
 
 
-def get_agent_melee_root(agent_id: str | None = None, create_if_missing: bool = True) -> Path:
+def _validate_worktree_build(worktree_path: Path, max_age_minutes: int = 30) -> bool:
+    """Check if a worktree builds successfully with --require-protos.
+
+    Uses a marker file to cache validation results. Only re-validates if:
+    - No marker file exists
+    - Marker file is older than max_age_minutes
+    - Any source files are newer than the marker
+
+    Returns True if build passes, False if it fails.
+    """
+    import subprocess
+    import time
+
+    marker_file = worktree_path / ".build_validated"
+
+    # Check if we have a recent validation marker
+    if marker_file.exists():
+        marker_age = time.time() - marker_file.stat().st_mtime
+        if marker_age < max_age_minutes * 60:
+            # Check if any source files changed since validation
+            src_dir = worktree_path / "src"
+            marker_mtime = marker_file.stat().st_mtime
+            needs_revalidation = False
+
+            # Quick check: just look at a few key directories
+            for check_dir in [src_dir / "melee" / "lb", src_dir / "melee" / "ft"]:
+                if check_dir.exists():
+                    for f in check_dir.rglob("*.c"):
+                        if f.stat().st_mtime > marker_mtime:
+                            needs_revalidation = True
+                            break
+                    if needs_revalidation:
+                        break
+
+            if not needs_revalidation:
+                console.print(f"[dim]Build validated {int(marker_age / 60)}m ago[/dim]")
+                return True
+
+    console.print(f"[dim]Running build validation (this may take a minute)...[/dim]")
+
+    try:
+        # Run configure with --require-protos
+        result = subprocess.run(
+            ["python", "configure.py", "--require-protos"],
+            cwd=worktree_path,
+            capture_output=True, text=True,
+            timeout=30
+        )
+        if result.returncode != 0:
+            return False
+
+        # Run ninja build (with timeout to avoid hanging)
+        result = subprocess.run(
+            ["ninja"],
+            cwd=worktree_path,
+            capture_output=True, text=True,
+            timeout=300  # 5 minute timeout
+        )
+
+        if result.returncode == 0:
+            # Create/update marker file
+            marker_file.touch()
+            return True
+        else:
+            # Remove marker if build fails
+            if marker_file.exists():
+                marker_file.unlink()
+            return False
+
+    except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError):
+        return False
+
+
+def _archive_broken_worktree(worktree_path: Path, agent_id: str) -> None:
+    """Archive a broken worktree by renaming it with a -broken suffix."""
+    import subprocess
+    import time
+
+    timestamp = int(time.time())
+    broken_name = f"{agent_id}-broken-{timestamp}"
+    broken_path = MELEE_WORKTREES_DIR / broken_name
+
+    console.print(f"[yellow]Archiving broken worktree to: {broken_path}[/yellow]")
+
+    # Remove the worktree from git's tracking first
+    try:
+        subprocess.run(
+            ["git", "worktree", "remove", "--force", str(worktree_path)],
+            cwd=DEFAULT_MELEE_ROOT,
+            capture_output=True, text=True
+        )
+    except Exception:
+        pass  # May fail if already removed
+
+    # Rename the directory
+    if worktree_path.exists():
+        worktree_path.rename(broken_path)
+
+
+def get_agent_melee_root(agent_id: str | None = None, create_if_missing: bool = True, validate_build: bool = True) -> Path:
     """Get the melee worktree path for the current agent.
 
     Each agent gets its own worktree to avoid conflicts when working in parallel.
@@ -155,6 +254,7 @@ def get_agent_melee_root(agent_id: str | None = None, create_if_missing: bool = 
     Args:
         agent_id: Optional agent ID override. Uses AGENT_ID if not provided.
         create_if_missing: If True (default), create worktree if it doesn't exist.
+        validate_build: If True (default), validate build passes before reusing worktree.
 
     Returns:
         Path to the agent's melee worktree (or main melee if no agent ID).
@@ -167,8 +267,19 @@ def get_agent_melee_root(agent_id: str | None = None, create_if_missing: bool = 
 
     # Check if worktree already exists
     if worktree_path.exists() and (worktree_path / "src").exists():
-        console.print(f"[dim]Using worktree: {worktree_path}[/dim]")
-        return worktree_path
+        # Validate build passes before reusing
+        if validate_build:
+            console.print(f"[dim]Validating worktree build: {worktree_path}[/dim]")
+            if _validate_worktree_build(worktree_path):
+                console.print(f"[green]Worktree build OK[/green]")
+                return worktree_path
+            else:
+                console.print(f"[red]Worktree build FAILED - creating fresh worktree[/red]")
+                _archive_broken_worktree(worktree_path, aid)
+                # Fall through to create new worktree
+        else:
+            console.print(f"[dim]Using worktree: {worktree_path}[/dim]")
+            return worktree_path
 
     if not create_if_missing:
         return DEFAULT_MELEE_ROOT
