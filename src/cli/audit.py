@@ -663,6 +663,9 @@ def audit_discover_prs(
             continue
 
         linked_funcs = []
+        # Determine actual PR state
+        actual_pr_state = "MERGED" if is_merged else pr_state.upper() if pr_state else "OPEN"
+
         for func_info in functions:
             func = func_info["function"]
             if func in completed:
@@ -674,13 +677,14 @@ def audit_discover_prs(
                     current["pr_url"] = pr_url
                     current["pr_number"] = pr_number
                     current["pr_repo"] = repo
+                    current["pr_state"] = actual_pr_state
                     needs_update = True
                     total_linked += 1
 
-                # Update state if merged
-                if is_merged and current.get("pr_url") == pr_url:
-                    if current.get("pr_state") != "MERGED":
-                        current["pr_state"] = "MERGED"
+                # Update state if this is the same PR and state changed
+                elif current.get("pr_url") == pr_url:
+                    if current.get("pr_state") != actual_pr_state:
+                        current["pr_state"] = actual_pr_state
                         needs_update = True
                         total_updated += 1
 
