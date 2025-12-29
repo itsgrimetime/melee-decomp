@@ -1,6 +1,6 @@
 """SQLite schema for agent state management."""
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA_SQL = """
 -- Core function tracking
@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS functions (
     current_score INTEGER,
     max_score INTEGER,
     status TEXT CHECK(status IN (
-        'unclaimed', 'claimed', 'in_progress', 'matched', 'committed', 'merged'
+        'unclaimed', 'claimed', 'in_progress', 'matched', 'committed', 'merged', 'in_review'
     )) DEFAULT 'unclaimed',
     -- Scratch references
     local_scratch_slug TEXT,
@@ -216,6 +216,118 @@ def get_migrations() -> dict[int, str]:
     Returns dict of {from_version: migration_sql}.
     """
     return {
-        # Future migrations go here
-        # 1: "ALTER TABLE functions ADD COLUMN new_field TEXT;",
+        # Version 1 -> 2: Add 'in_review' to status CHECK constraint
+        # SQLite doesn't support ALTER CHECK, so we recreate the table
+        1: """
+            -- Drop views that depend on functions table
+            DROP VIEW IF EXISTS v_active_claims;
+            DROP VIEW IF EXISTS v_uncommitted_matches;
+            DROP VIEW IF EXISTS v_stale_data;
+            DROP VIEW IF EXISTS v_agent_summary;
+
+            -- Recreate functions table with updated CHECK constraint
+            CREATE TABLE IF NOT EXISTS functions_new (
+                function_name TEXT PRIMARY KEY,
+                match_percent REAL DEFAULT 0.0,
+                current_score INTEGER,
+                max_score INTEGER,
+                status TEXT CHECK(status IN (
+                    'unclaimed', 'claimed', 'in_progress', 'matched', 'committed', 'merged', 'in_review'
+                )) DEFAULT 'unclaimed',
+                local_scratch_slug TEXT,
+                production_scratch_slug TEXT,
+                is_committed BOOLEAN DEFAULT FALSE,
+                commit_hash TEXT,
+                branch TEXT,
+                worktree_path TEXT,
+                pr_url TEXT,
+                pr_number INTEGER,
+                pr_state TEXT CHECK(pr_state IN ('OPEN', 'CLOSED', 'MERGED') OR pr_state IS NULL),
+                claimed_by_agent TEXT,
+                claimed_at REAL,
+                source_file_path TEXT,
+                notes TEXT,
+                created_at REAL DEFAULT (unixepoch('now', 'subsec')),
+                updated_at REAL DEFAULT (unixepoch('now', 'subsec')),
+                local_scratch_verified_at REAL,
+                production_scratch_verified_at REAL,
+                git_verified_at REAL
+            );
+
+            -- Copy data from old table
+            INSERT INTO functions_new SELECT * FROM functions;
+
+            -- Drop old table and rename new
+            DROP TABLE functions;
+            ALTER TABLE functions_new RENAME TO functions;
+
+            -- Recreate views
+            CREATE VIEW IF NOT EXISTS v_active_claims AS
+            SELECT
+                c.function_name,
+                c.agent_id,
+                c.claimed_at,
+                c.expires_at,
+                (c.expires_at - unixepoch('now')) as seconds_remaining,
+                f.match_percent,
+                f.local_scratch_slug
+            FROM claims c
+            LEFT JOIN functions f ON c.function_name = f.function_name
+            WHERE c.expires_at > unixepoch('now');
+
+            CREATE VIEW IF NOT EXISTS v_uncommitted_matches AS
+            SELECT
+                function_name,
+                match_percent,
+                local_scratch_slug,
+                production_scratch_slug,
+                status,
+                updated_at
+            FROM functions
+            WHERE match_percent >= 95.0
+              AND is_committed = FALSE
+              AND (pr_state IS NULL OR pr_state != 'MERGED');
+
+            CREATE VIEW IF NOT EXISTS v_stale_data AS
+            SELECT
+                function_name,
+                'local_scratch' as data_type,
+                local_scratch_verified_at as verified_at,
+                (unixepoch('now') - local_scratch_verified_at) / 3600.0 as hours_stale
+            FROM functions
+            WHERE local_scratch_slug IS NOT NULL
+              AND (local_scratch_verified_at IS NULL
+                   OR (unixepoch('now') - local_scratch_verified_at) > 3600)
+            UNION ALL
+            SELECT
+                function_name,
+                'production_scratch' as data_type,
+                production_scratch_verified_at as verified_at,
+                (unixepoch('now') - production_scratch_verified_at) / 3600.0 as hours_stale
+            FROM functions
+            WHERE production_scratch_slug IS NOT NULL
+              AND (production_scratch_verified_at IS NULL
+                   OR (unixepoch('now') - production_scratch_verified_at) > 86400)
+            UNION ALL
+            SELECT
+                function_name,
+                'git_commit' as data_type,
+                git_verified_at as verified_at,
+                (unixepoch('now') - git_verified_at) / 3600.0 as hours_stale
+            FROM functions
+            WHERE is_committed = TRUE
+              AND (git_verified_at IS NULL
+                   OR (unixepoch('now') - git_verified_at) > 86400);
+
+            CREATE VIEW IF NOT EXISTS v_agent_summary AS
+            SELECT
+                claimed_by_agent as agent_id,
+                COUNT(*) as total_functions,
+                SUM(CASE WHEN match_percent >= 95 THEN 1 ELSE 0 END) as matched_functions,
+                SUM(CASE WHEN is_committed THEN 1 ELSE 0 END) as committed_functions,
+                MAX(updated_at) as last_activity
+            FROM functions
+            WHERE claimed_by_agent IS NOT NULL
+            GROUP BY claimed_by_agent;
+        """,
     }

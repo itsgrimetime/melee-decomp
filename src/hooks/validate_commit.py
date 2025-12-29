@@ -6,6 +6,8 @@ Validates:
 2. symbols.txt is updated if function names changed
 3. CONTRIBUTING.md coding guidelines are followed
 4. clang-format has been run on C files
+5. No merge conflict markers in staged files
+6. Header signatures match implementations
 
 Usage:
     python -m src.hooks.validate_commit [--fix]
@@ -335,8 +337,137 @@ class CommitValidator:
         except subprocess.CalledProcessError:
             pass
 
+    def validate_conflict_markers(self) -> None:
+        """Check for merge conflict markers in staged files."""
+        staged_files = self._get_staged_files()
+
+        # Check C and header files
+        code_files = [f for f in staged_files if f.endswith((".c", ".h"))]
+
+        for code_file in code_files:
+            # Get the staged content
+            try:
+                result = subprocess.run(
+                    ["git", "show", f":{code_file}"],
+                    capture_output=True, text=True, check=True,
+                    cwd=PROJECT_ROOT
+                )
+                content = result.stdout
+            except subprocess.CalledProcessError:
+                continue
+
+            # Check for conflict markers
+            markers = ["<<<<<<<", "=======", ">>>>>>>"]
+            for i, line in enumerate(content.split("\n"), 1):
+                for marker in markers:
+                    if line.strip().startswith(marker):
+                        self.errors.append(ValidationError(
+                            f"Merge conflict marker found: {marker}",
+                            code_file, i
+                        ))
+
+    def validate_header_signatures(self) -> None:
+        """Check that header declarations match implementations.
+
+        Detects when a header has UNK_RET/UNK_PARAMS but the implementation
+        has a concrete signature, which causes CI failures with -requireprotos.
+        """
+        staged_files = self._get_staged_files()
+
+        # Find staged C files
+        c_files = [f for f in staged_files if f.endswith(".c") and "melee/src/" in f]
+
+        if not c_files:
+            return
+
+        for c_file in c_files:
+            # Get the staged content
+            try:
+                result = subprocess.run(
+                    ["git", "show", f":{c_file}"],
+                    capture_output=True, text=True, check=True,
+                    cwd=PROJECT_ROOT
+                )
+                c_content = result.stdout
+            except subprocess.CalledProcessError:
+                continue
+
+            # Find function implementations (non-static, at start of line)
+            # Pattern: type name(params) { or type name(params)\n{
+            func_pattern = re.compile(
+                r'^(?!static\s)(\w+(?:\s*\*)?)\s+(\w+)\s*\(([^)]*)\)\s*(?:\{|$)',
+                re.MULTILINE
+            )
+
+            implementations = {}
+            for match in func_pattern.finditer(c_content):
+                return_type = match.group(1).strip()
+                func_name = match.group(2)
+                params = match.group(3).strip()
+
+                # Skip main and other special functions
+                if func_name in ("main", "if", "while", "for", "switch"):
+                    continue
+
+                implementations[func_name] = {
+                    "return_type": return_type,
+                    "params": params
+                }
+
+            if not implementations:
+                continue
+
+            # Find the corresponding header file
+            header_file = c_file.replace(".c", ".h")
+
+            # Get header content (try staged first, then working tree)
+            header_content = None
+            try:
+                result = subprocess.run(
+                    ["git", "show", f":{header_file}"],
+                    capture_output=True, text=True, check=True,
+                    cwd=PROJECT_ROOT
+                )
+                header_content = result.stdout
+            except subprocess.CalledProcessError:
+                # Try reading from working tree
+                header_path = PROJECT_ROOT / header_file
+                if header_path.exists():
+                    header_content = header_path.read_text()
+
+            if not header_content:
+                continue
+
+            # Check each implementation against header declaration
+            for func_name, impl in implementations.items():
+                # Look for the function in the header
+                # Pattern: matches declarations like "/* addr */ UNK_RET name(UNK_PARAMS);"
+                decl_pattern = re.compile(
+                    rf'(/\*[^*]*\*/\s*)?(UNK_RET|{re.escape(impl["return_type"])})\s+{re.escape(func_name)}\s*\(([^)]*)\)\s*;',
+                    re.MULTILINE
+                )
+
+                match = decl_pattern.search(header_content)
+                if match:
+                    header_return = match.group(2)
+                    header_params = match.group(3).strip()
+
+                    # Check for UNK_RET/UNK_PARAMS mismatch
+                    has_unk = "UNK_RET" in header_return or "UNK_PARAMS" in header_params
+                    impl_has_concrete = impl["return_type"] != "UNK_RET" and impl["params"] != "UNK_PARAMS"
+
+                    if has_unk and impl_has_concrete:
+                        self.errors.append(ValidationError(
+                            f"Header signature mismatch: {func_name} declared as "
+                            f"'{header_return} {func_name}({header_params})' in header "
+                            f"but implemented as '{impl['return_type']} {func_name}({impl['params']})'",
+                            header_file
+                        ))
+
     def run(self) -> tuple[list[ValidationError], list[ValidationError]]:
         """Run all validations."""
+        self.validate_conflict_markers()
+        self.validate_header_signatures()
         self.validate_implicit_declarations()
         self.validate_symbols_txt()
         self.validate_coding_style()
