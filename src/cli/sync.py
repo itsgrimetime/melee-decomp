@@ -636,15 +636,20 @@ def sync_validate(
         }
 
         async with DecompMeAPIClient(base_url=local_url) as client:
-            for candidate in candidates:
+            for i, candidate in enumerate(candidates):
                 func_name = candidate['function']
                 slug = candidate['slug']
                 recorded_match = candidate['recorded_match']
 
+                console.print(f"[dim]Validating {func_name} ({i+1}/{len(candidates)})...[/dim]", end="")
+
                 issues = []
 
                 try:
-                    scratch = await client.get_scratch(slug)
+                    scratch = await asyncio.wait_for(
+                        client.get_scratch(slug),
+                        timeout=10.0
+                    )
 
                     # Check 1: Name matches
                     if scratch.name != func_name:
@@ -699,15 +704,25 @@ def sync_validate(
 
                     if issues:
                         results['issues'].append(entry)
+                        console.print(f" [yellow]{len(issues)} issue(s)[/yellow]")
                     else:
                         results['valid'].append(entry)
+                        console.print(f" [green]OK[/green]")
 
+                except asyncio.TimeoutError:
+                    results['errors'].append({
+                        'function': func_name,
+                        'slug': slug,
+                        'error': 'timeout (10s)',
+                    })
+                    console.print(f" [red]timeout[/red]")
                 except Exception as e:
                     results['errors'].append({
                         'function': func_name,
                         'slug': slug,
                         'error': str(e),
                     })
+                    console.print(f" [red]error[/red]")
 
         return results
 
@@ -832,15 +847,21 @@ def sync_dedup(
         results = []
 
         async with DecompMeAPIClient(base_url=local_url) as client:
-            for dup in duplicates:
+            for i, dup in enumerate(duplicates):
                 func_name = dup['function_name']
                 slugs = dup['slugs'].split(',')
+
+                console.print(f"[dim]Checking {func_name} ({i+1}/{len(duplicates)})...[/dim]")
 
                 # Fetch all scratches for this function
                 scratch_info = []
                 for slug in slugs:
                     try:
-                        scratch = await client.get_scratch(slug)
+                        console.print(f"[dim]  Fetching {slug}...[/dim]", end="")
+                        scratch = await asyncio.wait_for(
+                            client.get_scratch(slug),
+                            timeout=10.0
+                        )
                         match_pct = (scratch.max_score - scratch.score) / scratch.max_score * 100 if scratch.max_score > 0 else 0
                         scratch_info.append({
                             'slug': slug,
@@ -849,11 +870,19 @@ def sync_dedup(
                             'name_matches': scratch.name == func_name,
                             'code_has_func': func_name in scratch.source_code,
                         })
+                        console.print(f" [green]OK[/green]")
+                    except asyncio.TimeoutError:
+                        scratch_info.append({
+                            'slug': slug,
+                            'error': 'timeout',
+                        })
+                        console.print(f" [red]timeout[/red]")
                     except Exception as e:
                         scratch_info.append({
                             'slug': slug,
                             'error': str(e),
                         })
+                        console.print(f" [red]error[/red]")
 
                 # Score each scratch
                 for s in scratch_info:
