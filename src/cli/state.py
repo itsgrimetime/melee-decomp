@@ -1,5 +1,6 @@
 """State commands - unified state management and querying."""
 
+import asyncio
 import json
 import os
 import time
@@ -17,6 +18,7 @@ from ._common import (
     PRODUCTION_DECOMP_ME,
     console,
     extract_pr_info,
+    get_local_api_url,
     get_pr_status_from_gh,
     load_completed_functions,
     load_slug_map,
@@ -25,6 +27,45 @@ from ._common import (
 from src.db import get_db, StateDB
 
 state_app = typer.Typer(help="Query and manage agent state database")
+
+
+def _find_best_local_scratch(function_name: str) -> tuple[str | None, float]:
+    """Search local decomp.me for scratches matching function name.
+
+    Returns (slug, match_percent) of the best scratch, or (None, 0) if not found.
+    """
+    from src.client import DecompMeAPIClient
+
+    async def search():
+        api_url = get_local_api_url()
+        async with DecompMeAPIClient(api_url) as client:
+            # Search for scratches with this function name, ordered by score (lower = better)
+            scratches = await client.list_scratches(
+                search=function_name,
+                platform="gc_wii",
+                ordering="score",  # Lowest diff score first = best match
+                page_size=10,
+            )
+            # Filter to exact name matches and find best
+            # Note: score is diff score (lower = better), so match% = (1 - score/max_score) * 100
+            best_slug = None
+            best_pct = 0.0
+            for s in scratches:
+                if s.name == function_name:
+                    if s.max_score > 0:
+                        pct = (1 - s.score / s.max_score) * 100
+                    else:
+                        pct = 0.0
+                    if pct > best_pct:
+                        best_pct = pct
+                        best_slug = s.slug
+            return best_slug, best_pct
+
+    try:
+        return asyncio.run(search())
+    except Exception:
+        return None, 0.0
+
 
 # Staleness thresholds (in hours)
 STALE_THRESHOLD_LOCAL = 1.0
@@ -517,12 +558,21 @@ def state_validate(
     # === Check 2: Missing local scratch ===
     for func in all_functions:
         if func.get('match_percent', 0) > 0 and not func.get('local_scratch_slug'):
-            issues.append({
+            func_name = func['function_name']
+            issue = {
                 'type': 'missing_local_scratch',
                 'severity': 'error',
-                'function': func['function_name'],
+                'function': func_name,
                 'message': f'Has {func["match_percent"]:.0f}% but no local scratch slug',
-            })
+            }
+            # If --fix is set, search for existing scratch on local decomp.me
+            if fix:
+                console.print(f"[dim]Searching for scratch: {func_name}...[/dim]")
+                slug, pct = _find_best_local_scratch(func_name)
+                if slug:
+                    issue['fix'] = {'local_scratch_slug': slug, 'match_percent': pct}
+                    issue['message'] += f' (found {slug} at {pct:.1f}%)'
+            issues.append(issue)
 
     # === Check 3: Missing production scratch for 95%+ ===
     for func in all_functions:
