@@ -26,8 +26,7 @@ melee-decomp/
 | Location | Purpose |
 |----------|---------|
 | `~/.config/decomp-me/agent_state.db` | SQLite database (primary state storage) |
-| `~/.config/decomp-me/` | Persistent config (cookies, tokens, legacy JSON) |
-| `config/scratches_slug_map.json` | Local→production slug mapping |
+| `~/.config/decomp-me/` | Persistent config (cookies, tokens) |
 
 ## CLI Commands
 

@@ -58,7 +58,6 @@ melee-decomp/
 │   └── docker-compose.yml     # Service definitions
 ├── melee-worktrees/           # Per-agent git worktrees (auto-created)
 ├── config/                    # Project configuration
-│   └── scratches_slug_map.json  # Local→production slug mapping
 └── pyproject.toml             # Python project config
 ```
 
@@ -209,11 +208,9 @@ melee-agent compilers
 
 | Location | Purpose |
 |----------|---------|
+| `~/.config/decomp-me/agent_state.db` | SQLite database (primary state storage) |
 | `~/.config/decomp-me/cookies_{agent_id}.json` | Per-agent session cookies |
-| `~/.config/decomp-me/completed_functions.json` | Shared completion tracking |
 | `~/.config/decomp-me/production_cookies.json` | Production decomp.me auth |
-| `/tmp/decomp_claims.json` | Ephemeral agent claims (1-hour expiry) |
-| `config/scratches_slug_map.json` | Local→production slug mapping |
 | `melee/build/ctx.c` | Build context (preprocessed headers) |
 | `melee/build/GALE01/report.json` | Function match percentages |
 

@@ -22,7 +22,6 @@ from ._common import (
     get_pr_status_from_gh,
     load_completed_functions,
     load_slug_map,
-    save_completed_functions,
 )
 from src.db import get_db, StateDB
 
@@ -1024,7 +1023,7 @@ def state_rebuild(
     """Rebuild database from underlying sources.
 
     Sources:
-    - json: Migrate from existing JSON files (default)
+    - json: Re-import current database entries (no-op, legacy option)
     - git: Scan git history for Match commits
     - all: All of the above
     """
@@ -1038,9 +1037,10 @@ def state_rebuild(
     }
 
     if source in ("json", "all"):
-        console.print("[bold]Migrating from JSON files...[/bold]")
+        console.print("[bold]Re-importing from database (legacy migration path)...[/bold]")
 
-        # 1. completed_functions.json
+        # Note: load_completed_functions() now reads from SQLite, so this is
+        # effectively a no-op that re-upserts existing data
         completed = load_completed_functions()
         for func_name, info in completed.items():
             if verbose:
@@ -1070,7 +1070,7 @@ def state_rebuild(
 
         console.print(f"  Migrated {stats['functions_migrated']} functions")
 
-        # 2. scratches_slug_map.json
+        # Note: load_slug_map() now reads from SQLite sync_state table
         slug_map = load_slug_map()
         for prod_slug, info in slug_map.items():
             if verbose:
@@ -1562,17 +1562,6 @@ def state_cleanup(
                     )
                     removed += 1
             console.print(f"\n[green]Removed {removed} entries from database[/green]")
-
-            # Also update completed_functions.json
-            completed = load_completed_functions()
-            removed_from_json = 0
-            for entry in to_remove:
-                if entry['function_name'] in completed:
-                    del completed[entry['function_name']]
-                    removed_from_json += 1
-            if removed_from_json > 0:
-                save_completed_functions(completed)
-                console.print(f"[green]Removed {removed_from_json} entries from completed_functions.json[/green]")
     else:
         console.print("\n[dim]Use --remove-recovered or --remove-no-scratch to clean up[/dim]")
 

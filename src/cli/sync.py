@@ -275,7 +275,7 @@ def sync_production(
 ):
     """Sync completed functions from local instance to production decomp.me.
 
-    Reads from completed_functions.json to find functions with local slugs
+    Queries the SQLite database to find functions with local slugs
     that haven't been synced to production yet.
     """
     # Auto-detect local URL if not provided
