@@ -962,6 +962,9 @@ def sync_find_duplicates(
     limit: Annotated[
         int, typer.Option("--limit", "-n", help="Maximum functions to check")
     ] = 100,
+    update_db: Annotated[
+        bool, typer.Option("--update-db", help="Update scratches table with found scratches")
+    ] = True,
     output_json: Annotated[
         bool, typer.Option("--json", help="Output as JSON")
     ] = False,
@@ -1007,6 +1010,7 @@ def sync_find_duplicates(
         duplicates = []
         checked = 0
         errors = 0
+        scratches_added = 0
 
         async with httpx.AsyncClient(base_url=local_url, timeout=15.0) as client:
             for i, candidate in enumerate(candidates):
@@ -1032,21 +1036,38 @@ def sync_find_duplicates(
                     # Filter to exact name matches
                     exact_matches = [r for r in results if r.get('name') == func_name]
 
+                    # Build scratch info list
+                    scratch_list = []
+                    for r in exact_matches:
+                        score = r.get('score', 0)
+                        max_score = r.get('max_score', 0)
+                        match_pct = ((max_score - score) / max_score * 100) if max_score > 0 else 0
+                        scratch_list.append({
+                            'slug': r.get('slug'),
+                            'score': score,
+                            'max_score': max_score,
+                            'match_pct': match_pct,
+                            'is_tracked': r.get('slug') == tracked_slug,
+                        })
+
+                        # Update database with this scratch
+                        if update_db:
+                            db_upsert_scratch(
+                                r.get('slug'),
+                                instance='local',
+                                base_url=local_url,
+                                function_name=func_name,
+                                score=score,
+                                max_score=max_score,
+                            )
+                            scratches_added += 1
+
                     if len(exact_matches) > 1:
                         console.print(f" [yellow]{len(exact_matches)} scratches![/yellow]")
                         duplicates.append({
                             'function': func_name,
                             'tracked_slug': tracked_slug,
-                            'scratches': [
-                                {
-                                    'slug': r.get('slug'),
-                                    'score': r.get('score'),
-                                    'max_score': r.get('max_score'),
-                                    'match_pct': ((r.get('max_score', 0) - r.get('score', 0)) / r.get('max_score', 1) * 100) if r.get('max_score', 0) > 0 else 0,
-                                    'is_tracked': r.get('slug') == tracked_slug,
-                                }
-                                for r in exact_matches
-                            ],
+                            'scratches': scratch_list,
                         })
                     elif len(exact_matches) == 1:
                         console.print(f" [green]1 scratch[/green]")
@@ -1062,7 +1083,7 @@ def sync_find_duplicates(
                     console.print(f" [red]error: {e}[/red]")
                     errors += 1
 
-        return {'duplicates': duplicates, 'checked': checked, 'errors': errors}
+        return {'duplicates': duplicates, 'checked': checked, 'errors': errors, 'scratches_added': scratches_added}
 
     results = asyncio.run(search_duplicates())
 
@@ -1074,6 +1095,8 @@ def sync_find_duplicates(
     console.print(f"  Checked: {results['checked']}")
     console.print(f"  Errors: {results['errors']}")
     console.print(f"  Functions with duplicates: {len(results['duplicates'])}")
+    if update_db:
+        console.print(f"  Scratches added to DB: {results['scratches_added']}")
 
     if results['duplicates']:
         console.print(f"\n[yellow]Functions with multiple scratches:[/yellow]\n")
@@ -1094,4 +1117,7 @@ def sync_find_duplicates(
                     console.print(f"  [dim]  {slug}[/dim] ({pct:.1f}%)")
             console.print()
 
-        console.print("[dim]Run 'sync dedup' after updating the scratches table to resolve these[/dim]")
+        if update_db:
+            console.print("[dim]Run 'sync dedup' to pick winners and update tracking[/dim]")
+        else:
+            console.print("[dim]Run with --update-db to populate scratches table, then 'sync dedup' to resolve[/dim]")
