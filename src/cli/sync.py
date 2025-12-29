@@ -949,3 +949,149 @@ def sync_dedup(
         console.print(f"[green]Updated {changes_made} function(s) in completed_functions.json[/green]")
     elif dry_run and changes_made > 0:
         console.print(f"[yellow]Would update {changes_made} function(s) (dry run)[/yellow]")
+
+
+@sync_app.command("find-duplicates")
+def sync_find_duplicates(
+    local_url: Annotated[
+        str, typer.Option("--local-url", "-u", help="Local decomp.me instance URL")
+    ] = DEFAULT_DECOMP_ME_URL,
+    min_match: Annotated[
+        float, typer.Option("--min-match", help="Minimum match percentage to check")
+    ] = 95.0,
+    limit: Annotated[
+        int, typer.Option("--limit", "-n", help="Maximum functions to check")
+    ] = 100,
+    output_json: Annotated[
+        bool, typer.Option("--json", help="Output as JSON")
+    ] = False,
+):
+    """Find functions with multiple scratches on the server.
+
+    Queries the decomp.me API for each tracked function to find cases where
+    multiple scratches exist for the same function. This catches duplicates
+    created by different agents or repeated attempts.
+
+    Reports:
+    - Functions with multiple scratches
+    - Match percentages for each scratch
+    - Which scratch is currently tracked
+    """
+    _require_api_url(local_url)
+
+    completed = load_completed_functions()
+
+    # Get functions to check
+    candidates = []
+    for func_name, info in completed.items():
+        match_pct = info.get('match_percent', 0)
+        if match_pct >= min_match:
+            candidates.append({
+                'function': func_name,
+                'tracked_slug': info.get('scratch_slug'),
+                'match_pct': match_pct,
+            })
+
+    candidates.sort(key=lambda x: -x['match_pct'])
+    candidates = candidates[:limit]
+
+    if not candidates:
+        console.print("[yellow]No functions to check[/yellow]")
+        return
+
+    console.print(f"[bold]Searching for duplicates across {len(candidates)} functions...[/bold]\n")
+
+    import httpx
+
+    async def search_duplicates():
+        duplicates = []
+        checked = 0
+        errors = 0
+
+        async with httpx.AsyncClient(base_url=local_url, timeout=15.0) as client:
+            for i, candidate in enumerate(candidates):
+                func_name = candidate['function']
+                tracked_slug = candidate['tracked_slug']
+
+                console.print(f"[dim]Searching {func_name} ({i+1}/{len(candidates)})...[/dim]", end="")
+
+                try:
+                    resp = await asyncio.wait_for(
+                        client.get('/api/scratch', params={'search': func_name}),
+                        timeout=10.0
+                    )
+
+                    if resp.status_code != 200:
+                        console.print(f" [red]HTTP {resp.status_code}[/red]")
+                        errors += 1
+                        continue
+
+                    data = resp.json()
+                    results = data.get('results', [])
+
+                    # Filter to exact name matches
+                    exact_matches = [r for r in results if r.get('name') == func_name]
+
+                    if len(exact_matches) > 1:
+                        console.print(f" [yellow]{len(exact_matches)} scratches![/yellow]")
+                        duplicates.append({
+                            'function': func_name,
+                            'tracked_slug': tracked_slug,
+                            'scratches': [
+                                {
+                                    'slug': r.get('slug'),
+                                    'score': r.get('score'),
+                                    'max_score': r.get('max_score'),
+                                    'match_pct': ((r.get('max_score', 0) - r.get('score', 0)) / r.get('max_score', 1) * 100) if r.get('max_score', 0) > 0 else 0,
+                                    'is_tracked': r.get('slug') == tracked_slug,
+                                }
+                                for r in exact_matches
+                            ],
+                        })
+                    elif len(exact_matches) == 1:
+                        console.print(f" [green]1 scratch[/green]")
+                    else:
+                        console.print(f" [dim]0 exact matches[/dim]")
+
+                    checked += 1
+
+                except asyncio.TimeoutError:
+                    console.print(f" [red]timeout[/red]")
+                    errors += 1
+                except Exception as e:
+                    console.print(f" [red]error: {e}[/red]")
+                    errors += 1
+
+        return {'duplicates': duplicates, 'checked': checked, 'errors': errors}
+
+    results = asyncio.run(search_duplicates())
+
+    if output_json:
+        print(json.dumps(results, indent=2))
+        return
+
+    console.print(f"\n[bold]Results:[/bold]")
+    console.print(f"  Checked: {results['checked']}")
+    console.print(f"  Errors: {results['errors']}")
+    console.print(f"  Functions with duplicates: {len(results['duplicates'])}")
+
+    if results['duplicates']:
+        console.print(f"\n[yellow]Functions with multiple scratches:[/yellow]\n")
+
+        for dup in results['duplicates']:
+            func_name = dup['function']
+            tracked_slug = dup['tracked_slug']
+
+            console.print(f"[cyan]{func_name}[/cyan]")
+            for scratch in sorted(dup['scratches'], key=lambda x: -x['match_pct']):
+                slug = scratch['slug']
+                pct = scratch['match_pct']
+                is_tracked = scratch['is_tracked']
+
+                if is_tracked:
+                    console.print(f"  [green]★ {slug}[/green] ({pct:.1f}%) [dim]← tracked[/dim]")
+                else:
+                    console.print(f"  [dim]  {slug}[/dim] ({pct:.1f}%)")
+            console.print()
+
+        console.print("[dim]Run 'sync dedup' after updating the scratches table to resolve these[/dim]")
