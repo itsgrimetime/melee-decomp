@@ -794,6 +794,49 @@ def state_validate(
                 console.print(f"[dim]  {db_correct} uncommitted 100% confirmed by build[/dim]")
                 console.print(f"[dim]  {db_wrong} uncommitted 100% contradicted by build[/dim]")
 
+                # Check 4: Find functions that improved from baseline but aren't tracked
+                # This catches partial implementations that were never added to DB
+                from .pr import _get_cached_baseline_path, _check_upstream_status
+
+                commit_hash, _, _ = _check_upstream_status(repo_path)
+                if commit_hash:
+                    baseline_path = _get_cached_baseline_path(commit_hash)
+                    if baseline_path.exists():
+                        console.print(f"[dim]Comparing against baseline to find untracked improvements...[/dim]")
+                        try:
+                            with open(baseline_path) as f:
+                                baseline = json.load(f)
+
+                            # Build map of baseline function percentages
+                            baseline_funcs: dict[str, float] = {}
+                            for unit in baseline.get('units', []):
+                                for func in unit.get('functions', []):
+                                    name = func.get('name')
+                                    pct = func.get('fuzzy_match_percent', 0)
+                                    if name:
+                                        baseline_funcs[name] = pct
+
+                            # Find functions that improved but aren't in DB
+                            untracked_improved = 0
+                            for func_name, current_pct in report_funcs.items():
+                                baseline_pct = baseline_funcs.get(func_name, 0)
+                                # Function improved from baseline and isn't tracked
+                                if current_pct > baseline_pct and func_name not in db_by_name:
+                                    untracked_improved += 1
+                                    issues.append({
+                                        'type': 'improved_not_tracked',
+                                        'severity': 'warning',
+                                        'function': func_name,
+                                        'message': f'Improved {baseline_pct:.1f}% -> {current_pct:.1f}% but not tracked in DB',
+                                    })
+
+                            console.print(f"[dim]  {untracked_improved} improved functions not tracked in DB[/dim]")
+
+                        except Exception as e:
+                            console.print(f"[yellow]Error comparing to baseline: {e}[/yellow]")
+                    else:
+                        console.print(f"[dim]No baseline report cached - run 'pr describe' first to generate[/dim]")
+
             except Exception as e:
                 console.print(f"[yellow]Error parsing report.json: {e}[/yellow]")
 

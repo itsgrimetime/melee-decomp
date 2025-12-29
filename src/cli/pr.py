@@ -559,6 +559,55 @@ def _parse_objdiff_changes(changes: dict) -> list[dict]:
     return results
 
 
+def _get_modified_functions_from_diff(repo_path: Path, base_ref: str = "upstream/master") -> set[str]:
+    """Extract function names that were actually modified in git diff.
+
+    Uses two methods:
+    1. Hunk context lines (@@ ... @@ function_name) - functions with internal changes
+    2. Added function definitions - new or rewritten functions
+
+    Returns set of function names that had their code directly modified.
+    """
+    modified_funcs = set()
+
+    try:
+        # Get the diff for C source files
+        result = subprocess.run(
+            ["git", "diff", base_ref, "--", "src/*.c"],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        diff_output = result.stdout
+    except subprocess.CalledProcessError:
+        return modified_funcs
+
+    # Pattern 1: Hunk headers with function context
+    # Example: @@ -374,8 +375,14 @@ void ftCo_800D71D8(Fighter_GObj* gobj)
+    hunk_pattern = re.compile(r'^@@[^@]+@@\s*(?:\w+\s+)*(\w+)\s*\(', re.MULTILINE)
+    for match in hunk_pattern.finditer(diff_output):
+        func_name = match.group(1)
+        # Filter out common non-function matches
+        if func_name not in ('if', 'for', 'while', 'switch', 'return'):
+            modified_funcs.add(func_name)
+
+    # Pattern 2: Added function definitions (new implementations)
+    # Look for lines starting with + that define functions
+    # Example: +void fn_8002087C(void) {
+    added_func_pattern = re.compile(
+        r'^\+\s*(?:static\s+)?(?:inline\s+)?'
+        r'(?:void|bool|int|u8|u16|u32|s8|s16|s32|f32|f64|float|double|Fighter\*|HSD_GObj\*|\w+\*?)\s+'
+        r'(\w+)\s*\(',
+        re.MULTILINE
+    )
+    for match in added_func_pattern.finditer(diff_output):
+        func_name = match.group(1)
+        modified_funcs.add(func_name)
+
+    return modified_funcs
+
+
 def _check_upstream_status(melee_root: Path) -> tuple[str, bool, int]:
     """Check upstream/master status.
 
@@ -756,25 +805,29 @@ def pr_describe(
     repo_path = _detect_melee_root_from_cwd()
     main_melee = DEFAULT_MELEE_ROOT
 
-    console.print(f"[dim]Using repo: {repo_path}[/dim]")
+    if not output_json:
+        console.print(f"[dim]Using repo: {repo_path}[/dim]")
 
     # Get current report
     if current_report is None:
         current_report = repo_path / "build" / "GALE01" / "report.json"
 
     if not current_report.exists():
-        console.print(f"[yellow]Current report not found, building...[/yellow]")
+        if not output_json:
+            console.print(f"[yellow]Current report not found, building...[/yellow]")
         try:
             # Run configure if needed
             if not (repo_path / "build.ninja").exists():
-                console.print("[dim]Running configure.py...[/dim]")
+                if not output_json:
+                    console.print("[dim]Running configure.py...[/dim]")
                 subprocess.run(
                     ["python", "configure.py"],
                     cwd=repo_path,
                     check=True,
                 )
 
-            console.print("[dim]Building with ninja...[/dim]")
+            if not output_json:
+                console.print("[dim]Building with ninja...[/dim]")
             subprocess.run(
                 ["ninja", "all_source", "build/GALE01/report.json"],
                 cwd=repo_path,
@@ -796,7 +849,8 @@ def pr_describe(
             raise typer.Exit(1)
     else:
         # Auto-generate from upstream/master
-        console.print("[dim]Checking upstream/master status...[/dim]")
+        if not output_json:
+            console.print("[dim]Checking upstream/master status...[/dim]")
 
         commit_hash, is_behind, behind_count = _check_upstream_status(main_melee)
         if not commit_hash:
@@ -804,7 +858,7 @@ def pr_describe(
             console.print("[dim]Make sure 'upstream' remote is configured[/dim]")
             raise typer.Exit(1)
 
-        if is_behind:
+        if is_behind and not output_json:
             console.print(
                 f"[yellow]Warning: upstream/master is {behind_count} commits behind remote[/yellow]"
             )
@@ -818,9 +872,10 @@ def pr_describe(
                 console.print("[red]Failed to build baseline report[/red]")
                 raise typer.Exit(1)
 
-    console.print(f"[dim]Comparing reports:[/dim]")
-    console.print(f"[dim]  Base:    {base_report}[/dim]")
-    console.print(f"[dim]  Current: {current_report}[/dim]\n")
+    if not output_json:
+        console.print(f"[dim]Comparing reports:[/dim]")
+        console.print(f"[dim]  Base:    {base_report}[/dim]")
+        console.print(f"[dim]  Current: {current_report}[/dim]\n")
 
     # Find objdiff-cli (prefer current repo, fall back to main)
     objdiff_cli = repo_path / "build" / "tools" / "objdiff-cli"
@@ -839,10 +894,15 @@ def pr_describe(
         console.print("[yellow]No improved functions found[/yellow]")
         raise typer.Exit(0)
 
+    # Get functions that were actually modified in git diff
+    modified_funcs = _get_modified_functions_from_diff(repo_path)
+    if not output_json:
+        console.print(f"[dim]Found {len(modified_funcs)} functions modified in git diff[/dim]")
+
     # Load slug_map for production URLs
     slug_map = load_slug_map()
 
-    # Build function list with URLs
+    # Build function list with URLs and direct/incidental flag
     func_list = []
     for item in improved:
         prod_url = _get_production_scratch_url(item["function"], slug_map)
@@ -852,6 +912,7 @@ def pr_describe(
             "to_pct": item["to_pct"],
             "unit": item["unit"],
             "production_url": prod_url,
+            "direct": item["function"] in modified_funcs,
         })
 
     if output_json:
@@ -866,19 +927,23 @@ def pr_describe(
     lines = []
     lines.append("## Matched Functions\n")
 
-    # Group by match percentage
-    perfect = [f for f in func_list if f["to_pct"] == 100]
-    near_perfect = [f for f in func_list if 95 <= f["to_pct"] < 100]
-    partial = [f for f in func_list if f["to_pct"] < 95]
+    # Separate direct vs incidental improvements
+    direct_funcs = [f for f in func_list if f["direct"]]
+    incidental_funcs = [f for f in func_list if not f["direct"]]
 
-    def format_func(f: dict) -> str:
+    # Group direct improvements by match percentage
+    direct_perfect = [f for f in direct_funcs if f["to_pct"] == 100]
+    direct_near = [f for f in direct_funcs if 95 <= f["to_pct"] < 100]
+    direct_partial = [f for f in direct_funcs if f["to_pct"] < 95]
+
+    def format_func(f: dict, show_improvement: bool = True) -> str:
         name = f["function"]
         to_pct = f["to_pct"]
         from_pct = f["from_pct"]
         url = f["production_url"]
 
-        # Show improvement if not from 0
-        if from_pct > 0:
+        # Show improvement if not from 0 and requested
+        if show_improvement and from_pct > 0:
             pct_str = f"{from_pct:.1f}% -> {to_pct:.1f}%"
         else:
             pct_str = f"{to_pct:.1f}%"
@@ -888,29 +953,42 @@ def pr_describe(
         else:
             return f"- `{name}` ({pct_str})"
 
-    if perfect:
-        lines.append(f"### 100% Matches ({len(perfect)})\n")
-        for f in perfect:
+    if direct_perfect:
+        lines.append(f"### 100% Matches ({len(direct_perfect)})\n")
+        for f in direct_perfect:
             lines.append(format_func(f))
         lines.append("")
 
-    if near_perfect:
-        lines.append(f"### Near-Perfect Matches ({len(near_perfect)})\n")
-        for f in near_perfect:
+    if direct_near:
+        lines.append(f"### Near-Perfect Matches ({len(direct_near)})\n")
+        for f in direct_near:
             lines.append(format_func(f))
         lines.append("")
 
-    if partial:
-        lines.append(f"### Partial Matches ({len(partial)})\n")
-        for f in partial:
+    if direct_partial:
+        lines.append(f"### Partial Matches ({len(direct_partial)})\n")
+        for f in direct_partial:
             lines.append(format_func(f))
+        lines.append("")
+
+    # Show incidental improvements in a separate section
+    if incidental_funcs:
+        lines.append(f"### Incidental Improvements ({len(incidental_funcs)})\n")
+        lines.append("*These functions improved due to changes in related code (shared inlines, etc.)*\n")
+        for f in incidental_funcs:
+            lines.append(format_func(f, show_improvement=True))
         lines.append("")
 
     # Summary
     total = len(func_list)
+    direct_count = len(direct_funcs)
+    incidental_count = len(incidental_funcs)
     with_urls = sum(1 for f in func_list if f["production_url"])
     lines.append("---")
-    lines.append(f"*{total} functions improved*")
+    if incidental_count > 0:
+        lines.append(f"*{total} functions improved ({direct_count} direct, {incidental_count} incidental)*")
+    else:
+        lines.append(f"*{total} functions improved*")
     if with_urls < total:
         lines.append(f"*({with_urls}/{total} have decomp.me links)*")
 
