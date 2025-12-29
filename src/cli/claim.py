@@ -23,6 +23,29 @@ from ._common import (
     DEFAULT_MELEE_ROOT,
 )
 
+
+def _lookup_source_file(function_name: str) -> str | None:
+    """Look up the source file for a function from the extractor.
+
+    This allows auto-detection of the source file without requiring
+    the --source-file flag.
+
+    Args:
+        function_name: Name of the function to look up
+
+    Returns:
+        Source file path (e.g., "melee/lb/lbcollision.c") or None if not found.
+    """
+    try:
+        from src.extractor import FunctionExtractor
+        extractor = FunctionExtractor(DEFAULT_MELEE_ROOT)
+        func_info = extractor.extract_function(function_name)
+        if func_info and func_info.file_path:
+            return func_info.file_path
+    except Exception:
+        pass  # Silently fail - auto-detection is optional
+    return None
+
 # Claims are SHARED and ephemeral (1-hour expiry) - ok in /tmp
 DECOMP_CLAIMS_FILE = os.environ.get("DECOMP_CLAIMS_FILE", "/tmp/decomp_claims.json")
 DECOMP_CLAIM_TIMEOUT = int(os.environ.get("DECOMP_CLAIM_TIMEOUT", "3600"))  # 1 hour
@@ -95,7 +118,7 @@ def claim_add(
         str, typer.Option("--agent-id", help="Agent identifier")
     ] = AGENT_ID,
     source_file: Annotated[
-        str | None, typer.Option("--source-file", "-f", help="Source file path (enables subdirectory worktree)")
+        str | None, typer.Option("--source-file", "-f", help="Source file path (auto-detected if not provided)")
     ] = None,
     output_json: Annotated[
         bool, typer.Option("--json", help="Output as JSON")
@@ -103,9 +126,16 @@ def claim_add(
 ):
     """Claim a function to prevent other agents from working on it.
 
-    When --source-file is provided, also locks the subdirectory worktree
-    for this agent to prevent conflicts.
+    The source file is auto-detected from the function name, which enables
+    the subdirectory worktree system for isolated commits. Use --source-file
+    to override if auto-detection fails.
     """
+    # Auto-detect source file if not provided
+    if not source_file:
+        source_file = _lookup_source_file(function_name)
+        if source_file and not output_json:
+            console.print(f"[dim]Auto-detected source file: {source_file}[/dim]")
+
     # Check if already completed
     completed = _load_completed()
     if function_name in completed:

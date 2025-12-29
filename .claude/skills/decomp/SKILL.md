@@ -20,15 +20,15 @@ melee/src/melee/ft/chara/ftCommon/*.c → melee-worktrees/dir-ft-chara-ftCommon/
 ```
 
 **Key points:**
-- When you claim a function, specify `--source-file` to lock the subdirectory
+- Source file is **auto-detected** when you claim a function (no flags needed)
 - The worktree is created automatically when needed
 - Commits stay isolated until collected via `melee-agent worktree collect`
 - Local decomp.me server is **auto-detected** (no env vars needed)
 
-**Claiming with subdirectory:**
+**Claiming a function:**
 ```bash
-# Claim and lock the subdirectory (prevents conflicts with other agents)
-melee-agent claim add lbColl_80008440 --source-file melee/lb/lbcollision.c
+# Just claim the function - source file is auto-detected
+melee-agent claim add lbColl_80008440
 
 # List subdirectory worktrees
 melee-agent worktree list
@@ -271,8 +271,9 @@ The context headers have some incorrect type declarations. When you see assembly
 melee-agent extract list --min-match 0 --max-match 0.50 --sort score --show-score --limit 10
 # Pick a function with high score (130+), reasonable size (50-300 bytes)
 
-# Claim with source file to lock subdirectory (prevents conflicts)
-melee-agent claim add lbColl_80008440 --source-file melee/lb/lbcollision.c
+# Claim the function (source file auto-detected)
+melee-agent claim add lbColl_80008440
+# → Auto-detected source file: melee/lb/lbcollision.c
 # → Claimed: lbColl_80008440
 # → Subdirectory: lb
 # → Worktree will be at: melee-worktrees/dir-lb/
