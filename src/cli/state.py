@@ -906,14 +906,17 @@ def state_validate(
                 console.print(f"[yellow]Error parsing report.json: {e}[/yellow]")
 
     # === Apply fixes if requested ===
+    applied_fixes = []
     if fix:
         for issue in issues:
             if 'fix' in issue:
                 fix_data = issue['fix']
                 func_name = issue['function']
+                issue_type = issue['type']
                 # Use upsert to handle both new and existing functions
                 db.upsert_function(func_name, **fix_data)
                 fixes_applied += 1
+                applied_fixes.append((issue_type, func_name, fix_data))
 
     # === Summary stats ===
     with db.connection() as conn:
@@ -978,8 +981,11 @@ def state_validate(
         if len(type_issues) > 5:
             console.print(f"  [dim]... and {len(type_issues) - 5} more[/dim]")
 
-    if fixes_applied:
-        console.print(f"\n[green]Applied {fixes_applied} fixes[/green]")
+    if applied_fixes:
+        console.print(f"\n[bold green]Applied {len(applied_fixes)} fix(es):[/bold green]")
+        for issue_type, func_name, fix_data in applied_fixes:
+            fix_summary = ', '.join(f"{k}={v}" for k, v in fix_data.items())
+            console.print(f"  [green]✓[/green] {func_name} ({issue_type}): {fix_summary}")
     elif any('fix' in i for i in issues):
         fixable = sum(1 for i in issues if 'fix' in i)
         console.print(f"\n[dim]{fixable} issues are auto-fixable. Run with --fix to apply.[/dim]")
