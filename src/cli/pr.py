@@ -21,6 +21,7 @@ from ._common import (
     extract_pr_info,
     get_pr_status_from_gh,
     get_agent_melee_root,
+    db_upsert_function,
 )
 
 # Constants
@@ -63,6 +64,9 @@ def pr_link(
 
     if linked:
         save_completed_functions(completed)
+        # Also update state database
+        for func in linked:
+            db_upsert_function(func, pr_url=pr_url, pr_number=pr_number, status='in_review')
         console.print(f"[green]Linked {len(linked)} functions to PR #{pr_number}[/green]")
         for func in linked:
             console.print(f"  {func}")
@@ -111,15 +115,20 @@ def pr_link_batch(
     completed = load_completed_functions()
     linked = 0
 
+    linked_funcs = []
     for entry in entries:
         func = entry["function"]
         if func in completed:
             completed[func]["pr_url"] = pr_url
             completed[func]["pr_number"] = pr_number
             completed[func]["pr_repo"] = repo
+            linked_funcs.append(func)
             linked += 1
 
     save_completed_functions(completed)
+    # Also update state database
+    for func in linked_funcs:
+        db_upsert_function(func, pr_url=pr_url, pr_number=pr_number, status='in_review')
     console.print(f"[green]Linked {linked} functions to PR #{pr_number}[/green]")
 
 
@@ -144,6 +153,9 @@ def pr_unlink(
 
     if unlinked:
         save_completed_functions(completed)
+        # Also update state database - clear PR fields
+        for func in unlinked:
+            db_upsert_function(func, pr_url=None, pr_number=None, pr_state=None)
         console.print(f"[green]Unlinked {len(unlinked)} functions[/green]")
 
 
