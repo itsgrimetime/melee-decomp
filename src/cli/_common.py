@@ -52,21 +52,31 @@ def get_subdirectory_key(file_path: str) -> str:
     """Map a file path to its subdirectory worktree key.
 
     Args:
-        file_path: Relative path like "melee/ft/chara/ftFox/ftFx_SpecialHi.c"
-                   or "src/melee/ft/chara/ftFox/ftFx_SpecialHi.c"
+        file_path: Path in any of these formats:
+                   - "ft/chara/ftFox/ftFx_SpecialHi.c" (relative to src/melee/)
+                   - "melee/ft/chara/ftFox/ftFx_SpecialHi.c" (relative to melee repo)
+                   - "src/melee/ft/chara/ftFox/ftFx_SpecialHi.c" (relative to melee repo)
+                   - "melee/src/melee/ft/chara/ftFox/ftFx_SpecialHi.c" (project-relative)
 
     Returns:
         Subdirectory key like "ft-chara-ftFox"
     """
-    # Normalize path - remove src/ and melee/ prefixes, get directory only
+    # Normalize path - remove various prefixes, get directory only
     path = Path(file_path)
     parts = list(path.parent.parts)
 
-    # Strip common prefixes
-    if parts and parts[0] == "src":
-        parts = parts[1:]
-    if parts and parts[0] == "melee":
-        parts = parts[1:]
+    # Strip common prefixes in order they might appear
+    # Handle project-relative path: melee/src/melee/...
+    if len(parts) >= 3 and parts[0] == "melee" and parts[1] == "src" and parts[2] == "melee":
+        parts = parts[3:]
+    else:
+        # Handle melee repo relative path: src/melee/... or melee/...
+        if parts and parts[0] == "melee":
+            parts = parts[1:]
+        if parts and parts[0] == "src":
+            parts = parts[1:]
+        if parts and parts[0] == "melee":
+            parts = parts[1:]
 
     if not parts:
         return "root"
