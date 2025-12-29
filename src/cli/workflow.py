@@ -12,7 +12,7 @@ from typing import Annotated, Optional
 import typer
 from rich.console import Console
 
-from ._common import console, DEFAULT_MELEE_ROOT, get_local_api_url, resolve_melee_root, AGENT_ID, get_source_file_from_claim
+from ._common import console, DEFAULT_MELEE_ROOT, get_local_api_url, resolve_melee_root, AGENT_ID, get_source_file_from_claim, db_upsert_function
 from .complete import _load_completed, _save_completed, _get_current_branch
 
 workflow_app = typer.Typer(help="High-level workflow commands (recommended)")
@@ -227,6 +227,18 @@ def workflow_finish(
         "timestamp": time.time(),
     }
     _save_completed(completed)
+
+    # Also update state database with committed status
+    db_upsert_function(
+        function_name,
+        match_percent=match_pct,
+        local_scratch_slug=scratch_slug,
+        is_committed=True,
+        status='committed',
+        branch=branch,
+        worktree_path=str(melee_root),
+        notes=notes or "completed via workflow finish",
+    )
     console.print(f"  Recorded as committed on {branch}")
 
     # Release claim
