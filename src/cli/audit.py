@@ -4,6 +4,8 @@ import json
 import re
 import subprocess
 import time
+from collections import defaultdict
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated, Optional
 
@@ -13,240 +15,515 @@ from rich.table import Table
 from ._common import (
     console,
     DEFAULT_MELEE_ROOT,
-    load_all_tracking_data,
-    categorize_functions,
     load_completed_functions,
     save_completed_functions,
-    load_slug_map,
-    extract_pr_info,
+    db_upsert_function,
 )
 
 audit_app = typer.Typer(help="Audit and recover tracked work")
 
 
-@audit_app.command("status")
-def audit_status(
-    melee_root: Annotated[
-        Path, typer.Option("--melee-root", "-m", help="Path to melee submodule")
-    ] = DEFAULT_MELEE_ROOT,
-    check_prs: Annotated[
-        bool, typer.Option("--check", "-c", help="Check live PR status via gh CLI")
-    ] = False,
-    verbose: Annotated[
-        bool, typer.Option("--verbose", "-v", help="Show all entries")
-    ] = False,
-    output_json: Annotated[
-        bool, typer.Option("--json", help="Output as JSON")
-    ] = False,
-):
-    """Show unified status of all tracked work.
+# ============================================================================
+# Duplicate detection utilities
+# ============================================================================
 
-    Categories (95%+ matches):
-    - Merged: PR merged (done!)
-    - In Review: PR is open, awaiting review
-    - Committed: Committed to repo but no PR yet
-    - Ready: Synced to production, ready for PR
+@dataclass
+class MatchCommit:
+    """A commit that matches a function."""
+    commit_hash: str
+    function_name: str
+    match_percent: float
+    branch: str
+    is_in_upstream: bool = False
+    commit_date: str = ""
+    subject: str = ""
 
-    Issues needing attention:
-    - Lost: 95%+ but not synced (needs recovery)
 
-    Use --check to query live PR status from GitHub.
+@dataclass
+class FunctionDuplicateInfo:
+    """Information about duplicates for a single function."""
+    function_name: str
+    commits: list[MatchCommit] = field(default_factory=list)
+
+    @property
+    def is_duplicate(self) -> bool:
+        return len(self.commits) > 1
+
+    @property
+    def branches(self) -> set[str]:
+        return {c.branch for c in self.commits}
+
+    @property
+    def is_in_upstream(self) -> bool:
+        return any(c.is_in_upstream for c in self.commits)
+
+    @property
+    def upstream_commit(self) -> Optional[MatchCommit]:
+        for c in self.commits:
+            if c.is_in_upstream:
+                return c
+        return None
+
+    @property
+    def pending_commits(self) -> list[MatchCommit]:
+        return [c for c in self.commits if not c.is_in_upstream]
+
+
+def _is_valid_function_name(name: str) -> bool:
+    """Check if a string looks like a valid function name.
+
+    Filters out common words that might appear in commit messages.
+    Valid function names typically:
+    - Contain underscores (like fn_8001234 or ftCo_Function)
+    - Start with common prefixes (ft, fn, gr, it, lb, hsd, etc.)
+    - Contain hex addresses (8001234)
     """
-    data = load_all_tracking_data(melee_root)
-    categories = categorize_functions(data, check_pr_status=check_prs)
-
-    if output_json:
-        # Convert sets to lists for JSON serialization
-        serializable = {}
-        for key, value in categories.items():
-            serializable[key] = value
-        print(json.dumps(serializable, indent=2))
-        return
-
-    console.print("[bold]Tracking Audit Summary[/bold]\n")
-
-    # Progress section
-    table = Table(title="Progress")
-    table.add_column("Status", style="bold")
-    table.add_column("Count", justify="right")
-    table.add_column("Description")
-
-    table.add_row(
-        "[green]Merged[/green]",
-        str(len(categories["merged"])),
-        "PR merged - done!"
-    )
-    table.add_row(
-        "[cyan]In Review[/cyan]",
-        str(len(categories["in_review"])),
-        "PR open, awaiting review"
-    )
-    table.add_row(
-        "[blue]Committed[/blue]",
-        str(len(categories["committed"])),
-        "Committed locally, needs PR"
-    )
-    table.add_row(
-        "[green]Ready[/green]",
-        str(len(categories["ready"])),
-        "Synced + in file, ready for PR"
-    )
-    table.add_row(
-        "[dim]Work in progress[/dim]",
-        str(len(categories["work_in_progress"])),
-        "< 95% match"
-    )
-
-    console.print(table)
-
-    # Issues section
-    issues_count = len(categories["lost_high_match"])
-
-    if issues_count > 0:
-        console.print()
-        issues_table = Table(title="Issues Needing Attention")
-        issues_table.add_column("Issue", style="bold")
-        issues_table.add_column("Count", justify="right")
-        issues_table.add_column("Fix")
-
-        issues_table.add_row(
-            "[red]Lost (95%+)[/red]",
-            str(len(categories["lost_high_match"])),
-            "sync production"
-        )
-
-        console.print(issues_table)
-
-    # Verbose details
-    if verbose or categories["lost_high_match"]:
-        if categories["lost_high_match"]:
-            console.print("\n[red bold]Lost matches needing recovery:[/red bold]")
-            for entry in categories["lost_high_match"][:10]:
-                console.print(f"  {entry['function']}: {entry['match_percent']}% (local:{entry['local_slug']})")
-            if len(categories["lost_high_match"]) > 10:
-                console.print(f"  [dim]... and {len(categories['lost_high_match']) - 10} more[/dim]")
-
-    if verbose and categories["in_review"]:
-        console.print("\n[cyan bold]In Review:[/cyan bold]")
-        for entry in categories["in_review"][:10]:
-            pr_url = entry.get("pr_url", "")
-            console.print(f"  {entry['function']}: {entry['match_percent']}% - {pr_url}")
-        if len(categories["in_review"]) > 10:
-            console.print(f"  [dim]... and {len(categories['in_review']) - 10} more[/dim]")
-
-
-@audit_app.command("recover")
-def audit_recover(
-    melee_root: Annotated[
-        Path, typer.Option("--melee-root", "-m", help="Path to melee submodule")
-    ] = DEFAULT_MELEE_ROOT,
-    limit: Annotated[
-        int, typer.Option("--limit", "-n", help="Maximum entries to show")
-    ] = 20,
-):
-    """Show lost scratches that need recovery.
-
-    Lists 95%+ matches that aren't synced to production.
-    Use 'sync production' to push these to production decomp.me.
-    """
-    data = load_all_tracking_data(melee_root)
-    categories = categorize_functions(data)
-
-    entries = categories["lost_high_match"][:limit]
-    if not entries:
-        console.print("[green]No lost scratches needing recovery[/green]")
-        return
-
-    console.print(f"[bold]Lost scratches ({len(entries)} total):[/bold]\n")
-
-    for entry in entries:
-        local_slug = entry["local_slug"]
-        func = entry["function"]
-        pct = entry["match_percent"]
-
-        if local_slug:
-            console.print(f"  {func}: {pct:.1f}% (local:{local_slug})")
-        else:
-            console.print(f"  {func}: {pct:.1f}% [dim](no slug)[/dim]")
-
-    console.print("\n[bold]Next step:[/bold] Run 'melee-agent sync production' to push to production")
-
-
-@audit_app.command("list")
-def audit_list(
-    category: Annotated[
-        str, typer.Argument(help="Category: merged, review, committed, ready, lost, wip, all")
-    ] = "all",
-    melee_root: Annotated[
-        Path, typer.Option("--melee-root", "-m", help="Path to melee submodule")
-    ] = DEFAULT_MELEE_ROOT,
-    min_match: Annotated[
-        float, typer.Option("--min-match", help="Minimum match percentage")
-    ] = 0.0,
-    output_json: Annotated[
-        bool, typer.Option("--json", help="Output as JSON")
-    ] = False,
-):
-    """List tracked functions by category.
-
-    Categories:
-    - merged: PR merged (done)
-    - review: PR open, in review
-    - committed: Committed but no PR
-    - ready: Synced to production, ready for PR
-    - lost: 95%+ but not synced
-    - wip: Work in progress (<95%)
-    - all: Everything
-    """
-    data = load_all_tracking_data(melee_root)
-    categories = categorize_functions(data)
-
-    cat_map = {
-        "merged": "merged",
-        "review": "in_review",
-        "committed": "committed",
-        "ready": "ready",
-        "lost": "lost_high_match",
-        "wip": "work_in_progress",
+    # Common words that appear in commit messages but aren't functions
+    common_words = {
+        'some', 'all', 'most', 'several', 'the', 'and', 'or', 'a', 'an',
+        'many', 'few', 'various', 'multiple', 'other', 'more', 'less',
+        'functions', 'function', 'match', 'matched', 'matching', 'matches',
+        'pass', 'ongoing', 'partially', 'modules', 'module', 'file', 'files',
+        'this', 'that', 'these', 'those', 'with', 'from', 'into', 'onto',
+        'work', 'works', 'working', 'wip', 'done', 'complete', 'completed',
     }
 
-    if category == "all":
-        entries = []
-        for cat_entries in categories.values():
-            entries.extend(cat_entries)
-    elif category in cat_map:
-        entries = categories[cat_map[category]]
-    else:
-        console.print(f"[red]Unknown category: {category}[/red]")
-        console.print("Valid: merged, review, committed, ready, synced, lost, wip, all")
-        raise typer.Exit(1)
+    name_lower = name.lower()
+    if name_lower in common_words:
+        return False
 
-    entries = [e for e in entries if e["match_percent"] >= min_match]
-    entries.sort(key=lambda x: -x["match_percent"])
+    # Must have at least one of: underscore, or look like a hex address, or valid prefix
+    if '_' in name:
+        return True
 
-    if output_json:
-        print(json.dumps(entries, indent=2))
+    # Check for hex-address-like patterns (e.g., 80012345)
+    if re.match(r'^[0-9a-fA-F]{6,8}$', name):
+        return True
+
+    # Check for known Melee function prefixes
+    valid_prefixes = ('ft', 'fn', 'gr', 'it', 'lb', 'hsd', 'gm', 'if', 'mn', 'db', 'vi', 'pl')
+    if name_lower.startswith(valid_prefixes):
+        return True
+
+    return False
+
+
+def _parse_function_from_commit_message(subject: str) -> list[tuple[str, float]]:
+    """Parse function name(s) and match percentage from commit message.
+
+    Returns list of (function_name, match_percent) tuples.
+    """
+    results = []
+    seen = set()
+
+    def add_if_valid(func: str, pct: float):
+        if func not in seen and _is_valid_function_name(func):
+            seen.add(func)
+            results.append((func, pct))
+
+    # Pattern: "Match func_name (100%)" or "Match func_name (95.5%)"
+    pattern1 = re.compile(r'Match\s+(\w+)\s*\((\d+(?:\.\d+)?)%\)')
+    for match in pattern1.finditer(subject):
+        func = match.group(1)
+        pct = float(match.group(2))
+        add_if_valid(func, pct)
+
+    # Pattern: "Match func1 and func2 (98.1%)" - multiple functions
+    pattern2 = re.compile(r'Match\s+(\w+)\s+and\s+(\w+)\s*\((\d+(?:\.\d+)?)%\)')
+    for match in pattern2.finditer(subject):
+        pct = float(match.group(3))
+        add_if_valid(match.group(1), pct)
+        add_if_valid(match.group(2), pct)
+
+    # Pattern: "Match func_name" without percentage (assume 100%)
+    if not results:
+        pattern3 = re.compile(r'^[a-f0-9]+\s+Match\s+(\w+)(?:\s|$)')
+        match = pattern3.match(subject)
+        if match:
+            add_if_valid(match.group(1), 100.0)
+
+    return results
+
+
+def _get_upstream_commits(melee_root: Path) -> set[str]:
+    """Get set of commit hashes in upstream/master."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-list", "upstream/master"],
+            cwd=melee_root,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode == 0:
+            return set(result.stdout.strip().split('\n'))
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+    return set()
+
+
+def _get_all_match_commits(melee_root: Path) -> dict[str, FunctionDuplicateInfo]:
+    """Scan all branches for Match commits and group by function."""
+    functions: dict[str, FunctionDuplicateInfo] = {}
+
+    # Get upstream commits for comparison
+    upstream_commits = _get_upstream_commits(melee_root)
+
+    # Get all Match commits from all branches
+    try:
+        result = subprocess.run(
+            [
+                "git", "log", "--all", "--oneline",
+                "--format=%h|%s|%D|%ci",
+                "--grep=Match",
+                "--", "src/melee/*.c"
+            ],
+            cwd=melee_root,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if result.returncode != 0:
+            return functions
+
+        # Build a commit -> branches mapping
+        commit_branches: dict[str, list[str]] = defaultdict(list)
+        branch_result = subprocess.run(
+            ["git", "branch", "-a", "--contains", "--format=%(refname:short)"],
+            cwd=melee_root,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        # This is slow, so we'll use a different approach
+
+        # Get all branch heads
+        branch_heads: dict[str, str] = {}
+        br_result = subprocess.run(
+            ["git", "for-each-ref", "--format=%(objectname:short) %(refname:short)", "refs/heads/"],
+            cwd=melee_root,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if br_result.returncode == 0:
+            for line in br_result.stdout.strip().split('\n'):
+                if line:
+                    parts = line.split(' ', 1)
+                    if len(parts) == 2:
+                        branch_heads[parts[0]] = parts[1]
+
+        for line in result.stdout.strip().split('\n'):
+            if not line or '|' not in line:
+                continue
+
+            parts = line.split('|')
+            if len(parts) < 4:
+                continue
+
+            commit_hash = parts[0]
+            subject = parts[1]
+            refs = parts[2] if len(parts) > 2 else ""
+            commit_date = parts[3] if len(parts) > 3 else ""
+
+            # Determine which branch this commit is on
+            # First check refs field
+            branch = "unknown"
+            if refs:
+                # Parse refs like "HEAD -> branch, origin/branch, tag: v1.0"
+                for ref in refs.split(','):
+                    ref = ref.strip()
+                    if '->' in ref:
+                        ref = ref.split('->')[1].strip()
+                    if ref.startswith('origin/'):
+                        ref = ref[7:]
+                    if ref and not ref.startswith('tag:'):
+                        branch = ref
+                        break
+
+            # If no branch from refs, try to find which branch contains this commit
+            if branch == "unknown":
+                # Check agent branches first
+                check_result = subprocess.run(
+                    ["git", "branch", "-a", "--contains", commit_hash, "--format=%(refname:short)"],
+                    cwd=melee_root,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                if check_result.returncode == 0 and check_result.stdout.strip():
+                    branches = check_result.stdout.strip().split('\n')
+                    # Prefer agent branches
+                    for b in branches:
+                        if b.startswith('agent/'):
+                            branch = b
+                            break
+                    if branch == "unknown" and branches:
+                        branch = branches[0]
+
+            is_upstream = commit_hash in upstream_commits
+
+            # Parse function names from subject
+            parsed_funcs = _parse_function_from_commit_message(f"{commit_hash} {subject}")
+
+            for func_name, match_pct in parsed_funcs:
+                if func_name not in functions:
+                    functions[func_name] = FunctionDuplicateInfo(function_name=func_name)
+
+                # Check if we already have this exact commit
+                existing_hashes = {c.commit_hash for c in functions[func_name].commits}
+                if commit_hash not in existing_hashes:
+                    functions[func_name].commits.append(MatchCommit(
+                        commit_hash=commit_hash,
+                        function_name=func_name,
+                        match_percent=match_pct,
+                        branch=branch,
+                        is_in_upstream=is_upstream,
+                        commit_date=commit_date,
+                        subject=subject,
+                    ))
+
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        console.print(f"[yellow]Warning: {e}[/yellow]")
+
+    return functions
+
+
+@audit_app.command("duplicates")
+def audit_duplicates(
+    melee_root: Annotated[
+        Path, typer.Option("--melee-root", "-m", help="Path to melee submodule")
+    ] = DEFAULT_MELEE_ROOT,
+    show_all: Annotated[
+        bool, typer.Option("--all", "-a", help="Show all functions, not just duplicates")
+    ] = False,
+    show_safe: Annotated[
+        bool, typer.Option("--safe", "-s", help="Show duplicates that are safe to ignore (already in upstream)")
+    ] = False,
+    output_json: Annotated[
+        bool, typer.Option("--json", help="Output as JSON")
+    ] = False,
+    verbose: Annotated[
+        bool, typer.Option("--verbose", "-v", help="Show detailed commit info")
+    ] = False,
+):
+    """Find duplicate function matches across branches and worktrees.
+
+    Scans all branches (including agent worktrees) for commits that match the
+    same function. This helps identify:
+
+    1. CONFLICTS: Same function matched in multiple pending branches (needs resolution)
+    2. REDUNDANT: Same function matched in pending branch but already in upstream
+    3. SAFE: Multiple commits for same function, but all in upstream (historical)
+
+    Use this to clean up after incidents where agents committed to wrong branches.
+
+    Examples:
+        melee-agent audit duplicates              # Show conflicts needing attention
+        melee-agent audit duplicates --all        # Show all matched functions
+        melee-agent audit duplicates --safe       # Include already-merged duplicates
+        melee-agent audit duplicates --json       # Output for scripting
+    """
+    if not output_json:
+        console.print("[bold]Scanning for duplicate matches...[/bold]\n")
+
+    functions = _get_all_match_commits(melee_root)
+
+    if not functions:
+        if output_json:
+            print(json.dumps({"summary": {"total_functions": 0}, "conflicts": [], "redundant": []}))
+        else:
+            console.print("[yellow]No Match commits found[/yellow]")
         return
 
-    table = Table(title=f"Functions: {category}")
-    table.add_column("Function", style="cyan")
-    table.add_column("Match %", justify="right")
-    table.add_column("Local Slug")
-    table.add_column("Prod Slug")
-    table.add_column("Notes", style="dim")
+    # Categorize duplicates
+    conflicts: list[FunctionDuplicateInfo] = []  # Multiple pending branches
+    redundant: list[FunctionDuplicateInfo] = []  # Pending but already upstream
+    safe: list[FunctionDuplicateInfo] = []       # All in upstream
+    unique: list[FunctionDuplicateInfo] = []     # Only one commit
 
-    for entry in entries[:50]:
-        table.add_row(
-            entry["function"],
-            f"{entry['match_percent']:.1f}%",
-            entry["local_slug"] or "-",
-            entry["production_slug"] or "-",
-            entry["notes"][:30] if entry["notes"] else ""
+    for func_info in functions.values():
+        if not func_info.is_duplicate:
+            unique.append(func_info)
+            continue
+
+        if func_info.is_in_upstream:
+            pending = func_info.pending_commits
+            if pending:
+                # Has both upstream and pending - redundant work
+                redundant.append(func_info)
+            else:
+                # All commits in upstream - safe historical duplicate
+                safe.append(func_info)
+        else:
+            # Multiple pending commits, none in upstream - conflict!
+            conflicts.append(func_info)
+
+    # JSON output
+    if output_json:
+        output = {
+            "summary": {
+                "total_functions": len(functions),
+                "unique": len(unique),
+                "conflicts": len(conflicts),
+                "redundant": len(redundant),
+                "safe": len(safe),
+            },
+            "conflicts": [
+                {
+                    "function": f.function_name,
+                    "commits": [
+                        {
+                            "hash": c.commit_hash,
+                            "branch": c.branch,
+                            "match_percent": c.match_percent,
+                            "date": c.commit_date,
+                        }
+                        for c in f.commits
+                    ],
+                }
+                for f in conflicts
+            ],
+            "redundant": [
+                {
+                    "function": f.function_name,
+                    "upstream_commit": f.upstream_commit.commit_hash if f.upstream_commit else None,
+                    "pending_branches": [c.branch for c in f.pending_commits],
+                }
+                for f in redundant
+            ],
+        }
+        print(json.dumps(output, indent=2))
+        return
+
+    # Summary table
+    summary = Table(title="Duplicate Analysis Summary")
+    summary.add_column("Category", style="bold")
+    summary.add_column("Count", justify="right")
+    summary.add_column("Description")
+
+    summary.add_row(
+        "[red]Conflicts[/red]",
+        str(len(conflicts)),
+        "Multiple pending branches - needs resolution"
+    )
+    summary.add_row(
+        "[yellow]Redundant[/yellow]",
+        str(len(redundant)),
+        "Pending work already in upstream"
+    )
+    if show_safe:
+        summary.add_row(
+            "[green]Safe[/green]",
+            str(len(safe)),
+            "Historical duplicates (all merged)"
         )
+    summary.add_row(
+        "[dim]Unique[/dim]",
+        str(len(unique)),
+        "Single commit per function"
+    )
+    summary.add_row(
+        "[bold]Total[/bold]",
+        str(len(functions)),
+        "Total matched functions found"
+    )
 
-    console.print(table)
-    if len(entries) > 50:
-        console.print(f"[dim]... and {len(entries) - 50} more[/dim]")
+    console.print(summary)
+    console.print()
+
+    # Show conflicts (always)
+    if conflicts:
+        console.print("[bold red]⚠ CONFLICTS - Same function in multiple pending branches:[/bold red]\n")
+
+        for func_info in sorted(conflicts, key=lambda f: -len(f.commits)):
+            console.print(f"[bold cyan]{func_info.function_name}[/bold cyan] ({len(func_info.commits)} commits)")
+            for commit in func_info.commits:
+                branch_style = "yellow" if commit.branch.startswith("agent/") else "dim"
+                console.print(
+                    f"  [{branch_style}]{commit.branch}[/{branch_style}] "
+                    f"{commit.commit_hash} ({commit.match_percent:.0f}%)"
+                )
+                if verbose:
+                    console.print(f"    [dim]{commit.commit_date}[/dim]")
+            console.print()
+
+        console.print("[bold]Resolution options:[/bold]")
+        console.print("  1. Keep best match and drop others")
+        console.print("  2. Cherry-pick preferred commit to batch branch")
+        console.print("  3. Reset agent branches that have duplicate work")
+        console.print()
+
+    # Show redundant work
+    if redundant:
+        console.print("[bold yellow]⚡ REDUNDANT - Already in upstream but also pending:[/bold yellow]\n")
+
+        for func_info in redundant[:20]:  # Limit display
+            upstream = func_info.upstream_commit
+            pending_branches = [c.branch for c in func_info.pending_commits]
+            console.print(
+                f"[cyan]{func_info.function_name}[/cyan]: "
+                f"upstream={upstream.commit_hash if upstream else '?'}, "
+                f"also in: {', '.join(pending_branches)}"
+            )
+
+        if len(redundant) > 20:
+            console.print(f"  [dim]... and {len(redundant) - 20} more[/dim]")
+
+        console.print()
+        console.print("[bold]These pending branches have work that's already merged.[/bold]")
+        console.print("They can be safely reset or pruned.\n")
+
+    # Show safe duplicates if requested
+    if show_safe and safe:
+        console.print("[bold green]✓ SAFE - Historical duplicates (all merged):[/bold green]\n")
+
+        for func_info in safe[:10]:
+            branches = list(func_info.branches)[:3]
+            console.print(f"  {func_info.function_name}: {', '.join(branches)}")
+
+        if len(safe) > 10:
+            console.print(f"  [dim]... and {len(safe) - 10} more[/dim]")
+        console.print()
+
+    # Show unique functions if --all
+    if show_all and unique:
+        console.print("[bold]Unique matches (no duplicates):[/bold]\n")
+
+        table = Table()
+        table.add_column("Function", style="cyan")
+        table.add_column("Branch")
+        table.add_column("Status")
+        table.add_column("Hash", style="dim")
+
+        for func_info in sorted(unique, key=lambda f: f.function_name)[:50]:
+            commit = func_info.commits[0]
+            status = "[green]merged[/green]" if commit.is_in_upstream else "[yellow]pending[/yellow]"
+            table.add_row(
+                func_info.function_name,
+                commit.branch,
+                status,
+                commit.commit_hash,
+            )
+
+        console.print(table)
+        if len(unique) > 50:
+            console.print(f"[dim]... and {len(unique) - 50} more[/dim]")
+
+    # Final summary
+    if not conflicts and not redundant:
+        console.print("[bold green]✓ No duplicate conflicts found![/bold green]")
+    elif conflicts:
+        console.print(f"[bold red]Found {len(conflicts)} functions with conflicting commits[/bold red]")
+        console.print("Run with --json to get machine-readable output for scripting")
+
+
+
+# NOTE: The following commands have been moved to 'melee-agent state':
+#   - audit status  -> state status
+#   - audit recover -> state status --category matched
+#   - audit list    -> state status
+#   - audit rebuild -> state rebuild
 
 
 def _list_github_prs(repo: str, author: str, state: str, limit: int) -> list[dict]:
@@ -440,190 +717,20 @@ def audit_discover_prs(
 
     if not dry_run and (total_linked > 0 or total_updated > 0):
         save_completed_functions(completed)
-        console.print(f"\n[green]Saved changes to completed_functions.json[/green]")
+
+        # Also update state database
+        for func_name, info in completed.items():
+            if info.get("pr_url"):
+                db_upsert_function(
+                    func_name,
+                    pr_url=info.get("pr_url"),
+                    pr_number=info.get("pr_number"),
+                    pr_state=info.get("pr_state"),
+                    status='merged' if info.get("pr_state") == "MERGED" else None,
+                )
+
+        console.print(f"\n[green]Saved changes to completed_functions.json and state database[/green]")
     elif dry_run:
         console.print(f"\n[cyan](dry run - no changes saved)[/cyan]")
 
 
-@audit_app.command("rebuild")
-def audit_rebuild(
-    melee_root: Annotated[
-        Path, typer.Option("--melee-root", "-m", help="Path to melee submodule")
-    ] = DEFAULT_MELEE_ROOT,
-    author: Annotated[
-        str, typer.Option("--author", "-a", help="Author for GitHub queries")
-    ] = "itsgrimetime",
-    skip_github: Annotated[
-        bool, typer.Option("--skip-github", help="Skip GitHub PR discovery")
-    ] = False,
-    skip_git: Annotated[
-        bool, typer.Option("--skip-git", help="Skip local git commit analysis")
-    ] = False,
-    dry_run: Annotated[
-        bool, typer.Option("--dry-run", help="Show what would change")
-    ] = False,
-    verbose: Annotated[
-        bool, typer.Option("--verbose", "-v", help="Show detailed progress")
-    ] = False,
-    output_json: Annotated[
-        bool, typer.Option("--json", help="Output summary as JSON")
-    ] = False,
-):
-    """Rebuild tracking data from all sources.
-
-    Reconciles state from:
-    - slug_map.json (production slug mappings)
-    - GitHub PRs (if --skip-github not set)
-    - Local git commits (if --skip-git not set)
-
-    Updates completed_functions.json with consolidated data.
-
-    Example: melee-agent audit rebuild --dry-run --verbose
-    """
-    stats = {
-        "slug_map_merged": 0,
-        "github_prs_found": 0,
-        "github_functions_linked": 0,
-        "git_committed_found": 0,
-        "errors": [],
-    }
-
-    completed = load_completed_functions()
-    initial_count = len(completed)
-
-    if verbose:
-        console.print("[bold]Phase 1: Merging from slug_map.json[/bold]")
-
-    # Step 1: Merge from slug_map
-    slug_map = load_slug_map()
-    for prod_slug, info in slug_map.items():
-        func = info.get("function")
-        if not func:
-            continue
-
-        if func not in completed:
-            completed[func] = {
-                "match_percent": info.get("match_percent", 100.0),
-                "scratch_slug": info.get("local_slug", ""),
-                "production_slug": prod_slug,
-                "committed": False,
-                "notes": "Recovered from slug_map",
-                "timestamp": time.time(),
-            }
-            stats["slug_map_merged"] += 1
-            if verbose:
-                console.print(f"  + {func} (from slug_map)")
-        elif not completed[func].get("production_slug"):
-            completed[func]["production_slug"] = prod_slug
-            completed[func]["scratch_slug"] = info.get("local_slug",
-                completed[func].get("scratch_slug", ""))
-            stats["slug_map_merged"] += 1
-            if verbose:
-                console.print(f"  ~ {func} (added production_slug)")
-
-    if verbose:
-        console.print(f"  Merged {stats['slug_map_merged']} entries\n")
-
-    # Step 2: Discover from GitHub
-    if not skip_github:
-        if verbose:
-            console.print("[bold]Phase 2: Discovering from GitHub PRs[/bold]")
-
-        try:
-            for state in ["merged", "open"]:
-                prs = _list_github_prs("doldecomp/melee", author, state, 100)
-                stats["github_prs_found"] += len(prs)
-
-                for pr in prs:
-                    pr_url = pr.get("url", "")
-                    pr_number = pr.get("number", 0)
-                    is_merged = pr.get("mergedAt") is not None or state == "merged"
-
-                    functions = _extract_functions_from_pr(pr)
-                    for func_info in functions:
-                        func = func_info["function"]
-                        if func in completed:
-                            current = completed[func]
-                            if not current.get("pr_url"):
-                                current["pr_url"] = pr_url
-                                current["pr_number"] = pr_number
-                                current["pr_repo"] = "doldecomp/melee"
-                                stats["github_functions_linked"] += 1
-                                if verbose:
-                                    console.print(f"  → {func} linked to PR #{pr_number}")
-
-                            if is_merged and current.get("pr_state") != "MERGED":
-                                current["pr_state"] = "MERGED"
-
-            if verbose:
-                console.print(f"  Found {stats['github_prs_found']} PRs, linked {stats['github_functions_linked']} functions\n")
-        except Exception as e:
-            stats["errors"].append(f"GitHub: {e}")
-            if verbose:
-                console.print(f"  [yellow]Error: {e}[/yellow]\n")
-
-    # Step 3: Analyze git commits
-    if not skip_git:
-        if verbose:
-            console.print("[bold]Phase 3: Analyzing git commits[/bold]")
-
-        try:
-            # Get list of functions that might have commits
-            functions_to_check = [
-                func for func, info in completed.items()
-                if info.get("match_percent", 0) >= 95 and not info.get("committed")
-            ]
-
-            for func in functions_to_check:
-                # Check if function appears in commit messages in melee repo
-                cmd = [
-                    "git", "log", "--oneline", "--all", "-1",
-                    f"--grep={func}", "--", "src/melee/"
-                ]
-                try:
-                    result = subprocess.run(
-                        cmd, cwd=melee_root, capture_output=True, text=True, timeout=5
-                    )
-                    if result.returncode == 0 and result.stdout.strip():
-                        completed[func]["committed"] = True
-                        stats["git_committed_found"] += 1
-                        if verbose:
-                            commit = result.stdout.strip().split()[0]
-                            console.print(f"  ✓ {func} (commit {commit})")
-                except subprocess.TimeoutExpired:
-                    pass
-
-            if verbose:
-                console.print(f"  Found {stats['git_committed_found']} committed functions\n")
-        except Exception as e:
-            stats["errors"].append(f"Git: {e}")
-            if verbose:
-                console.print(f"  [yellow]Error: {e}[/yellow]\n")
-
-    # Output results
-    if output_json:
-        print(json.dumps(stats, indent=2))
-        return
-
-    console.print("[bold]Rebuild Summary[/bold]")
-    console.print(f"  Initial entries: {initial_count}")
-    console.print(f"  Final entries: {len(completed)}")
-    console.print()
-    console.print(f"  From slug_map: {stats['slug_map_merged']}")
-    if not skip_github:
-        console.print(f"  GitHub PRs scanned: {stats['github_prs_found']}")
-        console.print(f"  Functions linked to PRs: {stats['github_functions_linked']}")
-    if not skip_git:
-        console.print(f"  Functions marked committed: {stats['git_committed_found']}")
-
-    if stats["errors"]:
-        console.print()
-        console.print("[yellow]Errors encountered:[/yellow]")
-        for err in stats["errors"]:
-            console.print(f"  - {err}")
-
-    if not dry_run:
-        save_completed_functions(completed)
-        console.print(f"\n[green]Saved changes to completed_functions.json[/green]")
-    else:
-        console.print(f"\n[cyan](dry run - no changes saved)[/cyan]")
