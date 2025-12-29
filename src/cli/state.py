@@ -823,11 +823,26 @@ def state_validate(
                                 # Function improved from baseline and isn't tracked
                                 if current_pct > baseline_pct and func_name not in db_by_name:
                                     untracked_improved += 1
+                                    # Determine status based on match percentage
+                                    if current_pct >= 100:
+                                        new_status = 'committed'
+                                        is_committed = True
+                                    elif current_pct >= 95:
+                                        new_status = 'matched'
+                                        is_committed = False
+                                    else:
+                                        new_status = 'in_progress'
+                                        is_committed = False
                                     issues.append({
                                         'type': 'improved_not_tracked',
                                         'severity': 'warning',
                                         'function': func_name,
                                         'message': f'Improved {baseline_pct:.1f}% -> {current_pct:.1f}% but not tracked in DB',
+                                        'fix': {
+                                            'match_percent': current_pct,
+                                            'status': new_status,
+                                            'is_committed': is_committed,
+                                        },
                                     })
 
                             console.print(f"[dim]  {untracked_improved} improved functions not tracked in DB[/dim]")
@@ -846,11 +861,8 @@ def state_validate(
             if 'fix' in issue:
                 fix_data = issue['fix']
                 func_name = issue['function']
-                with db.connection() as conn:
-                    sets = ', '.join(f"{k} = ?" for k in fix_data.keys())
-                    values = list(fix_data.values()) + [func_name]
-                    conn.execute(f"UPDATE functions SET {sets}, updated_at = ? WHERE function_name = ?",
-                                 values[:-1] + [time.time(), func_name])
+                # Use upsert to handle both new and existing functions
+                db.upsert_function(func_name, **fix_data)
                 fixes_applied += 1
 
     # === Summary stats ===
