@@ -31,12 +31,6 @@ def workflow_finish(
     full_code: Annotated[
         bool, typer.Option("--full-code", help="Use full scratch code (including struct defs)")
     ] = False,
-    min_match: Annotated[
-        float, typer.Option("--min-match", help="Minimum match percentage (default: 95.0)")
-    ] = 95.0,
-    force: Annotated[
-        bool, typer.Option("--force", "-f", help="Force commit even if below min-match threshold")
-    ] = False,
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Test without committing (runs verification only)")
     ] = False,
@@ -51,11 +45,10 @@ def workflow_finish(
     the two commands separately.
 
     Example workflow:
-        1. Match a function in decomp.me to 95%+
+        1. Improve a function's match in decomp.me
         2. Run: melee-agent workflow finish <function> <slug>
 
     This will:
-        - Verify the scratch meets the match threshold
         - Run a dry-run to check for compilation errors
         - Apply the code to the melee repo
         - Record the function as committed in your tracking file
@@ -101,15 +94,6 @@ def workflow_finish(
 
             console.print(f"\n[bold]Finishing {function_name}[/bold]")
             console.print(f"Scratch: {scratch_slug} ({match_pct:.1f}% match)")
-
-            # Verify match threshold
-            if match_pct < min_match and not force:
-                console.print(f"\n[red]Match is only {match_pct:.1f}% (minimum: {min_match:.1f}%)[/red]")
-                console.print("[dim]Use --force to bypass, or improve the match first[/dim]")
-                raise typer.Exit(1)
-
-            if match_pct < min_match:
-                console.print(f"[yellow]Warning: Forcing at {match_pct:.1f}% (below {min_match:.1f}%)[/yellow]")
 
             # Step 1: Find target file
             console.print("\n[bold]Step 1:[/bold] Locating target file...")
@@ -160,9 +144,8 @@ def workflow_finish(
                     if callers_needing_update:
                         console.print(format_caller_updates_needed(callers_needing_update, function_name))
 
-                if not force:
-                    console.print("\n[red]Header signature mismatch - fix header and callers first, or use --force[/red]")
-                    raise typer.Exit(1)
+                console.print("\n[red]Header signature mismatch - fix header and callers first[/red]")
+                raise typer.Exit(1)
 
             # Step 3: Test compilation
             console.print("\n[bold]Step 3:[/bold] Testing compilation...")

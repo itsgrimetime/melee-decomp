@@ -39,12 +39,6 @@ def commit_apply(
     full_code: Annotated[
         bool, typer.Option("--full-code", help="Use full scratch code (including struct defs)")
     ] = False,
-    min_match: Annotated[
-        float, typer.Option("--min-match", help="Minimum match percentage (default: 95.0)")
-    ] = 95.0,
-    force: Annotated[
-        bool, typer.Option("--force", "-f", help="Force commit even if below min-match threshold")
-    ] = False,
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Show what would be changed without applying")
     ] = False,
@@ -55,8 +49,6 @@ def commit_apply(
     discarding any helper struct definitions. Use --full-code to include
     the complete scratch code (useful when new types are needed).
 
-    Use --min-match to adjust the minimum match percentage (default: 95%).
-    Use --force to bypass the match check entirely (use with caution).
     Use --dry-run to preview changes and verify compilation without modifying files.
 
     If --melee-root is not specified, automatically uses the agent's worktree
@@ -86,17 +78,7 @@ def commit_apply(
             else:
                 match_pct = 100.0 if scratch.score == 0 else 0.0
 
-            # Verify it meets the minimum match requirement
-            if match_pct < min_match and not force:
-                console.print(f"[red]Scratch is only {match_pct:.1f}% match (minimum: {min_match:.1f}%)[/red]")
-                console.print("[dim]Use --force to bypass this check, or --min-match to adjust threshold[/dim]")
-                raise typer.Exit(1)
-
-            if scratch.score != 0:
-                if force and match_pct < min_match:
-                    console.print(f"[yellow]⚠ Forcing commit at {match_pct:.1f}% match (below {min_match:.1f}% threshold)[/yellow]")
-                else:
-                    console.print(f"[yellow]Note: Scratch is {match_pct:.1f}% match (not 100%)[/yellow]")
+            console.print(f"Applying {function_name} ({match_pct:.1f}% match)")
 
             # Dry-run mode: preview changes and verify compilation
             if dry_run:

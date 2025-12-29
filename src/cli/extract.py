@@ -303,21 +303,6 @@ def extract_get(
             console.print("[red]Cannot create scratch - ASM not available[/red]")
             raise typer.Exit(1)
 
-        # Check for duplicate scratch creation (prevent redundant API calls)
-        if check_duplicate_operation("scratch_create", function_name, warn=False):
-            # Check if we already have a scratch for this function
-            from src.cli.scratch import _load_scratch_tokens
-            tokens = _load_scratch_tokens()
-            existing_slug = None
-            for slug in tokens:
-                # Simple heuristic: check if function name is in scratch slug's context
-                # (decomp.me uses function name as the scratch name)
-                if slug:  # Just check we have saved tokens
-                    existing_slug = slug
-                    break
-            if existing_slug:
-                console.print(f"[yellow]Note:[/yellow] A scratch was recently created. Use existing scratch if appropriate.")
-
         ctx_path = _get_context_file(source_file=func.file_path)
         if not ctx_path.exists():
             console.print(f"[red]Context file not found: {ctx_path}[/red]")
@@ -327,9 +312,53 @@ def extract_get(
         melee_context = ctx_path.read_text()
         console.print(f"\n[dim]Loaded {len(melee_context):,} bytes of context[/dim]")
 
-        async def create():
+        async def find_or_create():
             from src.client import DecompMeAPIClient, ScratchCreate
             async with DecompMeAPIClient(base_url=api_url) as client:
+                # First, search for existing scratches with this function name
+                console.print(f"[dim]Searching for existing scratches...[/dim]")
+                existing = await client.list_scratches(search=func.name, page_size=20)
+
+                # Filter to exact name matches and find the best one
+                best_scratch = None
+                best_match_pct = -1.0
+
+                for s in existing:
+                    if s.name == func.name and s.max_score > 0:
+                        match_pct = (s.max_score - s.score) / s.max_score * 100
+                        if match_pct > best_match_pct:
+                            best_match_pct = match_pct
+                            best_scratch = s
+
+                # If we found an existing scratch, check its family for even better matches
+                if best_scratch:
+                    console.print(f"[dim]Found existing scratch at {best_match_pct:.1f}%, checking family...[/dim]")
+                    try:
+                        family = await client.get_scratch_family(best_scratch.slug)
+                        for s in family:
+                            if s.max_score > 0:
+                                match_pct = (s.max_score - s.score) / s.max_score * 100
+                                if match_pct > best_match_pct:
+                                    best_match_pct = match_pct
+                                    best_scratch = s
+                    except Exception:
+                        pass  # Family lookup failed, use what we have
+
+                # If we found a good existing scratch, fork it to continue
+                if best_scratch and best_match_pct > 0:
+                    console.print(f"[green]Found existing scratch at {best_match_pct:.1f}% - forking to continue[/green]")
+                    scratch = await client.fork_scratch(best_scratch.slug)
+                    if scratch.claim_token:
+                        from src.cli.scratch import _save_scratch_token
+                        _save_scratch_token(scratch.slug, scratch.claim_token)
+                        try:
+                            await client.claim_scratch(scratch.slug, scratch.claim_token)
+                        except Exception:
+                            pass
+                    return scratch, best_match_pct
+
+                # No existing scratch found - create new
+                console.print(f"[dim]No existing scratches found, creating new...[/dim]")
                 scratch = await client.create_scratch(
                     ScratchCreate(
                         name=func.name,
@@ -351,9 +380,10 @@ def extract_get(
                     except Exception as e:
                         console.print(f"[yellow]Warning: Could not claim scratch: {e}[/yellow]")
 
-                return scratch
+                return scratch, 0.0
 
-        scratch = asyncio.run(create())
-        # Record the operation for duplicate detection
-        check_duplicate_operation("scratch_create", function_name, warn=False)
-        console.print(f"[green]Created scratch:[/green] {api_url}/scratch/{scratch.slug}")
+        scratch, starting_pct = asyncio.run(find_or_create())
+        if starting_pct > 0:
+            console.print(f"[green]Continuing from {starting_pct:.1f}% match:[/green] {api_url}/scratch/{scratch.slug}")
+        else:
+            console.print(f"[green]Created scratch:[/green] {api_url}/scratch/{scratch.slug}")

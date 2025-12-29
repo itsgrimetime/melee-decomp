@@ -105,11 +105,12 @@ History: 45% → 71.5% → 85%  # Shows your progress over iterations
 ### Step 4: Know When to Stop
 
 - **Match achieved:** score = 0
-- **Stop iterating:** Stuck at 95%+ with only `r`/`i` diffs, or same changes oscillating
+- **Time limit:** Don't spend more than 10 minutes on a single function
+- **Stop iterating:** Stuck with only `r`/`i` diffs, or same changes oscillating
 
 ### Step 5: Commit (REQUIRED - DO NOT SKIP)
 
-**Threshold:** 95%+ with only register/offset differences.
+**Threshold:** Any improvement over the starting match %. Progress is progress.
 
 > **WARNING:** Using `complete mark` WITHOUT `commit apply` does NOT save your work!
 > The function will appear in your tracking file but will NOT be in the repository.
@@ -121,11 +122,10 @@ melee-agent workflow finish <function_name> <slug>
 ```
 
 This single command:
-1. Verifies the scratch meets the match threshold
-2. Tests compilation with --dry-run
-3. Applies the code to the melee repo
-4. Records the function as committed
-5. Releases any claims
+1. Tests compilation with --dry-run
+2. Applies the code to the melee repo
+3. Records the function as committed
+4. Releases any claims
 
 **Alternative: Manual two-step process:**
 ```bash
@@ -252,7 +252,7 @@ melee-agent struct offset 0x1898  # What field is at this offset?
 # Search for struct definitions in the scratch context
 melee-agent scratch search-context xYz12 "CollData" "HSD_GObj"
 
-# At 97% with only register diffs, FINISH THE FUNCTION (commits + records)
+# Improved the match, FINISH THE FUNCTION (commits + records)
 melee-agent workflow finish lbColl_80008440 xYz12
 ```
 
@@ -277,14 +277,13 @@ melee-agent state urls <func_name>        # Show all URLs (scratch, PR)
 ## What NOT to Do
 
 1. **Don't search decomp.me first when starting fresh** - find functions from the melee repo
-2. **Don't give up at 90%** - often small changes get you to 99%+
+2. **Don't spend >10 minutes on one function** - commit your progress and move on
 3. **Don't ignore file-local types** - they must be included in source
-4. **Don't commit to repo until 95%+ match** - only Step 5 touches the melee repo
-5. **Don't keep trying the same changes** - if reordering doesn't help after 3-4 attempts, the issue is likely context-related
-6. **Don't skip `workflow finish`** - just marking complete without committing loses your work!
-7. **Don't continue working if `claim add` fails** - pick a different function
-8. **Don't use raw curl/API calls** - use CLI tools like `scratch search-context` instead
-9. **Don't switch functions after claiming** - work on the EXACT function you claimed, not a different one
+4. **Don't keep trying the same changes** - if reordering doesn't help after 3-4 attempts, the issue is likely context-related
+5. **Don't skip `workflow finish`** - just marking complete without committing loses your work!
+6. **Don't continue working if `claim add` fails** - pick a different function
+7. **Don't use raw curl/API calls** - use CLI tools like `scratch search-context` instead
+8. **Don't switch functions after claiming** - work on the EXACT function you claimed, not a different one
 
 ## Troubleshooting
 
