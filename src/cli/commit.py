@@ -10,7 +10,7 @@ from typing import Annotated, Optional
 import typer
 from rich.console import Console
 
-from ._common import console, DEFAULT_MELEE_ROOT, DECOMP_CONFIG_DIR, get_local_api_url, resolve_melee_root, AGENT_ID, db_upsert_function, DEFAULT_API_URL
+from ._common import console, DEFAULT_MELEE_ROOT, DECOMP_CONFIG_DIR, get_local_api_url, resolve_melee_root, AGENT_ID, db_upsert_function, DEFAULT_API_URL, get_source_file_from_claim
 from .complete import _load_completed, _save_completed, _get_current_branch
 from src.commit.diagnostics import (
     analyze_commit_error,
@@ -56,13 +56,14 @@ def commit_apply(
     """
     api_url = api_url or get_local_api_url()
 
-    # Auto-detect agent worktree if not explicitly specified
-    melee_root = resolve_melee_root(melee_root)
+    # Look up source file from claim to use the correct subdirectory worktree
+    source_file = get_source_file_from_claim(function_name)
+    melee_root = resolve_melee_root(melee_root, target_file=source_file)
 
     # Warn if committing to main repo instead of worktree
-    if AGENT_ID and "melee-worktrees" not in str(melee_root):
-        console.print(f"[yellow]Warning: Committing to main melee repo, not agent worktree[/yellow]")
-        console.print(f"[dim]Agent {AGENT_ID} should use: melee-worktrees/{AGENT_ID}/[/dim]")
+    if AGENT_ID and source_file and "melee-worktrees" not in str(melee_root):
+        console.print(f"[yellow]Warning: Committing to main melee repo, not subdirectory worktree[/yellow]")
+        console.print(f"[dim]Expected worktree for: {source_file}[/dim]")
     from src.client import DecompMeAPIClient
     from src.commit import auto_detect_and_commit
     from src.commit.configure import get_file_path_from_function

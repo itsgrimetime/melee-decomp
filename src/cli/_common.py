@@ -760,6 +760,42 @@ def resolve_melee_root(
     return DEFAULT_MELEE_ROOT
 
 
+def get_source_file_from_claim(function_name: str) -> str | None:
+    """Look up the source file from a function's claim.
+
+    This allows commands like `commit apply` and `workflow finish` to use
+    the correct subdirectory worktree based on the claimed source file.
+
+    Args:
+        function_name: Name of the claimed function
+
+    Returns:
+        Source file path from the claim, or None if not claimed/no source file.
+    """
+    import json
+    import time
+
+    claims_file = Path("/tmp/decomp_claims.json")
+    if not claims_file.exists():
+        return None
+
+    try:
+        with open(claims_file, 'r') as f:
+            claims = json.load(f)
+
+        if function_name not in claims:
+            return None
+
+        claim = claims[function_name]
+        # Check if claim has expired (1 hour)
+        if time.time() - claim.get("timestamp", 0) >= 3600:
+            return None
+
+        return claim.get("source_file")
+    except (json.JSONDecodeError, IOError):
+        return None
+
+
 def get_context_file(source_file: str | None = None, melee_root: Path | None = None) -> Path:
     """Get the context file path for a source file.
 
