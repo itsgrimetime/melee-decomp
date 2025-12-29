@@ -10,7 +10,7 @@ from typing import Annotated, Any
 import typer
 from rich.table import Table
 
-from ._common import AGENT_ID, console
+from ._common import AGENT_ID, console, db_add_claim, db_release_claim
 
 # Claims are SHARED and ephemeral (1-hour expiry) - ok in /tmp
 DECOMP_CLAIMS_FILE = os.environ.get("DECOMP_CLAIMS_FILE", "/tmp/decomp_claims.json")
@@ -115,6 +115,9 @@ def claim_add(
             claims[function_name] = {"agent_id": agent_id, "timestamp": time.time()}
             _save_claims(claims)
 
+            # Also write to state database (non-blocking)
+            db_add_claim(function_name, agent_id)
+
             if output_json:
                 print(json.dumps({"success": True, "function": function_name}))
             else:
@@ -127,6 +130,8 @@ def _release_claim(function_name: str) -> bool:
     """Internal function to release a claim. Returns True if released, False if not claimed."""
     claims_path = Path(DECOMP_CLAIMS_FILE)
     if not claims_path.exists():
+        # Also release from DB even if JSON doesn't exist
+        db_release_claim(function_name)
         return False
 
     lock_path = Path(str(claims_path) + ".lock")
@@ -138,10 +143,16 @@ def _release_claim(function_name: str) -> bool:
             claims = _load_claims()
 
             if function_name not in claims:
+                # Also release from DB even if not in JSON
+                db_release_claim(function_name)
                 return False
 
             del claims[function_name]
             _save_claims(claims)
+
+            # Also release from state database (non-blocking)
+            db_release_claim(function_name)
+
             return True
         finally:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
@@ -157,6 +168,8 @@ def claim_release(
     """Release a claimed function."""
     claims_path = Path(DECOMP_CLAIMS_FILE)
     if not claims_path.exists():
+        # Also release from DB even if JSON doesn't exist
+        db_release_claim(function_name)
         if output_json:
             print(json.dumps({"success": False, "error": "not_claimed"}))
         else:
@@ -172,6 +185,8 @@ def claim_release(
             claims = _load_claims()
 
             if function_name not in claims:
+                # Also release from DB even if not in JSON
+                db_release_claim(function_name)
                 if output_json:
                     print(json.dumps({"success": False, "error": "not_claimed"}))
                 else:
@@ -180,6 +195,9 @@ def claim_release(
 
             del claims[function_name]
             _save_claims(claims)
+
+            # Also release from state database (non-blocking)
+            db_release_claim(function_name)
 
             if output_json:
                 print(json.dumps({"success": True, "function": function_name}))

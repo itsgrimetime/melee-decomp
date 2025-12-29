@@ -34,6 +34,7 @@ from .struct import struct_app
 from .stub import stub_app
 from .worktree import worktree_app
 from .workflow import workflow_app
+from .state import state_app
 from .compilers import list_compilers
 
 # Import common utilities for backward compatibility
@@ -64,6 +65,7 @@ app.add_typer(struct_app, name="struct")
 app.add_typer(stub_app, name="stub")
 app.add_typer(worktree_app, name="worktree")
 app.add_typer(workflow_app, name="workflow")
+app.add_typer(state_app, name="state")
 
 # Register standalone commands
 app.command("compilers")(list_compilers)

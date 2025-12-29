@@ -10,7 +10,7 @@ from typing import Annotated, Optional
 import typer
 from rich.console import Console
 
-from ._common import console, DEFAULT_MELEE_ROOT, DECOMP_CONFIG_DIR, DEFAULT_API_URL, require_api_url, resolve_melee_root, AGENT_ID
+from ._common import console, DEFAULT_MELEE_ROOT, DECOMP_CONFIG_DIR, DEFAULT_API_URL, require_api_url, resolve_melee_root, AGENT_ID, db_upsert_function
 from .complete import _load_completed, _save_completed, _get_current_branch
 from src.commit.diagnostics import analyze_commit_error, check_header_sync, format_signature_mismatch
 
@@ -221,6 +221,19 @@ def commit_apply(
         "timestamp": time.time(),
     }
     _save_completed(completed)
+
+    # Also write to state database (non-blocking)
+    db_upsert_function(
+        function_name,
+        match_percent=match_pct,
+        local_scratch_slug=scratch_slug,
+        is_committed=True,
+        status='committed',
+        branch=branch,
+        worktree_path=str(melee_root),
+        pr_url=pr_url,
+        notes="committed via commit apply",
+    )
 
     branch_info = f" on {branch}" if branch else ""
     console.print(f"[dim]Marked as completed{branch_info}[/dim]")

@@ -9,7 +9,7 @@ from typing import Annotated, Optional, List
 import typer
 from rich.table import Table
 
-from ._common import console, DEFAULT_MELEE_ROOT
+from ._common import console, DEFAULT_MELEE_ROOT, db_upsert_agent
 
 
 worktree_app = typer.Typer(help="Manage agent worktrees and batch commits")
@@ -101,6 +101,14 @@ def worktree_list(
     if not worktrees:
         console.print("[yellow]No agent worktrees found[/yellow]")
         return
+
+    # Update agent records in state database (non-blocking)
+    for wt in worktrees:
+        db_upsert_agent(
+            agent_id=wt["name"],
+            worktree_path=str(wt["path"]),
+            branch_name=wt["branch"],
+        )
 
     table = Table(title="Agent Worktrees")
     table.add_column("Name", style="cyan")

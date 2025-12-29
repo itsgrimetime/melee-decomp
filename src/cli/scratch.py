@@ -14,7 +14,20 @@ from typing import Annotated, Optional
 import typer
 from rich.table import Table
 
-from ._common import console, DEFAULT_MELEE_ROOT, DECOMP_CONFIG_DIR, get_agent_context_file, DEFAULT_API_URL, require_api_url, record_match_score, format_match_history
+from ._common import (
+    console,
+    DEFAULT_MELEE_ROOT,
+    DECOMP_CONFIG_DIR,
+    get_agent_context_file,
+    DEFAULT_API_URL,
+    require_api_url,
+    record_match_score,
+    format_match_history,
+    LOCAL_DECOMP_ME,
+    db_upsert_scratch,
+    db_record_match_score,
+    db_upsert_function,
+)
 
 # Shared scratch tokens file - all agents use the same file
 # Tokens are keyed by scratch slug, so no conflicts between agents
@@ -222,6 +235,20 @@ def scratch_create(
     scratch = asyncio.run(create())
     console.print(f"[green]Created scratch:[/green] {api_url}/scratch/{scratch.slug}")
 
+    # Write to state database (non-blocking)
+    db_upsert_scratch(
+        scratch.slug,
+        instance='local',
+        base_url=api_url,
+        function_name=function_name,
+        claim_token=scratch.claim_token,
+    )
+    db_upsert_function(
+        function_name,
+        local_scratch_slug=scratch.slug,
+        status='in_progress',
+    )
+
 
 def _extract_text(text_data) -> str:
     """Extract plain text from diff text data (list of dicts or string)."""
@@ -345,6 +372,9 @@ def scratch_compile(
 
         # Record match score for history tracking
         record_match_score(slug, result.diff_output.current_score, result.diff_output.max_score)
+
+        # Also record to state database (non-blocking)
+        db_record_match_score(slug, result.diff_output.current_score, result.diff_output.max_score)
 
         console.print(f"[green]Compiled successfully![/green]")
         console.print(f"Match: {match_pct:.1f}%")

@@ -11,7 +11,7 @@ from typing import Annotated, Any, Optional
 import typer
 from rich.table import Table
 
-from ._common import console
+from ._common import console, db_upsert_function, db_release_claim
 
 # File paths
 DECOMP_CLAIMS_FILE = os.environ.get("DECOMP_CLAIMS_FILE", "/tmp/decomp_claims.json")
@@ -124,6 +124,18 @@ def complete_mark(
     }
     _save_completed(completed)
 
+    # Also write to state database (non-blocking)
+    status = 'committed' if committed else ('matched' if match_percent >= 95 else 'in_progress')
+    db_upsert_function(
+        function_name,
+        match_percent=match_percent,
+        local_scratch_slug=scratch_slug,
+        is_committed=committed,
+        status=status,
+        branch=branch,
+        notes=notes or "",
+    )
+
     # Also release any claim
     claims_path = Path(DECOMP_CLAIMS_FILE)
     if claims_path.exists():
@@ -138,6 +150,9 @@ def complete_mark(
                     _save_claims(claims)
             finally:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+    # Also release from state database (non-blocking)
+    db_release_claim(function_name)
 
     if output_json:
         print(json.dumps({"success": True, "function": function_name, "match_percent": match_percent, "branch": branch}))

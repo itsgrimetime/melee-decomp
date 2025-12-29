@@ -611,3 +611,165 @@ def clear_operation_cache() -> None:
     """Clear the operation cache (useful for testing)."""
     if _RECENT_OPS_FILE.exists():
         _RECENT_OPS_FILE.unlink()
+
+
+# =============================================================================
+# Database Integration (Non-Blocking Dual-Write)
+# =============================================================================
+
+def get_state_db():
+    """Get the state database instance.
+
+    Returns None if database module is not available or fails to initialize.
+    This allows graceful degradation when database is not set up.
+    """
+    try:
+        from src.db import get_db
+        return get_db()
+    except Exception as e:
+        # Log but don't fail - database is optional during transition
+        console.print(f"[dim]Note: State database unavailable: {e}[/dim]")
+        return None
+
+
+def db_log_audit(
+    entity_type: str,
+    entity_id: str,
+    action: str,
+    agent_id: str | None = None,
+    old_value: dict | None = None,
+    new_value: dict | None = None,
+    metadata: dict | None = None,
+) -> bool:
+    """Log an audit entry to the state database (non-blocking).
+
+    Returns True if logged successfully, False otherwise.
+    Failures are silent to avoid disrupting normal operations.
+    """
+    db = get_state_db()
+    if db is None:
+        return False
+
+    try:
+        db.log_audit(
+            entity_type=entity_type,
+            entity_id=entity_id,
+            action=action,
+            agent_id=agent_id or AGENT_ID,
+            old_value=old_value,
+            new_value=new_value,
+            metadata=metadata,
+        )
+        return True
+    except Exception:
+        return False
+
+
+def db_upsert_function(function_name: str, **fields) -> bool:
+    """Update function in state database (non-blocking).
+
+    Returns True if updated successfully, False otherwise.
+    """
+    db = get_state_db()
+    if db is None:
+        return False
+
+    try:
+        db.upsert_function(function_name, agent_id=AGENT_ID, **fields)
+        return True
+    except Exception:
+        return False
+
+
+def db_add_claim(function_name: str, agent_id: str | None = None) -> tuple[bool, str | None]:
+    """Add claim in state database (non-blocking).
+
+    Returns (success, error_message) tuple.
+    """
+    db = get_state_db()
+    if db is None:
+        return True, None  # Pretend success when DB unavailable
+
+    try:
+        return db.add_claim(function_name, agent_id or AGENT_ID)
+    except Exception as e:
+        return True, None  # Don't block on DB errors
+
+
+def db_release_claim(function_name: str, agent_id: str | None = None) -> bool:
+    """Release claim in state database (non-blocking).
+
+    Returns True if released successfully.
+    """
+    db = get_state_db()
+    if db is None:
+        return True  # Pretend success when DB unavailable
+
+    try:
+        return db.release_claim(function_name, agent_id)
+    except Exception:
+        return True  # Don't block on DB errors
+
+
+def db_upsert_scratch(slug: str, instance: str, base_url: str, **fields) -> bool:
+    """Update scratch in state database (non-blocking).
+
+    Returns True if updated successfully.
+    """
+    db = get_state_db()
+    if db is None:
+        return False
+
+    try:
+        db.upsert_scratch(slug, instance, base_url, agent_id=AGENT_ID, **fields)
+        return True
+    except Exception:
+        return False
+
+
+def db_record_match_score(scratch_slug: str, score: int, max_score: int) -> bool:
+    """Record match score in state database (non-blocking).
+
+    Returns True if recorded successfully.
+    """
+    db = get_state_db()
+    if db is None:
+        return False
+
+    try:
+        db.record_match_score(scratch_slug, score, max_score)
+        return True
+    except Exception:
+        return False
+
+
+def db_record_sync(local_slug: str, production_slug: str, function_name: str | None = None) -> bool:
+    """Record sync in state database (non-blocking).
+
+    Returns True if recorded successfully.
+    """
+    db = get_state_db()
+    if db is None:
+        return False
+
+    try:
+        db.record_sync(local_slug, production_slug, function_name)
+        return True
+    except Exception:
+        return False
+
+
+def db_upsert_agent(agent_id: str, worktree_path: str | None = None, branch_name: str | None = None) -> bool:
+    """Update agent in state database (non-blocking).
+
+    Returns True if updated successfully.
+    """
+    db = get_state_db()
+    if db is None:
+        return False
+
+    try:
+        db.upsert_agent(agent_id, worktree_path, branch_name)
+        return True
+    except Exception:
+        return False

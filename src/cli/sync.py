@@ -20,6 +20,9 @@ from ._common import (
     save_slug_map,
     load_completed_functions,
     save_completed_functions,
+    db_record_sync,
+    db_upsert_function,
+    db_upsert_scratch,
 )
 
 # API URL from environment
@@ -367,6 +370,12 @@ def sync_production(
                                 if func_name in current_completed:
                                     current_completed[func_name]['production_slug'] = existing_slug
                                     save_completed_functions(current_completed)
+
+                                # Also write to state database (non-blocking)
+                                db_record_sync(local_slug, existing_slug, func_name)
+                                db_upsert_scratch(existing_slug, 'production', PRODUCTION_DECOMP_ME, function_name=func_name, match_percent=100.0)
+                                db_upsert_function(func_name, production_scratch_slug=existing_slug)
+
                                 results['success'] += 1
                                 results['details'].append({
                                     'function': func_name,
@@ -441,6 +450,11 @@ def sync_production(
                             if func_name in current_completed:
                                 current_completed[func_name]['production_slug'] = prod_slug
                                 save_completed_functions(current_completed)
+
+                            # Also write to state database (non-blocking)
+                            db_record_sync(local_slug, prod_slug, func_name)
+                            db_upsert_scratch(prod_slug, 'production', PRODUCTION_DECOMP_ME, function_name=func_name, match_percent=match_pct)
+                            db_upsert_function(func_name, production_scratch_slug=prod_slug)
 
                             synced[local_slug] = {
                                 'production_slug': prod_slug,
