@@ -384,3 +384,170 @@ def format_signature_mismatch(comparison: dict) -> str:
     lines.append("  [yellow]Consider updating the header declaration to match.[/yellow]")
 
     return "\n".join(lines)
+
+
+# =============================================================================
+# Caller Detection and Fixing
+# =============================================================================
+
+def find_callers(function_name: str, melee_root: Path) -> list[dict]:
+    """Find all call sites for a function in the codebase.
+
+    Args:
+        function_name: Name of the function to find callers for
+        melee_root: Path to melee project root
+
+    Returns:
+        List of dicts with: file, line, content, context
+    """
+    import subprocess
+
+    callers = []
+    src_dir = melee_root / "src" / "melee"
+
+    if not src_dir.exists():
+        return callers
+
+    # Use grep to find call sites (function_name followed by '(')
+    # Exclude the function definition itself
+    try:
+        result = subprocess.run(
+            ["grep", "-rn", f"{function_name}(", str(src_dir)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+        for line in result.stdout.strip().split('\n'):
+            if not line:
+                continue
+
+            # Parse grep output: file:line:content
+            parts = line.split(':', 2)
+            if len(parts) < 3:
+                continue
+
+            file_path, line_num, content = parts[0], parts[1], parts[2]
+
+            # Skip the function definition itself
+            if re.search(rf'^\s*(static\s+)?[\w\s\*]+\s+{re.escape(function_name)}\s*\([^)]*\)\s*\{{?\s*$', content):
+                continue
+
+            # Skip header declarations
+            if file_path.endswith('.h'):
+                continue
+
+            # Skip comments
+            if content.strip().startswith('//') or content.strip().startswith('/*'):
+                continue
+
+            callers.append({
+                "file": file_path,
+                "line": int(line_num),
+                "content": content.strip(),
+            })
+
+    except (subprocess.TimeoutExpired, subprocess.SubprocessError):
+        pass
+
+    return callers
+
+
+def check_callers_need_update(
+    function_name: str,
+    old_param_count: int,
+    new_param_count: int,
+    melee_root: Path
+) -> list[dict]:
+    """Check if callers need to be updated due to signature change.
+
+    Args:
+        function_name: Name of the function
+        old_param_count: Number of parameters in old signature
+        new_param_count: Number of parameters in new signature
+        melee_root: Path to melee project root
+
+    Returns:
+        List of callers that likely need updates
+    """
+    if old_param_count >= new_param_count:
+        # If params decreased or stayed same, callers might still work
+        return []
+
+    callers = find_callers(function_name, melee_root)
+    needs_update = []
+
+    for caller in callers:
+        content = caller["content"]
+
+        # Try to count arguments in the call
+        # This is a simplified check - looks for function_name(...) and counts commas
+        match = re.search(rf'{re.escape(function_name)}\s*\(([^)]*)\)', content)
+        if match:
+            args_str = match.group(1).strip()
+            if args_str == "":
+                arg_count = 0
+            else:
+                # Count arguments (simplified - doesn't handle nested parens perfectly)
+                arg_count = args_str.count(',') + 1
+
+            if arg_count < new_param_count:
+                caller["current_args"] = arg_count
+                caller["needed_args"] = new_param_count
+                needs_update.append(caller)
+
+    return needs_update
+
+
+def format_caller_updates_needed(callers: list[dict], function_name: str) -> str:
+    """Format a message about callers that need updating."""
+    if not callers:
+        return ""
+
+    lines = [f"\n[bold yellow]Callers that need updating ({len(callers)} found):[/bold yellow]"]
+
+    for caller in callers[:10]:  # Show max 10
+        rel_path = caller["file"]
+        if "/melee/" in rel_path:
+            rel_path = rel_path.split("/melee/", 1)[1]
+
+        lines.append(f"  [cyan]{rel_path}:{caller['line']}[/cyan]")
+        lines.append(f"    [dim]{caller['content'][:80]}{'...' if len(caller['content']) > 80 else ''}[/dim]")
+
+        if "current_args" in caller:
+            lines.append(f"    [yellow]Has {caller['current_args']} args, needs {caller['needed_args']}[/yellow]")
+
+    if len(callers) > 10:
+        lines.append(f"\n  [dim]... and {len(callers) - 10} more callers[/dim]")
+
+    lines.append("\n  [yellow]Fix these callers before committing, or the build will fail.[/yellow]")
+    lines.append(f"  [dim]Search: grep -rn '{function_name}(' src/melee/[/dim]")
+
+    return "\n".join(lines)
+
+
+def get_header_fix_suggestion(comparison: dict) -> Optional[str]:
+    """Generate exact fix for header file.
+
+    Args:
+        comparison: Result from compare_signatures()
+
+    Returns:
+        Formatted suggestion with exact replacement, or None
+    """
+    if comparison.get("match"):
+        return None
+
+    header_path = comparison.get("header_path", "unknown")
+    old_sig = comparison.get("header", "")
+    new_sig = comparison.get("scratch", "")
+
+    if not old_sig or not new_sig:
+        return None
+
+    lines = ["\n[bold cyan]Suggested header fix:[/bold cyan]"]
+    lines.append(f"  [dim]File: {header_path}[/dim]")
+    lines.append(f"\n  [red]- {old_sig};[/red]")
+    lines.append(f"  [green]+ {new_sig};[/green]")
+
+    return "\n".join(lines)

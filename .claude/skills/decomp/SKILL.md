@@ -64,8 +64,23 @@ Then read the source file in `melee/src/` for context. Look for:
 
 ### Step 3: Compile and Iterate
 
-Write code to `/tmp/decomp_<slug>.c`, then compile:
+Write code and compile using one of these methods:
+
+**Option A: Inline code (preferred for agents)**
 ```bash
+melee-agent scratch compile <slug> --code '
+void func(s32 arg0) {
+    if (arg0 < 1) {
+        arg0 = 1;
+    }
+    // ... rest of function
+}
+' --diff
+```
+
+**Option B: File-based**
+```bash
+# Write to file, then compile
 melee-agent scratch compile <slug> -s /tmp/decomp_<slug>.c --diff
 ```
 
@@ -127,9 +142,16 @@ Before committing, you MUST ensure:
 
 2. **No merge conflict markers** - Files must not contain `<<<<<<<`, `=======`, or `>>>>>>>` markers.
 
-3. **Build passes locally** - Run `ninja` in the melee directory to verify the build succeeds before committing.
+3. **Build passes with --require-protos** - This is the acceptance criteria:
+   ```bash
+   cd <worktree> && python configure.py --require-protos && ninja
+   ```
+   The `--require-protos` flag is **required**, not optional. It ensures all function prototypes are declared before use, which CI enforces. If this build fails, your commit will fail CI.
 
-4. **Test with require-protos** - Run `python configure.py --require-protos && ninja` to catch missing prototypes early.
+4. **Fix callers when signatures change** - If you change a function from `void foo(void)` to `void foo(s32)`, you must update ALL callers to pass the correct argument. Use grep to find them:
+   ```bash
+   grep -r "function_name" <worktree>/src/melee/
+   ```
 
 **Common header fixes needed:**
 ```c

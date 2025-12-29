@@ -318,6 +318,9 @@ def scratch_compile(
     source_file: Annotated[
         Optional[Path], typer.Option("--source", "-s", help="Update source from file before compiling")
     ] = None,
+    code: Annotated[
+        Optional[str], typer.Option("--code", "-c", help="Update source from inline code before compiling")
+    ] = None,
     api_url: Annotated[
         Optional[str], typer.Option("--api-url", help="Decomp.me API URL (auto-detected)")
     ] = None,
@@ -330,18 +333,27 @@ def scratch_compile(
 ):
     """Compile a scratch and show the diff.
 
-    If --source is provided, updates the scratch source code before compiling.
+    If --source is provided, updates the scratch source code from a file before compiling.
+    If --code is provided, updates the scratch source code from inline string before compiling.
+    Only one of --source or --code can be specified.
     """
     api_url = api_url or get_local_api_url()
     from src.client import DecompMeAPIClient, ScratchUpdate, DecompMeAPIError
 
-    # If source file provided, validate it exists
+    # Validate mutually exclusive options
+    if source_file is not None and code is not None:
+        console.print("[red]Cannot specify both --source and --code[/red]")
+        raise typer.Exit(1)
+
+    # Get source code from file or inline
     source_code = None
     if source_file is not None:
         if not source_file.exists():
             console.print(f"[red]Source file not found: {source_file}[/red]")
             raise typer.Exit(1)
         source_code = source_file.read_text()
+    elif code is not None:
+        source_code = code
 
     async def compile_scratch():
         async with DecompMeAPIClient(base_url=api_url) as client:

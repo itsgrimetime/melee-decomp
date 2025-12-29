@@ -12,7 +12,13 @@ from rich.console import Console
 
 from ._common import console, DEFAULT_MELEE_ROOT, DECOMP_CONFIG_DIR, get_local_api_url, resolve_melee_root, AGENT_ID, db_upsert_function, DEFAULT_API_URL
 from .complete import _load_completed, _save_completed, _get_current_branch
-from src.commit.diagnostics import analyze_commit_error, check_header_sync, format_signature_mismatch
+from src.commit.diagnostics import (
+    analyze_commit_error,
+    check_header_sync,
+    format_signature_mismatch,
+    find_callers,
+    format_caller_updates_needed,
+)
 
 commit_app = typer.Typer(help="Commit matched functions and create PRs")
 
@@ -258,3 +264,52 @@ def commit_format(
     else:
         console.print("[red]Formatting failed[/red]")
         raise typer.Exit(1)
+
+
+@commit_app.command("check-callers")
+def commit_check_callers(
+    function_name: Annotated[str, typer.Argument(help="Name of the function to find callers for")],
+    melee_root: Annotated[
+        Optional[Path], typer.Option("--melee-root", "-m", help="Path to melee submodule (auto-detects agent worktree)")
+    ] = None,
+):
+    """Find all callers of a function in the codebase.
+
+    Use this when you've changed a function's signature and need to update callers.
+    Shows file paths and line numbers for each call site.
+
+    Example:
+        melee-agent commit check-callers lbBgFlash_800205F0
+    """
+    melee_root = resolve_melee_root(melee_root)
+
+    console.print(f"\n[bold]Finding callers of {function_name}...[/bold]\n")
+
+    callers = find_callers(function_name, melee_root)
+
+    if not callers:
+        console.print(f"[green]No callers found for {function_name}[/green]")
+        console.print("[dim]This function may not be called from any .c files, or only from headers.[/dim]")
+        return
+
+    console.print(f"[cyan]Found {len(callers)} call site(s):[/cyan]\n")
+
+    from rich.table import Table
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("File", style="cyan")
+    table.add_column("Line", justify="right")
+    table.add_column("Code", style="dim")
+
+    for caller in callers:
+        rel_path = caller["file"]
+        if "/melee/" in rel_path:
+            rel_path = "src/melee/" + rel_path.split("/melee/", 1)[1]
+
+        content = caller["content"]
+        if len(content) > 60:
+            content = content[:57] + "..."
+
+        table.add_row(rel_path, str(caller["line"]), content)
+
+    console.print(table)
+    console.print(f"\n[dim]Use grep for more context: grep -rn '{function_name}(' src/melee/[/dim]")

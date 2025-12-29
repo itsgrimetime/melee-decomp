@@ -79,7 +79,14 @@ def workflow_finish(
     from src.commit import auto_detect_and_commit
     from src.commit.configure import get_file_path_from_function
     from src.commit.update import validate_function_code, _extract_function_from_code
-    from src.commit.diagnostics import analyze_commit_error, check_header_sync, format_signature_mismatch
+    from src.commit.diagnostics import (
+        analyze_commit_error,
+        check_header_sync,
+        format_signature_mismatch,
+        check_callers_need_update,
+        format_caller_updates_needed,
+        get_header_fix_suggestion,
+    )
     import subprocess
 
     async def finish():
@@ -130,8 +137,31 @@ def workflow_finish(
             sig_check = check_header_sync(source_code, function_name, melee_root, file_path)
             if sig_check and not sig_check["match"]:
                 console.print(format_signature_mismatch(sig_check))
+
+                # Show exact fix suggestion
+                fix_suggestion = get_header_fix_suggestion(sig_check)
+                if fix_suggestion:
+                    console.print(fix_suggestion)
+
+                # Check if callers need updating (when adding parameters)
+                old_params = sig_check.get("header", "").count(",") + 1 if "(" in sig_check.get("header", "") else 0
+                new_params = sig_check.get("scratch", "").count(",") + 1 if "(" in sig_check.get("scratch", "") else 0
+
+                # Handle void case
+                if "(void)" in sig_check.get("header", "") or "()" in sig_check.get("header", ""):
+                    old_params = 0
+                if "(void)" in sig_check.get("scratch", "") or "()" in sig_check.get("scratch", ""):
+                    new_params = 0
+
+                if new_params > old_params:
+                    callers_needing_update = check_callers_need_update(
+                        function_name, old_params, new_params, melee_root
+                    )
+                    if callers_needing_update:
+                        console.print(format_caller_updates_needed(callers_needing_update, function_name))
+
                 if not force:
-                    console.print("[red]Header signature mismatch - fix header first or use --force[/red]")
+                    console.print("\n[red]Header signature mismatch - fix header and callers first, or use --force[/red]")
                     raise typer.Exit(1)
 
             # Step 3: Test compilation
