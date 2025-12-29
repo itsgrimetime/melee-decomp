@@ -963,7 +963,7 @@ def sync_find_duplicates(
         int, typer.Option("--limit", "-n", help="Maximum functions to check")
     ] = 100,
     update_db: Annotated[
-        bool, typer.Option("--update-db", help="Update scratches table with found scratches")
+        bool, typer.Option("--update-db/--no-update-db", help="Update scratches table with found scratches")
     ] = True,
     output_json: Annotated[
         bool, typer.Option("--json", help="Output as JSON")
@@ -1008,6 +1008,7 @@ def sync_find_duplicates(
 
     async def search_duplicates():
         duplicates = []
+        name_mismatches = []
         checked = 0
         errors = 0
         scratches_added = 0
@@ -1018,6 +1019,26 @@ def sync_find_duplicates(
                 tracked_slug = candidate['tracked_slug']
 
                 console.print(f"[dim]Searching {func_name} ({i+1}/{len(candidates)})...[/dim]", end="")
+
+                # First, check if the tracked scratch has the correct name
+                if tracked_slug:
+                    try:
+                        tracked_resp = await asyncio.wait_for(
+                            client.get(f'/api/scratch/{tracked_slug}'),
+                            timeout=10.0
+                        )
+                        if tracked_resp.status_code == 200:
+                            tracked_data = tracked_resp.json()
+                            tracked_name = tracked_data.get('name', '')
+                            if tracked_name and tracked_name != func_name:
+                                name_mismatches.append({
+                                    'function': func_name,
+                                    'slug': tracked_slug,
+                                    'scratch_name': tracked_name,
+                                    'match_pct': candidate['match_pct'],
+                                })
+                    except (asyncio.TimeoutError, Exception):
+                        pass  # Will be caught by search below
 
                 try:
                     resp = await asyncio.wait_for(
@@ -1083,7 +1104,13 @@ def sync_find_duplicates(
                     console.print(f" [red]error: {e}[/red]")
                     errors += 1
 
-        return {'duplicates': duplicates, 'checked': checked, 'errors': errors, 'scratches_added': scratches_added}
+        return {
+            'duplicates': duplicates,
+            'name_mismatches': name_mismatches,
+            'checked': checked,
+            'errors': errors,
+            'scratches_added': scratches_added,
+        }
 
     results = asyncio.run(search_duplicates())
 
@@ -1095,8 +1122,27 @@ def sync_find_duplicates(
     console.print(f"  Checked: {results['checked']}")
     console.print(f"  Errors: {results['errors']}")
     console.print(f"  Functions with duplicates: {len(results['duplicates'])}")
+    console.print(f"  Name mismatches: {len(results['name_mismatches'])}")
     if update_db:
         console.print(f"  Scratches added to DB: {results['scratches_added']}")
+
+    # Show name mismatches first (more critical issue)
+    if results['name_mismatches']:
+        console.print(f"\n[red]⚠ Name mismatches (tracked scratch has wrong name):[/red]\n")
+
+        for mismatch in results['name_mismatches']:
+            func_name = mismatch['function']
+            slug = mismatch['slug']
+            scratch_name = mismatch['scratch_name']
+            match_pct = mismatch['match_pct']
+
+            console.print(f"[cyan]{func_name}[/cyan] ({match_pct:.1f}%)")
+            console.print(f"  Tracked: {slug}")
+            console.print(f"  [red]Scratch name: {scratch_name}[/red]")
+            console.print(f"  [dim]Expected: {func_name}[/dim]")
+            console.print()
+
+        console.print("[bold]These need manual review - the scratch may contain wrong code![/bold]\n")
 
     if results['duplicates']:
         console.print(f"\n[yellow]Functions with multiple scratches:[/yellow]\n")
@@ -1121,3 +1167,6 @@ def sync_find_duplicates(
             console.print("[dim]Run 'sync dedup' to pick winners and update tracking[/dim]")
         else:
             console.print("[dim]Run with --update-db to populate scratches table, then 'sync dedup' to resolve[/dim]")
+
+    if not results['duplicates'] and not results['name_mismatches']:
+        console.print("\n[green]✓ No issues found![/green]")
