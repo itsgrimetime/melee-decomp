@@ -1,6 +1,6 @@
 """SQLite schema for agent state management."""
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA_SQL = """
 -- Core function tracking
@@ -76,6 +76,34 @@ CREATE TABLE IF NOT EXISTS agents (
     last_active_at REAL,
     created_at REAL DEFAULT (unixepoch('now', 'subsec'))
 );
+
+-- Subdirectory-based worktree allocations
+-- Each source subdirectory gets its own worktree for easy merges
+CREATE TABLE IF NOT EXISTS subdirectory_allocations (
+    subdirectory_key TEXT PRIMARY KEY,  -- e.g., "ft-chara-ftFox", "lb", "gr"
+    worktree_path TEXT NOT NULL,
+    branch_name TEXT NOT NULL,
+    locked_by_agent TEXT,               -- NULL if unlocked
+    locked_at REAL,
+    lock_expires_at REAL,               -- For high-contention zones like ftCommon
+    last_commit_at REAL,
+    pending_commits INTEGER DEFAULT 0,
+    created_at REAL DEFAULT (unixepoch('now', 'subsec')),
+    updated_at REAL DEFAULT (unixepoch('now', 'subsec'))
+);
+
+-- Track which agents are assigned to which subdirectories
+-- An agent can work in multiple subdirectories, but only one agent per subdirectory
+CREATE TABLE IF NOT EXISTS agent_subdirectory_assignments (
+    agent_id TEXT NOT NULL,
+    subdirectory_key TEXT NOT NULL,
+    assigned_at REAL DEFAULT (unixepoch('now', 'subsec')),
+    PRIMARY KEY (agent_id, subdirectory_key),
+    FOREIGN KEY (subdirectory_key) REFERENCES subdirectory_allocations(subdirectory_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_subdir_agent ON agent_subdirectory_assignments(agent_id);
+CREATE INDEX IF NOT EXISTS idx_agent_subdir_key ON agent_subdirectory_assignments(subdirectory_key);
 
 -- Full audit trail
 CREATE TABLE IF NOT EXISTS audit_log (
@@ -199,6 +227,31 @@ SELECT
      WHERE f.claimed_by_agent = a.agent_id
        AND f.is_committed = TRUE) as committed_functions
 FROM agents a;
+
+-- Subdirectory allocation summary
+CREATE VIEW IF NOT EXISTS v_subdirectory_status AS
+SELECT
+    sa.subdirectory_key,
+    sa.worktree_path,
+    sa.branch_name,
+    sa.locked_by_agent,
+    sa.locked_at,
+    sa.lock_expires_at,
+    CASE
+        WHEN sa.lock_expires_at IS NOT NULL
+             AND sa.lock_expires_at > unixepoch('now', 'subsec')
+        THEN (sa.lock_expires_at - unixepoch('now', 'subsec')) / 60.0
+        ELSE NULL
+    END as lock_minutes_remaining,
+    sa.pending_commits,
+    sa.last_commit_at,
+    (SELECT COUNT(*) FROM functions f
+     WHERE f.source_file_path LIKE '%' || REPLACE(sa.subdirectory_key, '-', '/') || '%'
+       AND f.is_committed = FALSE
+       AND f.match_percent >= 95.0) as ready_to_commit,
+    (SELECT COUNT(*) FROM agent_subdirectory_assignments asa
+     WHERE asa.subdirectory_key = sa.subdirectory_key) as assigned_agents
+FROM subdirectory_allocations sa;
 """
 
 INITIAL_META = [
@@ -329,5 +382,52 @@ def get_migrations() -> dict[int, str]:
             FROM functions
             WHERE claimed_by_agent IS NOT NULL
             GROUP BY claimed_by_agent;
+        """,
+        # Version 2 -> 3: Add subdirectory-based worktree tables
+        2: """
+            -- Subdirectory-based worktree allocations
+            CREATE TABLE IF NOT EXISTS subdirectory_allocations (
+                subdirectory_key TEXT PRIMARY KEY,
+                worktree_path TEXT NOT NULL,
+                branch_name TEXT NOT NULL,
+                locked_by_agent TEXT,
+                locked_at REAL,
+                lock_expires_at REAL,
+                last_commit_at REAL,
+                pending_commits INTEGER DEFAULT 0,
+                created_at REAL DEFAULT (unixepoch('now', 'subsec')),
+                updated_at REAL DEFAULT (unixepoch('now', 'subsec'))
+            );
+
+            -- Agent-subdirectory assignments
+            CREATE TABLE IF NOT EXISTS agent_subdirectory_assignments (
+                agent_id TEXT NOT NULL,
+                subdirectory_key TEXT NOT NULL,
+                assigned_at REAL DEFAULT (unixepoch('now', 'subsec')),
+                PRIMARY KEY (agent_id, subdirectory_key),
+                FOREIGN KEY (subdirectory_key) REFERENCES subdirectory_allocations(subdirectory_key)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_agent_subdir_agent ON agent_subdirectory_assignments(agent_id);
+            CREATE INDEX IF NOT EXISTS idx_agent_subdir_key ON agent_subdirectory_assignments(subdirectory_key);
+
+            -- Subdirectory status view
+            CREATE VIEW IF NOT EXISTS v_subdirectory_status AS
+            SELECT
+                sa.subdirectory_key,
+                sa.worktree_path,
+                sa.branch_name,
+                sa.locked_by_agent,
+                sa.locked_at,
+                sa.lock_expires_at,
+                CASE
+                    WHEN sa.lock_expires_at IS NOT NULL
+                         AND sa.lock_expires_at > unixepoch('now', 'subsec')
+                    THEN (sa.lock_expires_at - unixepoch('now', 'subsec')) / 60.0
+                    ELSE NULL
+                END as lock_minutes_remaining,
+                sa.pending_commits,
+                sa.last_commit_at
+            FROM subdirectory_allocations sa;
         """,
     }

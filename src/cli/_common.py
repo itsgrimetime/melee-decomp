@@ -34,6 +34,333 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent
 DEFAULT_MELEE_ROOT = PROJECT_ROOT / "melee"
 MELEE_WORKTREES_DIR = PROJECT_ROOT / "melee-worktrees"
 
+# =============================================================================
+# Subdirectory-Based Worktree System
+# =============================================================================
+# Instead of per-agent worktrees, we allocate worktrees per-subdirectory.
+# This enables easy merges since commits to different subdirectories rarely conflict.
+#
+# Mapping:
+#   melee/ft/chara/ftFox/*.c  -> dir-ft-chara-ftFox
+#   melee/ft/chara/ftCommon/*.c -> dir-ft-chara-ftCommon (high contention)
+#   melee/lb/*.c -> dir-lb
+#   melee/gr/*.c -> dir-gr
+#   etc.
+
+
+def get_subdirectory_key(file_path: str) -> str:
+    """Map a file path to its subdirectory worktree key.
+
+    Args:
+        file_path: Relative path like "melee/ft/chara/ftFox/ftFx_SpecialHi.c"
+                   or "src/melee/ft/chara/ftFox/ftFx_SpecialHi.c"
+
+    Returns:
+        Subdirectory key like "ft-chara-ftFox"
+    """
+    # Normalize path - remove src/ and melee/ prefixes, get directory only
+    path = Path(file_path)
+    parts = list(path.parent.parts)
+
+    # Strip common prefixes
+    if parts and parts[0] == "src":
+        parts = parts[1:]
+    if parts and parts[0] == "melee":
+        parts = parts[1:]
+
+    if not parts:
+        return "root"
+
+    # Special handling for ft/chara - use character subdirectory
+    # This gives each character their own worktree
+    if len(parts) >= 3 and parts[0] == "ft" and parts[1] == "chara":
+        return f"ft-chara-{parts[2]}"
+
+    # Special handling for it/items - separate from main it/
+    if len(parts) >= 2 and parts[0] == "it" and parts[1] == "items":
+        return "it-items"
+
+    # Default: use first directory level (lb, gr, gm, etc.)
+    return parts[0]
+
+
+def get_worktree_name_for_subdirectory(subdir_key: str) -> str:
+    """Get the worktree directory name for a subdirectory key.
+
+    Args:
+        subdir_key: Subdirectory key like "ft-chara-ftFox"
+
+    Returns:
+        Worktree name like "dir-ft-chara-ftFox"
+    """
+    return f"dir-{subdir_key}"
+
+
+def get_subdirectory_worktree_path(subdir_key: str) -> Path:
+    """Get the full path to a subdirectory worktree.
+
+    Args:
+        subdir_key: Subdirectory key like "ft-chara-ftFox"
+
+    Returns:
+        Path like melee-worktrees/dir-ft-chara-ftFox/
+    """
+    return MELEE_WORKTREES_DIR / get_worktree_name_for_subdirectory(subdir_key)
+
+
+def get_subdirectory_worktree(
+    subdir_key: str,
+    create_if_missing: bool = True,
+    validate_build: bool = True,
+) -> Path:
+    """Get or create a worktree for a subdirectory.
+
+    Args:
+        subdir_key: Subdirectory key like "ft-chara-ftFox"
+        create_if_missing: If True (default), create worktree if it doesn't exist.
+        validate_build: If True (default), validate build passes before reusing.
+
+    Returns:
+        Path to the subdirectory worktree (or DEFAULT_MELEE_ROOT if creation fails).
+    """
+    worktree_path = get_subdirectory_worktree_path(subdir_key)
+
+    # Check if worktree already exists
+    if worktree_path.exists() and (worktree_path / "src").exists():
+        if validate_build:
+            console.print(f"[dim]Validating worktree build: {worktree_path}[/dim]")
+            if _validate_worktree_build(worktree_path):
+                console.print(f"[green]Worktree build OK[/green]")
+                return worktree_path
+            else:
+                console.print(f"[red]Worktree build FAILED - creating fresh worktree[/red]")
+                _archive_broken_worktree(worktree_path, f"dir-{subdir_key}")
+                # Fall through to create new worktree
+        else:
+            console.print(f"[dim]Using worktree: {worktree_path}[/dim]")
+            return worktree_path
+
+    if not create_if_missing:
+        return DEFAULT_MELEE_ROOT
+
+    # Create worktree on first use
+    return _create_subdirectory_worktree(subdir_key, worktree_path)
+
+
+def _create_subdirectory_worktree(subdir_key: str, worktree_path: Path) -> Path:
+    """Create a new worktree for a subdirectory.
+
+    Similar to _create_agent_worktree but:
+    - Branch name: subdirs/{subdir_key}
+    - Tracked in database for coordination
+    """
+    import subprocess
+
+    MELEE_WORKTREES_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Get current branch from main melee
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=DEFAULT_MELEE_ROOT,
+            capture_output=True, text=True, check=True
+        )
+        base_branch = result.stdout.strip()
+    except subprocess.CalledProcessError:
+        base_branch = "master"
+
+    # Get current commit SHA for reference
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=DEFAULT_MELEE_ROOT,
+            capture_output=True, text=True, check=True
+        )
+        base_commit = result.stdout.strip()
+    except subprocess.CalledProcessError:
+        base_commit = "unknown"
+
+    # Create branch name for this subdirectory
+    branch_name = f"subdirs/{subdir_key}"
+
+    # Check if branch already exists
+    result = subprocess.run(
+        ["git", "branch", "--list", branch_name],
+        cwd=DEFAULT_MELEE_ROOT,
+        capture_output=True, text=True
+    )
+    branch_exists = bool(result.stdout.strip())
+
+    try:
+        if branch_exists:
+            # Worktree with existing branch
+            subprocess.run(
+                ["git", "worktree", "add", str(worktree_path), branch_name],
+                cwd=DEFAULT_MELEE_ROOT,
+                capture_output=True, text=True, check=True
+            )
+        else:
+            # Create new branch from current HEAD
+            subprocess.run(
+                ["git", "worktree", "add", "-b", branch_name, str(worktree_path)],
+                cwd=DEFAULT_MELEE_ROOT,
+                capture_output=True, text=True, check=True
+            )
+
+        # Symlink orig/ directory (contains original game files needed for build)
+        orig_src = DEFAULT_MELEE_ROOT / "orig"
+        orig_dst = worktree_path / "orig"
+        if orig_src.exists():
+            import shutil
+            if orig_dst.exists() and not orig_dst.is_symlink():
+                shutil.rmtree(orig_dst)
+            if not orig_dst.exists():
+                orig_dst.symlink_to(orig_src.resolve())
+
+        # Copy ctx.c from main melee (it's the same - just preprocessed headers)
+        main_ctx = DEFAULT_MELEE_ROOT / "build" / "ctx.c"
+        if main_ctx.exists():
+            (worktree_path / "build").mkdir(exist_ok=True)
+            worktree_ctx = worktree_path / "build" / "ctx.c"
+            import shutil
+            shutil.copy2(main_ctx, worktree_ctx)
+
+        # Print worktree creation info
+        console.print(f"\n[bold cyan]SUBDIRECTORY WORKTREE CREATED[/bold cyan]")
+        console.print(f"  [dim]Subdirectory:[/dim] {subdir_key}")
+        console.print(f"  [dim]Path:[/dim]   {worktree_path}")
+        console.print(f"  [dim]Branch:[/dim] {branch_name}")
+        console.print(f"  [dim]Base:[/dim]   {base_branch} @ {base_commit}")
+
+        # Record in database
+        db_upsert_subdirectory(subdir_key, str(worktree_path), branch_name)
+
+        # Run build to generate report.json (needed for extract list)
+        configure_py = worktree_path / "configure.py"
+        if configure_py.exists():
+            console.print(f"\n[dim]Running initial build to generate report.json...[/dim]")
+            try:
+                subprocess.run(
+                    ["python", "configure.py"],
+                    cwd=worktree_path,
+                    capture_output=True, text=True, check=True
+                )
+                result = subprocess.run(
+                    ["ninja", "build/GALE01/report.json"],
+                    cwd=worktree_path,
+                    capture_output=True, text=True,
+                    timeout=300,
+                )
+                if result.returncode == 0:
+                    console.print(f"[green]Build complete - report.json generated[/green]")
+                else:
+                    console.print(f"[yellow]Build had issues: {result.stderr[:200]}[/yellow]")
+            except subprocess.TimeoutExpired:
+                console.print(f"[yellow]Build timed out - run 'ninja' manually in worktree[/yellow]")
+            except subprocess.CalledProcessError as e:
+                console.print(f"[yellow]Build setup failed: {e.stderr[:200] if e.stderr else str(e)}[/yellow]")
+            except FileNotFoundError:
+                console.print(f"[yellow]ninja not found - run 'ninja' manually in worktree[/yellow]")
+
+        return worktree_path
+
+    except subprocess.CalledProcessError as e:
+        console.print(f"[yellow]Warning: Could not create worktree: {e.stderr}[/yellow]")
+        console.print(f"[yellow]Falling back to shared melee directory[/yellow]")
+        return DEFAULT_MELEE_ROOT
+
+
+def get_worktree_for_file(
+    file_path: str,
+    create_if_missing: bool = True,
+    validate_build: bool = True,
+) -> Path:
+    """Get or create the appropriate worktree for a source file.
+
+    This is the main entry point for subdirectory-based worktree allocation.
+
+    Args:
+        file_path: Path to source file like "melee/ft/chara/ftFox/ftFx_SpecialHi.c"
+        create_if_missing: If True (default), create worktree if it doesn't exist.
+        validate_build: If True (default), validate build passes before reusing.
+
+    Returns:
+        Path to the worktree containing this file.
+    """
+    subdir_key = get_subdirectory_key(file_path)
+    return get_subdirectory_worktree(
+        subdir_key,
+        create_if_missing=create_if_missing,
+        validate_build=validate_build,
+    )
+
+
+def db_upsert_subdirectory(
+    subdir_key: str,
+    worktree_path: str,
+    branch_name: str,
+    locked_by_agent: str | None = None,
+) -> bool:
+    """Update subdirectory allocation in state database (non-blocking).
+
+    Returns True if updated successfully.
+    """
+    db = get_state_db()
+    if db is None:
+        return False
+
+    try:
+        db.upsert_subdirectory(subdir_key, worktree_path, branch_name, locked_by_agent)
+        return True
+    except Exception:
+        return False
+
+
+def db_lock_subdirectory(subdir_key: str, agent_id: str | None = None) -> tuple[bool, str | None]:
+    """Lock a subdirectory for exclusive access by an agent.
+
+    Returns (success, error_message) tuple.
+    """
+    db = get_state_db()
+    if db is None:
+        return True, None  # Pretend success when DB unavailable
+
+    try:
+        return db.lock_subdirectory(subdir_key, agent_id or AGENT_ID)
+    except Exception as e:
+        return True, None  # Don't block on DB errors
+
+
+def db_unlock_subdirectory(subdir_key: str, agent_id: str | None = None) -> bool:
+    """Unlock a subdirectory, allowing other agents to use it.
+
+    Returns True if unlocked successfully.
+    """
+    db = get_state_db()
+    if db is None:
+        return True
+
+    try:
+        return db.unlock_subdirectory(subdir_key, agent_id)
+    except Exception:
+        return True
+
+
+def db_get_subdirectory_lock(subdir_key: str) -> dict | None:
+    """Get the current lock status for a subdirectory.
+
+    Returns dict with lock info or None if not locked.
+    """
+    db = get_state_db()
+    if db is None:
+        return None
+
+    try:
+        return db.get_subdirectory_lock(subdir_key)
+    except Exception:
+        return None
+
+
 # Compiler version mapping: GC SDK version -> decomp.me compiler ID
 # From melee/build/compilers/info.txt
 GC_TO_DECOMP_COMPILER = {
@@ -339,6 +666,9 @@ def get_agent_melee_root(agent_id: str | None = None, create_if_missing: bool = 
     Each agent gets its own worktree to avoid conflicts when working in parallel.
     Worktrees are created on-demand at melee-worktrees/{agent_id}/.
 
+    Note: This function is maintained for backwards compatibility.
+    New code should use get_worktree_for_file() for subdirectory-based worktrees.
+
     Args:
         agent_id: Optional agent ID override. Uses AGENT_ID if not provided.
         create_if_missing: If True (default), create worktree if it doesn't exist.
@@ -372,45 +702,69 @@ def get_agent_melee_root(agent_id: str | None = None, create_if_missing: bool = 
     if not create_if_missing:
         return DEFAULT_MELEE_ROOT
 
-    # Create worktree on first use
-    return _create_agent_worktree(aid, worktree_path)
-
-
-def resolve_melee_root(melee_root: Path | None) -> Path:
-    """Resolve melee root, using agent worktree if not explicitly specified.
-
-    This function should be called at the start of CLI commands to ensure
-    agents work in their assigned worktree by default.
-
-    Args:
-        melee_root: Explicitly provided path, or None to auto-detect.
-
-    Returns:
-        Path to use for melee operations.
-    """
-    if melee_root is not None:
-        return melee_root
-    return get_agent_melee_root()
+    # Create worktree on first use - use the subdirectory worktree creation logic
+    return _create_subdirectory_worktree(aid, worktree_path)
 
 
 def get_agent_context_file(agent_id: str | None = None, source_file: str | None = None) -> Path:
     """Get the context file path for the current agent.
 
     Uses agent's worktree context if available, otherwise falls back to main melee.
-    This allows agents to work without requiring a full build in their worktree.
+
+    Args:
+        agent_id: Optional agent ID override.
+        source_file: Optional source file to look for corresponding .ctx file.
+
+    Returns:
+        Path to the context file.
+    """
+    melee_root = get_agent_melee_root(agent_id, create_if_missing=False, validate_build=False)
+    return get_context_file(source_file=source_file, melee_root=melee_root)
+
+
+def resolve_melee_root(
+    melee_root: Path | None,
+    target_file: str | None = None,
+) -> Path:
+    """Resolve melee root, using subdirectory worktree if target_file is provided.
+
+    This function should be called at the start of CLI commands to ensure
+    work happens in the appropriate worktree.
+
+    Args:
+        melee_root: Explicitly provided path, or None to auto-detect.
+        target_file: If provided, use subdirectory-based worktree for this file.
+                     Path like "melee/ft/chara/ftFox/ftFx_SpecialHi.c"
+
+    Returns:
+        Path to use for melee operations.
+    """
+    if melee_root is not None:
+        return melee_root
+
+    # If target_file is known, use subdirectory-based worktree
+    if target_file:
+        return get_worktree_for_file(target_file)
+
+    # Fallback: Use main melee directory
+    return DEFAULT_MELEE_ROOT
+
+
+def get_context_file(source_file: str | None = None, melee_root: Path | None = None) -> Path:
+    """Get the context file path for a source file.
 
     The build system creates per-file .ctx files (e.g., build/GALE01/src/melee/ft/ftcoll.ctx).
     If source_file is provided, we look for the corresponding .ctx file.
     Otherwise we look for a consolidated build/ctx.c (legacy).
 
     Args:
-        agent_id: Optional agent ID override. Uses AGENT_ID if not provided.
         source_file: Optional source file path (e.g., "melee/ft/ftcoll.c") to find per-file context.
+        melee_root: Optional melee root path (defaults to DEFAULT_MELEE_ROOT).
 
     Returns:
         Path to the context file.
     """
-    agent_root = get_agent_melee_root(agent_id)
+    root = melee_root or DEFAULT_MELEE_ROOT
 
     # If source_file provided, look for per-file .ctx
     if source_file:
@@ -420,20 +774,20 @@ def get_agent_context_file(agent_id: str | None = None, source_file: str | None 
         if not ctx_relative.startswith("src/"):
             ctx_relative = f"src/{ctx_relative}"
 
-        # Try agent's worktree first
-        agent_ctx = agent_root / "build" / "GALE01" / ctx_relative
-        if agent_ctx.exists():
-            return agent_ctx
+        ctx_path = root / "build" / "GALE01" / ctx_relative
+        if ctx_path.exists():
+            return ctx_path
 
-        # Fall back to main melee
-        main_ctx = DEFAULT_MELEE_ROOT / "build" / "GALE01" / ctx_relative
-        if main_ctx.exists():
-            return main_ctx
+        # Fall back to main melee if using a worktree
+        if root != DEFAULT_MELEE_ROOT:
+            main_ctx = DEFAULT_MELEE_ROOT / "build" / "GALE01" / ctx_relative
+            if main_ctx.exists():
+                return main_ctx
 
     # Fall back to consolidated ctx.c (legacy behavior)
-    agent_ctx = agent_root / "build" / "ctx.c"
-    if agent_ctx.exists():
-        return agent_ctx
+    ctx_path = root / "build" / "ctx.c"
+    if ctx_path.exists():
+        return ctx_path
 
     main_ctx = DEFAULT_MELEE_ROOT / "build" / "ctx.c"
     if main_ctx.exists():
@@ -445,145 +799,10 @@ def get_agent_context_file(agent_id: str | None = None, source_file: str | None 
         ctx_relative = source_file.replace(".c", ".ctx").replace(".cpp", ".ctx")
         if not ctx_relative.startswith("src/"):
             ctx_relative = f"src/{ctx_relative}"
-        return agent_root / "build" / "GALE01" / ctx_relative
+        return root / "build" / "GALE01" / ctx_relative
 
-    # Return agent path so error message shows what needs to be built
-    return agent_ctx
-
-
-def _create_agent_worktree(agent_id: str, worktree_path: Path) -> Path:
-    """Create a new worktree for an agent.
-
-    Creates a new branch and worktree for the agent to work in isolation.
-    Also symlinks orig/, copies ctx.c, and runs build to generate report.json.
-    """
-    import subprocess
-
-    MELEE_WORKTREES_DIR.mkdir(parents=True, exist_ok=True)
-
-    # Get current branch from main melee
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            cwd=DEFAULT_MELEE_ROOT,
-            capture_output=True, text=True, check=True
-        )
-        base_branch = result.stdout.strip()
-    except subprocess.CalledProcessError:
-        base_branch = "master"
-
-    # Get current commit SHA for reference
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"],
-            cwd=DEFAULT_MELEE_ROOT,
-            capture_output=True, text=True, check=True
-        )
-        base_commit = result.stdout.strip()
-    except subprocess.CalledProcessError:
-        base_commit = "unknown"
-
-    # Get remote URL for repo info
-    try:
-        result = subprocess.run(
-            ["git", "remote", "get-url", "origin"],
-            cwd=DEFAULT_MELEE_ROOT,
-            capture_output=True, text=True, check=True
-        )
-        remote_url = result.stdout.strip()
-    except subprocess.CalledProcessError:
-        remote_url = str(DEFAULT_MELEE_ROOT)
-
-    # Create branch name for this agent
-    branch_name = f"agent/{agent_id}"
-
-    # Check if branch already exists
-    result = subprocess.run(
-        ["git", "branch", "--list", branch_name],
-        cwd=DEFAULT_MELEE_ROOT,
-        capture_output=True, text=True
-    )
-    branch_exists = bool(result.stdout.strip())
-
-    try:
-        if branch_exists:
-            # Worktree with existing branch
-            subprocess.run(
-                ["git", "worktree", "add", str(worktree_path), branch_name],
-                cwd=DEFAULT_MELEE_ROOT,
-                capture_output=True, text=True, check=True
-            )
-        else:
-            # Create new branch from current HEAD
-            subprocess.run(
-                ["git", "worktree", "add", "-b", branch_name, str(worktree_path)],
-                cwd=DEFAULT_MELEE_ROOT,
-                capture_output=True, text=True, check=True
-            )
-
-        # Symlink orig/ directory (contains original game files needed for build)
-        # Remove the git-checked-out orig/ (just has .gitkeep) and replace with symlink
-        orig_src = DEFAULT_MELEE_ROOT / "orig"
-        orig_dst = worktree_path / "orig"
-        if orig_src.exists():
-            import shutil
-            if orig_dst.exists() and not orig_dst.is_symlink():
-                shutil.rmtree(orig_dst)
-            if not orig_dst.exists():
-                orig_dst.symlink_to(orig_src.resolve())
-
-        # Copy ctx.c from main melee (it's the same - just preprocessed headers)
-        main_ctx = DEFAULT_MELEE_ROOT / "build" / "ctx.c"
-        if main_ctx.exists():
-            (worktree_path / "build").mkdir(exist_ok=True)
-            worktree_ctx = worktree_path / "build" / "ctx.c"
-            import shutil
-            shutil.copy2(main_ctx, worktree_ctx)
-
-        # Print worktree creation info with base details
-        console.print(f"\n[bold cyan]WORKTREE CREATED[/bold cyan]")
-        console.print(f"  [dim]Path:[/dim]   {worktree_path}")
-        console.print(f"  [dim]Branch:[/dim] {branch_name}")
-        console.print(f"  [dim]Base:[/dim]   {base_branch} @ {base_commit}")
-        console.print(f"  [dim]Repo:[/dim]   {remote_url}")
-
-        # Run build to generate report.json (needed for extract list)
-        configure_py = worktree_path / "configure.py"
-        if configure_py.exists():
-            console.print(f"\n[dim]Running initial build to generate report.json...[/dim]")
-            try:
-                # Run configure.py
-                subprocess.run(
-                    ["python", "configure.py"],
-                    cwd=worktree_path,
-                    capture_output=True, text=True, check=True
-                )
-                # Run ninja to build report.json
-                result = subprocess.run(
-                    ["ninja", "build/GALE01/report.json"],
-                    cwd=worktree_path,
-                    capture_output=True, text=True,
-                    timeout=300,  # 5 minute timeout
-                )
-                if result.returncode == 0:
-                    console.print(f"[green]Build complete - report.json generated[/green]")
-                else:
-                    console.print(f"[yellow]Build had issues: {result.stderr[:200]}[/yellow]")
-            except subprocess.TimeoutExpired:
-                console.print(f"[yellow]Build timed out - run 'ninja' manually in worktree[/yellow]")
-            except subprocess.CalledProcessError as e:
-                console.print(f"[yellow]Build setup failed: {e.stderr[:200] if e.stderr else str(e)}[/yellow]")
-            except FileNotFoundError:
-                console.print(f"[yellow]ninja not found - run 'ninja' manually in worktree[/yellow]")
-
-        console.print(f"\n[yellow]Run all git commands in the worktree, not in melee/[/yellow]")
-
-        return worktree_path
-
-    except subprocess.CalledProcessError as e:
-        console.print(f"[yellow]Warning: Could not create worktree: {e.stderr}[/yellow]")
-        console.print(f"[yellow]Falling back to shared melee directory[/yellow]")
-        return DEFAULT_MELEE_ROOT
+    # Return path so error message shows what needs to be built
+    return ctx_path
 
 
 def load_completed_functions() -> dict:

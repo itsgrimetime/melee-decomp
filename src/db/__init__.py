@@ -515,6 +515,264 @@ class StateDB:
             return [dict(row) for row in cursor.fetchall()]
 
     # =========================================================================
+    # Subdirectory Worktree Operations
+    # =========================================================================
+
+    def upsert_subdirectory(
+        self,
+        subdirectory_key: str,
+        worktree_path: str,
+        branch_name: str,
+        locked_by_agent: str | None = None,
+    ) -> None:
+        """Insert or update a subdirectory allocation record.
+
+        Args:
+            subdirectory_key: Subdirectory key (e.g., "ft-chara-ftFox")
+            worktree_path: Path to the worktree
+            branch_name: Git branch name
+            locked_by_agent: Agent ID if locked, None if unlocked
+        """
+        now = time.time()
+        with self.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO subdirectory_allocations
+                    (subdirectory_key, worktree_path, branch_name, locked_by_agent,
+                     locked_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(subdirectory_key) DO UPDATE SET
+                    worktree_path = excluded.worktree_path,
+                    branch_name = excluded.branch_name,
+                    locked_by_agent = COALESCE(excluded.locked_by_agent, locked_by_agent),
+                    locked_at = CASE WHEN excluded.locked_by_agent IS NOT NULL
+                                     THEN excluded.locked_at
+                                     ELSE locked_at END,
+                    updated_at = excluded.updated_at
+                """,
+                (subdirectory_key, worktree_path, branch_name, locked_by_agent,
+                 now if locked_by_agent else None, now)
+            )
+
+            self.log_audit(
+                'subdirectory', subdirectory_key, 'upserted',
+                agent_id=locked_by_agent,
+                new_value={
+                    'subdirectory_key': subdirectory_key,
+                    'worktree_path': worktree_path,
+                    'branch_name': branch_name,
+                    'locked_by_agent': locked_by_agent,
+                }
+            )
+
+    def lock_subdirectory(
+        self,
+        subdirectory_key: str,
+        agent_id: str,
+        timeout_minutes: int = 30,
+    ) -> tuple[bool, str | None]:
+        """Lock a subdirectory for exclusive access by an agent.
+
+        Args:
+            subdirectory_key: Subdirectory to lock
+            agent_id: Agent requesting the lock
+            timeout_minutes: Lock expiry in minutes (for high-contention zones)
+
+        Returns:
+            (success, error_message) tuple
+        """
+        now = time.time()
+        expires_at = now + (timeout_minutes * 60)
+
+        with self.transaction() as conn:
+            # Check current lock status
+            cursor = conn.execute(
+                """
+                SELECT locked_by_agent, lock_expires_at
+                FROM subdirectory_allocations
+                WHERE subdirectory_key = ?
+                """,
+                (subdirectory_key,)
+            )
+            row = cursor.fetchone()
+
+            if row:
+                current_lock = row['locked_by_agent']
+                lock_expires = row['lock_expires_at']
+
+                if current_lock:
+                    # Check if lock has expired
+                    if lock_expires and lock_expires > now:
+                        if current_lock == agent_id:
+                            # Already locked by this agent, extend the lock
+                            conn.execute(
+                                """
+                                UPDATE subdirectory_allocations
+                                SET lock_expires_at = ?, updated_at = ?
+                                WHERE subdirectory_key = ?
+                                """,
+                                (expires_at, now, subdirectory_key)
+                            )
+                            return True, None
+                        else:
+                            return False, f"Locked by {current_lock}"
+                    # Lock expired, we can take it
+
+            # Acquire or update lock
+            conn.execute(
+                """
+                UPDATE subdirectory_allocations
+                SET locked_by_agent = ?, locked_at = ?, lock_expires_at = ?, updated_at = ?
+                WHERE subdirectory_key = ?
+                """,
+                (agent_id, now, expires_at, now, subdirectory_key)
+            )
+
+            # Also record assignment
+            conn.execute(
+                """
+                INSERT INTO agent_subdirectory_assignments (agent_id, subdirectory_key)
+                VALUES (?, ?)
+                ON CONFLICT DO NOTHING
+                """,
+                (agent_id, subdirectory_key)
+            )
+
+            self.log_audit(
+                'subdirectory', subdirectory_key, 'locked',
+                agent_id=agent_id,
+                new_value={'locked_by': agent_id, 'expires_at': expires_at}
+            )
+
+        return True, None
+
+    def unlock_subdirectory(
+        self,
+        subdirectory_key: str,
+        agent_id: str | None = None,
+    ) -> bool:
+        """Unlock a subdirectory.
+
+        Args:
+            subdirectory_key: Subdirectory to unlock
+            agent_id: Optional agent ID to verify ownership
+
+        Returns:
+            True if unlocked successfully
+        """
+        now = time.time()
+        with self.transaction() as conn:
+            # Verify ownership if agent_id provided
+            if agent_id:
+                cursor = conn.execute(
+                    """
+                    SELECT locked_by_agent FROM subdirectory_allocations
+                    WHERE subdirectory_key = ?
+                    """,
+                    (subdirectory_key,)
+                )
+                row = cursor.fetchone()
+                if row and row['locked_by_agent'] != agent_id:
+                    return False  # Not owned by this agent
+
+            conn.execute(
+                """
+                UPDATE subdirectory_allocations
+                SET locked_by_agent = NULL, locked_at = NULL, lock_expires_at = NULL,
+                    updated_at = ?
+                WHERE subdirectory_key = ?
+                """,
+                (now, subdirectory_key)
+            )
+
+            self.log_audit(
+                'subdirectory', subdirectory_key, 'unlocked',
+                agent_id=agent_id
+            )
+
+        return True
+
+    def get_subdirectory_lock(self, subdirectory_key: str) -> dict | None:
+        """Get the current lock status for a subdirectory.
+
+        Returns:
+            Dict with lock info or None if not locked/not found
+        """
+        with self.connection() as conn:
+            cursor = conn.execute(
+                """
+                SELECT subdirectory_key, locked_by_agent, locked_at, lock_expires_at,
+                       worktree_path, branch_name
+                FROM subdirectory_allocations
+                WHERE subdirectory_key = ?
+                """,
+                (subdirectory_key,)
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+
+            result = dict(row)
+            now = time.time()
+
+            # Check if lock is expired
+            if result['lock_expires_at'] and result['lock_expires_at'] <= now:
+                result['locked_by_agent'] = None
+                result['lock_expired'] = True
+
+            return result
+
+    def get_subdirectory_status(self) -> list[dict]:
+        """Get status of all subdirectory allocations."""
+        with self.connection() as conn:
+            cursor = conn.execute(
+                """
+                SELECT * FROM v_subdirectory_status
+                ORDER BY subdirectory_key
+                """
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_agent_subdirectories(self, agent_id: str) -> list[str]:
+        """Get all subdirectories assigned to an agent."""
+        with self.connection() as conn:
+            cursor = conn.execute(
+                """
+                SELECT subdirectory_key FROM agent_subdirectory_assignments
+                WHERE agent_id = ?
+                ORDER BY assigned_at DESC
+                """,
+                (agent_id,)
+            )
+            return [row['subdirectory_key'] for row in cursor.fetchall()]
+
+    def increment_pending_commits(self, subdirectory_key: str) -> None:
+        """Increment the pending commits count for a subdirectory."""
+        with self.connection() as conn:
+            conn.execute(
+                """
+                UPDATE subdirectory_allocations
+                SET pending_commits = pending_commits + 1,
+                    last_commit_at = unixepoch('now', 'subsec'),
+                    updated_at = unixepoch('now', 'subsec')
+                WHERE subdirectory_key = ?
+                """,
+                (subdirectory_key,)
+            )
+
+    def reset_pending_commits(self, subdirectory_key: str) -> None:
+        """Reset the pending commits count (after merge/collect)."""
+        with self.connection() as conn:
+            conn.execute(
+                """
+                UPDATE subdirectory_allocations
+                SET pending_commits = 0, updated_at = unixepoch('now', 'subsec')
+                WHERE subdirectory_key = ?
+                """,
+                (subdirectory_key,)
+            )
+
+    # =========================================================================
     # Sync State Operations
     # =========================================================================
 

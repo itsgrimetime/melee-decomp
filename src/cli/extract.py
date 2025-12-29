@@ -12,8 +12,7 @@ from rich.table import Table
 from ._common import (
     console,
     DEFAULT_MELEE_ROOT,
-    get_agent_melee_root,
-    get_agent_context_file,
+    get_context_file,
     check_duplicate_operation,
     resolve_melee_root,
     load_completed_functions,
@@ -29,14 +28,14 @@ _context_env = os.environ.get("DECOMP_CONTEXT_FILE", "")
 
 
 def _get_context_file(source_file: str | None = None) -> Path:
-    """Get context file path, using agent's worktree if available.
+    """Get context file path.
 
     Args:
         source_file: Optional source file path to find per-file .ctx context.
     """
     if _context_env:
         return Path(_context_env)
-    return get_agent_context_file(source_file=source_file)
+    return get_context_file(source_file=source_file)
 
 extract_app = typer.Typer(help="Extract and list unmatched functions")
 

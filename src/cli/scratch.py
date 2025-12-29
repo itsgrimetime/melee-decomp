@@ -18,7 +18,7 @@ from ._common import (
     console,
     DEFAULT_MELEE_ROOT,
     DECOMP_CONFIG_DIR,
-    get_agent_context_file,
+    get_context_file,
     detect_local_api_url,
     get_local_api_url,
     record_match_score,
@@ -44,14 +44,14 @@ _context_env = os.environ.get("DECOMP_CONTEXT_FILE", "")
 
 
 def _get_context_file(source_file: str | None = None) -> Path:
-    """Get context file path, using agent's worktree if available.
+    """Get context file path.
 
     Args:
         source_file: Optional source file path to find per-file .ctx context.
     """
     if _context_env:
         return Path(_context_env)
-    return get_agent_context_file(source_file=source_file)
+    return get_context_file(source_file=source_file)
 
 scratch_app = typer.Typer(help="Manage decomp.me scratches")
 

@@ -7,21 +7,43 @@ description: Match decompiled C code to original PowerPC assembly for Super Smas
 
 You are an expert at matching C source code to PowerPC assembly for the Melee decompilation project. Your goal is to achieve byte-for-byte identical compilation output.
 
-## Agent Worktrees
+## Subdirectory Worktrees
 
-Parallel agents each have their own worktree at `melee-worktrees/<agent-id>/`.
-CLI commands auto-detect and use your worktree by default.
+The project uses **subdirectory-based worktrees** for parallel agent work. Each source subdirectory gets its own isolated worktree, which enables easy merges since commits to different subdirectories rarely conflict.
+
+**Worktree mapping:**
+```
+melee/src/melee/lb/*.c     → melee-worktrees/dir-lb/
+melee/src/melee/gr/*.c     → melee-worktrees/dir-gr/
+melee/src/melee/ft/chara/ftFox/*.c → melee-worktrees/dir-ft-chara-ftFox/
+melee/src/melee/ft/chara/ftCommon/*.c → melee-worktrees/dir-ft-chara-ftCommon/
+```
 
 **Key points:**
-- `commit apply`, `workflow finish`, etc. automatically use your worktree
-- If you see "Warning: Committing to main melee repo", something is wrong
+- When you claim a function, specify `--source-file` to lock the subdirectory
+- The worktree is created automatically when needed
 - Commits stay isolated until collected via `melee-agent worktree collect`
 - Local decomp.me server is **auto-detected** (no env vars needed)
 
+**Claiming with subdirectory:**
+```bash
+# Claim and lock the subdirectory (prevents conflicts with other agents)
+melee-agent claim add lbColl_80008440 --source-file melee/lb/lbcollision.c
+
+# List subdirectory worktrees
+melee-agent worktree list
+
+# Check subdirectory status
+melee-agent worktree status lb
+```
+
+**High-contention zone:** `ft/chara/ftCommon/` contains 123 behavior files used by ALL characters. Subdirectory locks expire after 30 minutes to prevent blocking.
+
 **Do NOT:**
-- Create branches directly in `melee/` - use your worktree
+- Create branches directly in `melee/` - use subdirectory worktrees
 - Manually specify `--melee-root` - if you think you need to, stop and ask the user for confirmation, stating your justification
 - Set `DECOMP_API_BASE` manually - let auto-detection find the server
+- Work on functions in locked subdirectories owned by other agents
 
 ## Workflow
 
@@ -249,7 +271,11 @@ The context headers have some incorrect type declarations. When you see assembly
 melee-agent extract list --min-match 0 --max-match 0.50 --sort score --show-score --limit 10
 # Pick a function with high score (130+), reasonable size (50-300 bytes)
 
-melee-agent claim add lbColl_80008440
+# Claim with source file to lock subdirectory (prevents conflicts)
+melee-agent claim add lbColl_80008440 --source-file melee/lb/lbcollision.c
+# → Claimed: lbColl_80008440
+# → Subdirectory: lb
+# → Worktree will be at: melee-worktrees/dir-lb/
 
 # Create scratch with full context
 melee-agent extract get lbColl_80008440 --create-scratch
@@ -268,6 +294,9 @@ melee-agent scratch search-context xYz12 "CollData" "HSD_GObj"
 
 # Improved the match, FINISH THE FUNCTION (commits + records)
 melee-agent workflow finish lbColl_80008440 xYz12
+
+# Check subdirectory worktree status
+melee-agent worktree list
 ```
 
 ## Checking Your Progress
