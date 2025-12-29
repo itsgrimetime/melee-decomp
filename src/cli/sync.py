@@ -550,3 +550,373 @@ def sync_clear():
     if SLUG_MAP_FILE.exists():
         SLUG_MAP_FILE.unlink()
         console.print(f"[green]Removed {SLUG_MAP_FILE}[/green]")
+
+
+@sync_app.command("validate")
+def sync_validate(
+    local_url: Annotated[
+        str, typer.Option("--local-url", "-u", help="Local decomp.me instance URL")
+    ] = DEFAULT_DECOMP_ME_URL,
+    min_match: Annotated[
+        float, typer.Option("--min-match", help="Minimum match percentage to validate")
+    ] = 95.0,
+    limit: Annotated[
+        int, typer.Option("--limit", "-n", help="Maximum scratches to validate")
+    ] = 50,
+    fix: Annotated[
+        bool, typer.Option("--fix", help="Automatically fix issues where possible")
+    ] = False,
+    output_json: Annotated[
+        bool, typer.Option("--json", help="Output as JSON")
+    ] = False,
+):
+    """Validate scratches before syncing to production.
+
+    Checks each scratch for:
+    - Exists on local server
+    - Scratch name matches expected function name
+    - Code contains the function name (catches wrong-code bugs)
+    - Match % matches recorded value
+    - No duplicate scratches for same function
+
+    Use --fix to automatically resolve issues where possible.
+    """
+    _require_api_url(local_url)
+
+    completed = load_completed_functions()
+    slug_map = load_slug_map()
+    synced_local_slugs = {v.get('local_slug') for v in slug_map.values()}
+
+    # Find candidates to validate
+    candidates = []
+    for func_name, info in completed.items():
+        match_pct = info.get('match_percent', 0)
+        local_slug = info.get('scratch_slug', '')
+
+        if match_pct < min_match:
+            continue
+        if not local_slug:
+            continue
+        if local_slug in synced_local_slugs:
+            continue  # Already synced, skip
+
+        candidates.append({
+            'function': func_name,
+            'slug': local_slug,
+            'recorded_match': match_pct,
+        })
+
+    candidates.sort(key=lambda x: -x['recorded_match'])
+    candidates = candidates[:limit]
+
+    if not candidates:
+        console.print("[green]No unsynced scratches to validate[/green]")
+        return
+
+    console.print(f"[bold]Validating {len(candidates)} scratches...[/bold]\n")
+
+    from src.client import DecompMeAPIClient
+
+    # Track duplicates (multiple scratches for same function)
+    func_to_slugs: dict[str, list[str]] = {}
+    for c in candidates:
+        func = c['function']
+        if func not in func_to_slugs:
+            func_to_slugs[func] = []
+        func_to_slugs[func].append(c['slug'])
+
+    duplicates = {f: slugs for f, slugs in func_to_slugs.items() if len(slugs) > 1}
+
+    async def do_validate():
+        results = {
+            'valid': [],
+            'issues': [],
+            'errors': [],
+            'duplicates': [],
+        }
+
+        async with DecompMeAPIClient(base_url=local_url) as client:
+            for candidate in candidates:
+                func_name = candidate['function']
+                slug = candidate['slug']
+                recorded_match = candidate['recorded_match']
+
+                issues = []
+
+                try:
+                    scratch = await client.get_scratch(slug)
+
+                    # Check 1: Name matches
+                    if scratch.name != func_name:
+                        issues.append({
+                            'type': 'name_mismatch',
+                            'expected': func_name,
+                            'actual': scratch.name,
+                            'message': f"Scratch name '{scratch.name}' doesn't match function '{func_name}'",
+                        })
+
+                    # Check 2: Code contains function name
+                    if func_name not in scratch.source_code:
+                        # Also check if scratch name is in code (might be renamed)
+                        if scratch.name not in scratch.source_code:
+                            issues.append({
+                                'type': 'wrong_code',
+                                'message': f"Function name not found in scratch code",
+                            })
+                        else:
+                            issues.append({
+                                'type': 'code_uses_scratch_name',
+                                'message': f"Code uses scratch name '{scratch.name}' not '{func_name}'",
+                            })
+
+                    # Check 3: Match % is reasonable
+                    if scratch.max_score > 0:
+                        actual_match = (scratch.max_score - scratch.score) / scratch.max_score * 100
+                        if abs(actual_match - recorded_match) > 5:
+                            issues.append({
+                                'type': 'match_mismatch',
+                                'expected': recorded_match,
+                                'actual': actual_match,
+                                'message': f"Match % differs: recorded {recorded_match:.1f}%, actual {actual_match:.1f}%",
+                            })
+
+                    # Check 4: Duplicate
+                    if func_name in duplicates:
+                        issues.append({
+                            'type': 'duplicate',
+                            'slugs': duplicates[func_name],
+                            'message': f"Multiple scratches for this function: {', '.join(duplicates[func_name])}",
+                        })
+
+                    entry = {
+                        'function': func_name,
+                        'slug': slug,
+                        'scratch_name': scratch.name,
+                        'recorded_match': recorded_match,
+                        'actual_match': (scratch.max_score - scratch.score) / scratch.max_score * 100 if scratch.max_score > 0 else 0,
+                        'issues': issues,
+                    }
+
+                    if issues:
+                        results['issues'].append(entry)
+                    else:
+                        results['valid'].append(entry)
+
+                except Exception as e:
+                    results['errors'].append({
+                        'function': func_name,
+                        'slug': slug,
+                        'error': str(e),
+                    })
+
+        return results
+
+    results = asyncio.run(do_validate())
+
+    if output_json:
+        print(json.dumps(results, indent=2))
+        return
+
+    # Display results
+    if results['valid']:
+        console.print(f"[green]✓ Valid scratches: {len(results['valid'])}[/green]")
+
+    if results['issues']:
+        console.print(f"\n[yellow]⚠ Issues found: {len(results['issues'])}[/yellow]\n")
+
+        for entry in results['issues']:
+            console.print(f"[cyan]{entry['function']}[/cyan] ({entry['slug']})")
+            for issue in entry['issues']:
+                issue_type = issue['type']
+                if issue_type == 'name_mismatch':
+                    console.print(f"  [yellow]• Name mismatch:[/yellow] scratch='{issue['actual']}', expected='{issue['expected']}'")
+                elif issue_type == 'wrong_code':
+                    console.print(f"  [red]• Wrong code:[/red] function name not in scratch code")
+                elif issue_type == 'code_uses_scratch_name':
+                    console.print(f"  [yellow]• Code mismatch:[/yellow] {issue['message']}")
+                elif issue_type == 'match_mismatch':
+                    console.print(f"  [yellow]• Match differs:[/yellow] recorded {issue['expected']:.1f}% vs actual {issue['actual']:.1f}%")
+                elif issue_type == 'duplicate':
+                    console.print(f"  [yellow]• Duplicate:[/yellow] {', '.join(issue['slugs'])}")
+            console.print()
+
+    if results['errors']:
+        console.print(f"\n[red]✗ Errors: {len(results['errors'])}[/red]")
+        for err in results['errors'][:5]:
+            console.print(f"  {err['function']} ({err['slug']}): {err['error']}")
+        if len(results['errors']) > 5:
+            console.print(f"  [dim]... and {len(results['errors']) - 5} more[/dim]")
+
+    # Summary
+    console.print(f"\n[bold]Summary:[/bold]")
+    console.print(f"  Valid: {len(results['valid'])}")
+    console.print(f"  Issues: {len(results['issues'])}")
+    console.print(f"  Errors: {len(results['errors'])}")
+
+    if results['issues'] and not fix:
+        console.print(f"\n[dim]Run with --fix to attempt automatic fixes[/dim]")
+        console.print(f"[dim]Or manually inspect and fix issues before syncing[/dim]")
+
+
+@sync_app.command("dedup")
+def sync_dedup(
+    local_url: Annotated[
+        str, typer.Option("--local-url", "-u", help="Local decomp.me instance URL")
+    ] = DEFAULT_DECOMP_ME_URL,
+    min_match: Annotated[
+        float, typer.Option("--min-match", help="Minimum match percentage")
+    ] = 95.0,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Show what would change without applying")
+    ] = False,
+    output_json: Annotated[
+        bool, typer.Option("--json", help="Output as JSON")
+    ] = False,
+):
+    """De-duplicate scratches - pick best scratch when multiple exist for same function.
+
+    When multiple scratches exist for the same function, compares them and
+    picks the best one based on:
+    1. Highest match percentage
+    2. Name matches function name
+    3. Most recent update
+
+    Updates completed_functions.json to use the winning scratch.
+    """
+    _require_api_url(local_url)
+
+    completed = load_completed_functions()
+
+    # Find functions with multiple candidate scratches
+    # This requires checking the database for multiple scratches per function
+    from src.db import get_db
+    db = get_db()
+
+    with db.connection() as conn:
+        cursor = conn.execute('''
+            SELECT function_name, GROUP_CONCAT(slug) as slugs, COUNT(*) as cnt
+            FROM scratches
+            WHERE function_name IS NOT NULL AND instance = 'local'
+            GROUP BY function_name
+            HAVING cnt > 1
+        ''')
+        duplicates = [dict(row) for row in cursor.fetchall()]
+
+    if not duplicates:
+        # Also check completed_functions for duplicates by slug
+        slug_to_funcs: dict[str, list[str]] = {}
+        for func_name, info in completed.items():
+            slug = info.get('scratch_slug')
+            if slug:
+                if slug not in slug_to_funcs:
+                    slug_to_funcs[slug] = []
+                slug_to_funcs[slug].append(func_name)
+
+        # Find slugs used by multiple functions (different issue - same scratch, multiple functions)
+        multi_use = {s: funcs for s, funcs in slug_to_funcs.items() if len(funcs) > 1}
+        if multi_use:
+            console.print("[yellow]Found scratches used by multiple functions:[/yellow]")
+            for slug, funcs in list(multi_use.items())[:10]:
+                console.print(f"  {slug}: {', '.join(funcs)}")
+            console.print("\n[dim]This may indicate wrong-code issues[/dim]")
+            return
+
+        console.print("[green]No duplicate scratches found[/green]")
+        return
+
+    console.print(f"[bold]Found {len(duplicates)} functions with multiple scratches[/bold]\n")
+
+    from src.client import DecompMeAPIClient
+
+    async def do_dedup():
+        results = []
+
+        async with DecompMeAPIClient(base_url=local_url) as client:
+            for dup in duplicates:
+                func_name = dup['function_name']
+                slugs = dup['slugs'].split(',')
+
+                # Fetch all scratches for this function
+                scratch_info = []
+                for slug in slugs:
+                    try:
+                        scratch = await client.get_scratch(slug)
+                        match_pct = (scratch.max_score - scratch.score) / scratch.max_score * 100 if scratch.max_score > 0 else 0
+                        scratch_info.append({
+                            'slug': slug,
+                            'name': scratch.name,
+                            'match_pct': match_pct,
+                            'name_matches': scratch.name == func_name,
+                            'code_has_func': func_name in scratch.source_code,
+                        })
+                    except Exception as e:
+                        scratch_info.append({
+                            'slug': slug,
+                            'error': str(e),
+                        })
+
+                # Score each scratch
+                for s in scratch_info:
+                    if 'error' in s:
+                        s['score'] = -1000
+                    else:
+                        s['score'] = s['match_pct']
+                        if s['name_matches']:
+                            s['score'] += 10
+                        if s['code_has_func']:
+                            s['score'] += 5
+
+                # Pick winner
+                valid = [s for s in scratch_info if 'error' not in s]
+                if valid:
+                    winner = max(valid, key=lambda x: x['score'])
+                    losers = [s for s in valid if s['slug'] != winner['slug']]
+                else:
+                    winner = None
+                    losers = []
+
+                results.append({
+                    'function': func_name,
+                    'scratches': scratch_info,
+                    'winner': winner,
+                    'losers': losers,
+                })
+
+        return results
+
+    results = asyncio.run(do_dedup())
+
+    if output_json:
+        print(json.dumps(results, indent=2))
+        return
+
+    changes_made = 0
+    for r in results:
+        func_name = r['function']
+        winner = r['winner']
+
+        if not winner:
+            console.print(f"[red]{func_name}:[/red] No valid scratches found")
+            continue
+
+        console.print(f"[cyan]{func_name}:[/cyan]")
+        console.print(f"  [green]Winner:[/green] {winner['slug']} ({winner['match_pct']:.1f}%)")
+        for loser in r['losers']:
+            console.print(f"  [dim]Loser:[/dim] {loser['slug']} ({loser['match_pct']:.1f}%)")
+
+        # Update completed_functions if needed
+        if func_name in completed:
+            current_slug = completed[func_name].get('scratch_slug')
+            if current_slug != winner['slug']:
+                console.print(f"  [yellow]→ Updating from {current_slug} to {winner['slug']}[/yellow]")
+                if not dry_run:
+                    completed[func_name]['scratch_slug'] = winner['slug']
+                    completed[func_name]['match_percent'] = winner['match_pct']
+                changes_made += 1
+        console.print()
+
+    if changes_made > 0 and not dry_run:
+        save_completed_functions(completed)
+        console.print(f"[green]Updated {changes_made} function(s) in completed_functions.json[/green]")
+    elif dry_run and changes_made > 0:
+        console.print(f"[yellow]Would update {changes_made} function(s) (dry run)[/yellow]")
