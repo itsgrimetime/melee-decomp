@@ -18,6 +18,9 @@ from .complete import _load_completed, _save_completed, _get_current_branch
 workflow_app = typer.Typer(help="High-level workflow commands (recommended)")
 
 
+MAX_BROKEN_BUILDS_PER_WORKTREE = 3  # Block new --force commits after this many
+
+
 @workflow_app.command("finish")
 def workflow_finish(
     function_name: Annotated[str, typer.Argument(help="Name of the matched function")],
@@ -36,6 +39,12 @@ def workflow_finish(
     ] = False,
     notes: Annotated[
         Optional[str], typer.Option("--notes", help="Additional notes to record")
+    ] = None,
+    force: Annotated[
+        bool, typer.Option("--force", help="Skip build validation (requires --diagnosis)")
+    ] = False,
+    diagnosis: Annotated[
+        Optional[str], typer.Option("--diagnosis", help="Required with --force: explain why build is broken")
     ] = None,
 ):
     """Finish a matched function: commit to repo AND record as completed.
@@ -56,9 +65,18 @@ def workflow_finish(
 
     Use --dry-run to verify everything would work without actually committing.
 
+    Use --force --diagnosis "..." to skip build validation when the build is broken
+    due to header mismatches or other issues that require fixes outside this function.
+    The diagnosis is stored and visible in 'state status <func>'.
+
     Automatically uses the agent's worktree to keep work isolated from other
     parallel agents. Use --melee-root to override.
     """
+    # Validate --force requires --diagnosis
+    if force and not diagnosis:
+        console.print("[red]Error: --force requires --diagnosis to explain why build is broken[/red]")
+        console.print("[dim]Example: --force --diagnosis 'Header has UNK_RET but function returns void'[/dim]")
+        raise typer.Exit(1)
     api_url = api_url or get_local_api_url()
 
     # Look up source file from claim to use the correct subdirectory worktree
@@ -69,6 +87,18 @@ def workflow_finish(
     if AGENT_ID and source_file and "melee-worktrees" not in str(melee_root):
         console.print(f"[yellow]Warning: Working in main repo, not subdirectory worktree[/yellow]")
         console.print(f"[dim]Expected worktree for: {source_file}[/dim]")
+
+    # Check worktree health when using --force
+    if force:
+        from src.db import get_db
+        db = get_db()
+        broken_count, broken_funcs = db.get_worktree_broken_count(str(melee_root))
+        if broken_count >= MAX_BROKEN_BUILDS_PER_WORKTREE:
+            console.print(f"[red]Cannot use --force: worktree already has {broken_count} broken builds[/red]")
+            console.print(f"[dim]Functions needing fixes: {', '.join(broken_funcs)}[/dim]")
+            console.print(f"\n[yellow]Run /decomp-fixup to fix these before adding more broken commits.[/yellow]")
+            raise typer.Exit(1)
+
     from src.client import DecompMeAPIClient
     from src.commit import auto_detect_and_commit
     from src.commit.configure import get_file_path_from_function
@@ -121,7 +151,7 @@ def workflow_finish(
             # Check header sync
             sig_check = check_header_sync(source_code, function_name, melee_root, file_path)
             if sig_check and not sig_check["match"]:
-                console.print(format_signature_mismatch(sig_check))
+                console.print(format_signature_mismatch(sig_check, function_name))
 
                 # Show exact fix suggestion
                 fix_suggestion = get_header_fix_suggestion(sig_check)
@@ -149,7 +179,15 @@ def workflow_finish(
                 raise typer.Exit(1)
 
             # Step 3: Test compilation
-            console.print("\n[bold]Step 3:[/bold] Testing compilation...")
+            build_passed = True  # Track for later
+            if force:
+                console.print("\n[bold]Step 3:[/bold] Skipping compilation (--force)...")
+                console.print(f"  [yellow]Build will be marked as broken[/yellow]")
+                console.print(f"  [dim]Diagnosis: {diagnosis}[/dim]")
+                build_passed = False
+            else:
+                console.print("\n[bold]Step 3:[/bold] Testing compilation...")
+
             full_path = melee_root / "src" / file_path
             original_content = full_path.read_text(encoding='utf-8')
 
@@ -163,21 +201,29 @@ def workflow_finish(
                     console.print("  [red]Failed to apply code[/red]")
                     raise typer.Exit(1)
 
-                # Configure and compile
-                subprocess.run(["python", "configure.py"], cwd=melee_root, capture_output=True)
-                obj_path = f"build/GALE01/src/{file_path}".replace('.c', '.o')
-                result = subprocess.run(
-                    ["ninja", obj_path], cwd=melee_root, capture_output=True, text=True
-                )
+                if not force:
+                    # Configure and compile
+                    subprocess.run(["python", "configure.py"], cwd=melee_root, capture_output=True)
+                    obj_path = f"build/GALE01/src/{file_path}".replace('.c', '.o')
+                    result = subprocess.run(
+                        ["ninja", obj_path], cwd=melee_root, capture_output=True, text=True
+                    )
 
-                if result.returncode != 0:
-                    console.print("  [red]Compilation failed:[/red]")
-                    full_output = result.stderr + result.stdout
-                    diagnostic = analyze_commit_error(full_output, file_path)
-                    console.print(diagnostic)
-                    raise typer.Exit(1)
+                    if result.returncode != 0:
+                        console.print("  [red]Compilation failed:[/red]")
+                        full_output = result.stderr + result.stdout
+                        diagnostic = analyze_commit_error(
+                            full_output,
+                            file_path,
+                            melee_root=melee_root,
+                            function_name=function_name,
+                            source_code=source_code,
+                        )
+                        console.print(diagnostic)
+                        console.print("\n[yellow]Tip: Use --force --diagnosis '...' to commit anyway[/yellow]")
+                        raise typer.Exit(1)
 
-                console.print("  [green]Compilation successful[/green]")
+                    console.print("  [green]Compilation successful[/green]")
 
             finally:
                 # Revert for dry-run, keep for actual commit
@@ -186,9 +232,12 @@ def workflow_finish(
 
             if dry_run:
                 console.print("\n[bold cyan]DRY RUN COMPLETE[/bold cyan]")
-                console.print("[green]All checks passed - ready to commit[/green]")
+                if force:
+                    console.print("[yellow]Would commit with broken build[/yellow]")
+                else:
+                    console.print("[green]All checks passed - ready to commit[/green]")
                 console.print("[dim]Run without --dry-run to apply changes[/dim]")
-                return match_pct, None
+                return match_pct, None, build_passed
 
             # Step 4: Commit (already applied above, just need git commit)
             console.print("\n[bold]Step 4:[/bold] Committing to git...")
@@ -207,9 +256,9 @@ def workflow_finish(
             )
             console.print("  [green]Committed to repository[/green]")
 
-            return match_pct, pr_url
+            return match_pct, pr_url, build_passed
 
-    match_pct, pr_url = asyncio.run(finish())
+    match_pct, pr_url, build_passed = asyncio.run(finish())
 
     if dry_run:
         return
@@ -234,7 +283,9 @@ def workflow_finish(
         match_percent=match_pct,
         local_scratch_slug=scratch_slug,
         is_committed=True,
-        status='committed',
+        status='committed_needs_fix' if not build_passed else 'committed',
+        build_status='broken' if not build_passed else 'passing',
+        build_diagnosis=diagnosis if not build_passed else None,
         branch=branch,
         worktree_path=str(melee_root),
         notes=notes or "completed via workflow finish",
@@ -247,10 +298,18 @@ def workflow_finish(
 
     # Summary
     console.print("\n" + "=" * 50)
-    console.print(f"[bold green]Successfully finished {function_name}![/bold green]")
-    console.print(f"  Match: {match_pct:.1f}%")
-    console.print(f"  Branch: {branch}")
-    console.print(f"  Status: [green]Committed[/green]")
+    if build_passed:
+        console.print(f"[bold green]Successfully finished {function_name}![/bold green]")
+        console.print(f"  Match: {match_pct:.1f}%")
+        console.print(f"  Branch: {branch}")
+        console.print(f"  Status: [green]Committed[/green]")
+    else:
+        console.print(f"[bold yellow]Committed {function_name} with broken build[/bold yellow]")
+        console.print(f"  Match: {match_pct:.1f}%")
+        console.print(f"  Branch: {branch}")
+        console.print(f"  Status: [yellow]Committed (needs fix)[/yellow]")
+        console.print(f"  Diagnosis: {diagnosis}")
+        console.print(f"\n[dim]Run /decomp-fixup to resolve build issues[/dim]")
     console.print("=" * 50)
 
 

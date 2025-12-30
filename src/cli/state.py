@@ -163,6 +163,18 @@ def state_status(
         if func.get('notes'):
             console.print(f"[bold]Notes:[/bold] {func['notes']}")
 
+        # Show build status for committed functions with issues
+        if func.get('build_status') == 'broken':
+            console.print(f"[bold]Build:[/bold] [yellow]broken[/yellow]")
+            if func.get('build_diagnosis'):
+                console.print(f"[bold]Diagnosis:[/bold] {func['build_diagnosis']}")
+            console.print(f"[dim]Use /decomp-fixup to resolve build issues[/dim]")
+        elif func.get('build_status') == 'passing':
+            console.print(f"[bold]Build:[/bold] [green]passing[/green]")
+
+        if func.get('worktree_path'):
+            console.print(f"[bold]Worktree:[/bold] {func['worktree_path']}")
+
         console.print(f"[dim]Updated: {_format_datetime(func.get('updated_at'))}[/dim]")
 
         # Show branch progress if any
@@ -231,6 +243,8 @@ def state_status(
         status = func.get('status', 'unknown')
         if func.get('pr_state') == 'MERGED':
             status = "[green]merged[/green]"
+        elif func.get('build_status') == 'broken':
+            status = "[yellow]needs_fix[/yellow]"
         elif func.get('is_committed'):
             status = "[blue]committed[/blue]"
         elif status == 'claimed':

@@ -52,7 +52,7 @@ You'll see messages like:
 - `[green]Worktree build OK[/green]` - you're good to go
 - `[yellow]Worktree build has errors - fix before committing[/yellow]` - fix the errors shown
 
-**If build has errors:** Fix them then try again.
+**If build has errors:** Use `/decomp-fixup` skill to diagnose and fix them.
 
 ### Step 1: Choose and Claim a Function
 
@@ -145,41 +145,30 @@ This single command:
 3. Records the function as committed
 4. Releases any claims
 
+**If build validation fails** due to header mismatches or caller issues:
+```bash
+# First, try to fix the issue (use /decomp-fixup skill)
+# If unfixable without broader changes, commit anyway with diagnosis:
+melee-agent workflow finish <function_name> <slug> --force --diagnosis "Header has UNK_RET but function returns void"
+```
+
+The `--force` flag:
+- Requires `--diagnosis` to explain why the build is broken
+- Stores the diagnosis in the database (visible in `state status`)
+- Marks the function as `committed_needs_fix`
+- Worktrees with 3+ broken builds block new claims to prevent pile-up
+
 **CRITICAL: Commit Requirements**
 
 Before committing, you MUST ensure:
 
-1. **Header signatures match implementations** - If you implement `void foo(int x)`, the header MUST declare `void foo(int)`, not `UNK_RET foo(UNK_PARAMS)`. The CI uses `-requireprotos` which fails on mismatches.
+1. **No merge conflict markers** - Files must not contain `<<<<<<<`, `=======`, or `>>>>>>>` markers.
 
-2. **No merge conflict markers** - Files must not contain `<<<<<<<`, `=======`, or `>>>>>>>` markers.
+2. **No naming regressions** - Do not change names of functions, params, variables, etc. from an "english" name to their address-based name, e.g. do not change `ItemStateTable_GShell[] -> it_803F5BA8[]`
 
-3. **Build passes with --require-protos** - This is the acceptance criteria:
-   ```bash
-   cd <worktree> && python configure.py --require-protos && ninja
-   ```
-   The `--require-protos` flag is **required**, not optional. It ensures all function prototypes are declared before use, which CI enforces. If this build fails, your commit will fail CI.
+3. **No pointer arithmetic/magic numbers** - don't do things like `if (((u8*)&lbl_80472D28)[0x116] == 1) {`, if you find yourself needing to do this to get a 100% match, you should investigate and update the struct definition accordingly.
 
-4. **Fix callers when signatures change** - If you change a function from `void foo(void)` to `void foo(s32)`, you must update ALL callers to pass the correct argument. Use grep to find them:
-   ```bash
-   grep -r "function_name" <worktree>/src/melee/
-   ```
-5. **No naming regressions** - Do not change names of functions, params, variables, etc. from an "english" name to their address-based name, e.g. do not change `ItemStateTable_GShell[] -> it_803F5BA8[]`
-
-6. **No pointer arithmetic/magic numbers** - don't do things like `if (((u8*)&lbl_80472D28)[0x116] == 1) {`, if you find yourself needing to do this to get a 100% match, you should investigate and update the struct definition accordingly.
-
-**Common header fixes needed:**
-```c
-// Before (stub declaration):
-/* 0D7268 */ UNK_RET ftCo_800D7268(UNK_PARAMS);
-
-// After (matches implementation):
-/* 0D7268 */ M2C_UNK ftCo_800D7268(void* arg0);
-```
-
-**Improved commit diagnostics:** When `--dry-run` fails, you should see:
-- Suggestions for missing `#include` statements based on undefined types
-- Detection of header signature mismatches (e.g., `UNK_RET` vs actual signature)
-- Notes about which header file needs updating
+**Build passes with --require-protos** - The `workflow finish` command validates this. If it fails due to header mismatches or caller issues, use the `/decomp-fixup` skill to resolve them.
 
 ## Type and Context Tips
 
@@ -322,13 +311,17 @@ melee-agent state urls <func_name>        # Show all URLs (scratch, PR)
 | Assembly uses `lfs` but code generates `lwz`+conversion | Field is float but header says int - use cast workaround |
 | Can't find struct offset | `melee-agent struct offset 0xXXX --struct StructName` |
 | Struct field not visible in context | Use `M2C_FIELD(ptr, offset, type)` macro for raw offset access |
+| Build fails after matching | Use `/decomp-fixup` skill to fix header/caller issues, or `--force --diagnosis` |
+| Header has UNK_RET/UNK_PARAMS | Use `/decomp-fixup` skill to update signatures |
+| Can't claim function | Worktree may have 3+ broken builds - run `/decomp-fixup` first |
 
 **NonMatching files:** You CAN work on functions in NonMatching files. The build uses original .dol for linking, so builds always pass. Match % is tracked per-function.
 
 **Header signature bugs:** If assembly shows parameter usage (e.g., `cmpwi r3, 1`) but header declares `void func(void)`:
-1. Fix the header in your worktree
-2. Rebuild: `ninja`
-3. Re-create scratch to get updated context
+1. Use `/decomp-fixup` skill for guidance on fixing headers
+2. Fix the header in your worktree
+3. Rebuild: `ninja`
+4. Re-create scratch to get updated context
 
 ## Server Unreachable
 

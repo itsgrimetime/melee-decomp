@@ -13,6 +13,29 @@ from .pr import (
     switch_to_branch
 )
 from .workflow import CommitWorkflow, auto_detect_and_commit
+from .diagnostics import (
+    # Error dataclasses
+    CompilerError,
+    DiagnosticResult,
+    # Parsing functions
+    parse_mwcc_errors,
+    extract_linker_errors,
+    extract_undefined_identifiers,
+    extract_conflicting_functions,
+    # Analysis functions
+    analyze_commit_error,
+    suggest_includes,
+    find_header_for_function,
+    get_header_line_number,
+    # Signature checking
+    check_header_sync,
+    format_signature_mismatch,
+    get_header_fix_suggestion,
+    # Caller detection
+    find_callers,
+    check_callers_need_update,
+    format_caller_updates_needed,
+)
 
 __all__ = [
     # Update functions
@@ -31,4 +54,25 @@ __all__ = [
     # Workflow
     "CommitWorkflow",
     "auto_detect_and_commit",
+    # Diagnostics - error types
+    "CompilerError",
+    "DiagnosticResult",
+    # Diagnostics - parsing
+    "parse_mwcc_errors",
+    "extract_linker_errors",
+    "extract_undefined_identifiers",
+    "extract_conflicting_functions",
+    # Diagnostics - analysis
+    "analyze_commit_error",
+    "suggest_includes",
+    "find_header_for_function",
+    "get_header_line_number",
+    # Diagnostics - signature checking
+    "check_header_sync",
+    "format_signature_mismatch",
+    "get_header_fix_suggestion",
+    # Diagnostics - caller detection
+    "find_callers",
+    "check_callers_need_update",
+    "format_caller_updates_needed",
 ]

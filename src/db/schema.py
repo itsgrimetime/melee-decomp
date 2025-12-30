@@ -1,6 +1,6 @@
 """SQLite schema for agent state management."""
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 SCHEMA_SQL = """
 -- Core function tracking
@@ -11,8 +11,11 @@ CREATE TABLE IF NOT EXISTS functions (
     current_score INTEGER,
     max_score INTEGER,
     status TEXT CHECK(status IN (
-        'unclaimed', 'claimed', 'in_progress', 'matched', 'committed', 'merged', 'in_review'
+        'unclaimed', 'claimed', 'in_progress', 'matched', 'committed', 'committed_needs_fix', 'merged', 'in_review'
     )) DEFAULT 'unclaimed',
+    -- Build status for committed functions
+    build_status TEXT CHECK(build_status IN ('passing', 'broken') OR build_status IS NULL),
+    build_diagnosis TEXT,  -- Agent's explanation of why build is broken
     -- Scratch references
     local_scratch_slug TEXT,
     production_scratch_slug TEXT,
@@ -493,6 +496,169 @@ def get_migrations() -> dict[int, str]:
             CREATE INDEX IF NOT EXISTS idx_branch_progress_match ON function_branch_progress(match_percent DESC);
 
             -- Branch progress summary view
+            CREATE VIEW IF NOT EXISTS v_function_branch_progress AS
+            SELECT
+                fbp.function_name,
+                fbp.branch,
+                fbp.scratch_slug,
+                fbp.match_percent,
+                fbp.agent_id,
+                fbp.is_committed,
+                fbp.updated_at,
+                f.match_percent as canonical_match_percent,
+                f.status as canonical_status,
+                CASE WHEN fbp.match_percent > COALESCE(f.match_percent, 0) THEN 1 ELSE 0 END as is_best_match
+            FROM function_branch_progress fbp
+            LEFT JOIN functions f ON fbp.function_name = f.function_name
+            ORDER BY fbp.function_name, fbp.match_percent DESC;
+        """,
+        # Version 4 -> 5: Add build_status and build_diagnosis for tracking broken commits
+        4: """
+            -- Add build_status and build_diagnosis columns
+            ALTER TABLE functions ADD COLUMN build_status TEXT CHECK(build_status IN ('passing', 'broken') OR build_status IS NULL);
+            ALTER TABLE functions ADD COLUMN build_diagnosis TEXT;
+
+            -- Update status CHECK constraint by recreating table
+            -- (SQLite doesn't support ALTER CHECK)
+            DROP VIEW IF EXISTS v_active_claims;
+            DROP VIEW IF EXISTS v_uncommitted_matches;
+            DROP VIEW IF EXISTS v_stale_data;
+            DROP VIEW IF EXISTS v_agent_summary;
+            DROP VIEW IF EXISTS v_function_branch_progress;
+
+            CREATE TABLE IF NOT EXISTS functions_new (
+                function_name TEXT PRIMARY KEY,
+                match_percent REAL DEFAULT 0.0,
+                current_score INTEGER,
+                max_score INTEGER,
+                status TEXT CHECK(status IN (
+                    'unclaimed', 'claimed', 'in_progress', 'matched', 'committed', 'committed_needs_fix', 'merged', 'in_review'
+                )) DEFAULT 'unclaimed',
+                build_status TEXT CHECK(build_status IN ('passing', 'broken') OR build_status IS NULL),
+                build_diagnosis TEXT,
+                local_scratch_slug TEXT,
+                production_scratch_slug TEXT,
+                is_committed BOOLEAN DEFAULT FALSE,
+                commit_hash TEXT,
+                branch TEXT,
+                worktree_path TEXT,
+                pr_url TEXT,
+                pr_number INTEGER,
+                pr_state TEXT CHECK(pr_state IN ('OPEN', 'CLOSED', 'MERGED') OR pr_state IS NULL),
+                claimed_by_agent TEXT,
+                claimed_at REAL,
+                source_file_path TEXT,
+                notes TEXT,
+                created_at REAL DEFAULT (unixepoch('now', 'subsec')),
+                updated_at REAL DEFAULT (unixepoch('now', 'subsec')),
+                local_scratch_verified_at REAL,
+                production_scratch_verified_at REAL,
+                git_verified_at REAL
+            );
+
+            -- Copy data from old table (columns in order, NULLs for new columns)
+            INSERT INTO functions_new (
+                function_name, match_percent, current_score, max_score, status,
+                local_scratch_slug, production_scratch_slug, is_committed, commit_hash, branch,
+                worktree_path, pr_url, pr_number, pr_state, claimed_by_agent, claimed_at,
+                source_file_path, notes, created_at, updated_at,
+                local_scratch_verified_at, production_scratch_verified_at, git_verified_at
+            )
+            SELECT
+                function_name, match_percent, current_score, max_score, status,
+                local_scratch_slug, production_scratch_slug, is_committed, commit_hash, branch,
+                worktree_path, pr_url, pr_number, pr_state, claimed_by_agent, claimed_at,
+                source_file_path, notes, created_at, updated_at,
+                local_scratch_verified_at, production_scratch_verified_at, git_verified_at
+            FROM functions;
+
+            DROP TABLE functions;
+            ALTER TABLE functions_new RENAME TO functions;
+
+            -- Recreate views
+            CREATE VIEW IF NOT EXISTS v_active_claims AS
+            SELECT
+                c.function_name,
+                c.agent_id,
+                c.claimed_at,
+                c.expires_at,
+                (c.expires_at - unixepoch('now', 'subsec')) / 60.0 as minutes_remaining,
+                f.match_percent,
+                f.local_scratch_slug
+            FROM claims c
+            LEFT JOIN functions f ON c.function_name = f.function_name
+            WHERE c.expires_at > unixepoch('now', 'subsec');
+
+            CREATE VIEW IF NOT EXISTS v_uncommitted_matches AS
+            SELECT
+                f.function_name,
+                f.match_percent,
+                f.local_scratch_slug,
+                f.production_scratch_slug,
+                f.claimed_by_agent,
+                f.branch,
+                f.updated_at
+            FROM functions f
+            WHERE f.match_percent >= 95.0
+              AND f.is_committed = FALSE
+              AND f.status != 'merged';
+
+            CREATE VIEW IF NOT EXISTS v_stale_data AS
+            SELECT
+                function_name,
+                'local_scratch' as stale_type,
+                local_scratch_verified_at as last_verified,
+                (unixepoch('now', 'subsec') - local_scratch_verified_at) / 3600.0 as hours_stale
+            FROM functions
+            WHERE local_scratch_slug IS NOT NULL
+              AND (local_scratch_verified_at IS NULL
+                   OR unixepoch('now', 'subsec') - local_scratch_verified_at > 3600)
+            UNION ALL
+            SELECT
+                function_name,
+                'production_scratch' as stale_type,
+                production_scratch_verified_at,
+                (unixepoch('now', 'subsec') - production_scratch_verified_at) / 3600.0
+            FROM functions
+            WHERE production_scratch_slug IS NOT NULL
+              AND (production_scratch_verified_at IS NULL
+                   OR unixepoch('now', 'subsec') - production_scratch_verified_at > 86400)
+            UNION ALL
+            SELECT
+                function_name,
+                'git' as stale_type,
+                git_verified_at,
+                (unixepoch('now', 'subsec') - git_verified_at) / 3600.0
+            FROM functions
+            WHERE is_committed = TRUE
+              AND (git_verified_at IS NULL
+                   OR unixepoch('now', 'subsec') - git_verified_at > 86400);
+
+            CREATE VIEW IF NOT EXISTS v_agent_summary AS
+            SELECT
+                a.agent_id,
+                a.worktree_path,
+                a.branch_name,
+                a.last_active_at,
+                (SELECT COUNT(*) FROM claims c
+                 WHERE c.agent_id = a.agent_id
+                   AND c.expires_at > unixepoch('now', 'subsec')) as active_claims,
+                (SELECT COUNT(*) FROM functions f
+                 WHERE f.claimed_by_agent = a.agent_id
+                   AND f.is_committed = TRUE) as committed_functions
+            FROM agents a;
+
+            -- View for functions needing build fixes per worktree
+            CREATE VIEW IF NOT EXISTS v_worktree_broken_builds AS
+            SELECT
+                worktree_path,
+                COUNT(*) as broken_count,
+                GROUP_CONCAT(function_name, ', ') as broken_functions
+            FROM functions
+            WHERE build_status = 'broken'
+              AND worktree_path IS NOT NULL
+            GROUP BY worktree_path;
+
             CREATE VIEW IF NOT EXISTS v_function_branch_progress AS
             SELECT
                 fbp.function_name,

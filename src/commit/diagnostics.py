@@ -1,8 +1,31 @@
 """Diagnostics for commit errors - suggest fixes for common issues."""
 
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
+
+
+@dataclass
+class CompilerError:
+    """Structured representation of a compiler error."""
+    file_path: str = ""
+    line_number: int = 0
+    column: int = 0
+    error_type: str = ""  # e.g., "error", "warning", "linker error"
+    message: str = ""
+    context_line: str = ""  # The source line if available
+    raw_output: str = ""
+
+
+@dataclass
+class DiagnosticResult:
+    """Complete diagnostic result for build failures."""
+    errors: list[CompilerError] = field(default_factory=list)
+    header_mismatch: Optional[dict] = None
+    undefined_symbols: list[tuple[str, str]] = field(default_factory=list)  # (symbol, suggested_header)
+    linker_errors: list[str] = field(default_factory=list)
+    suggestions: list[str] = field(default_factory=list)
 
 
 # Common type -> header mappings for Melee codebase
@@ -92,6 +115,196 @@ SIGNATURE_PATTERNS = [
     re.compile(r"incompatible pointer type.*'(\w+)'", re.IGNORECASE),
 ]
 
+# Patterns for linker errors
+LINKER_PATTERNS = [
+    re.compile(r"undefined reference to [`'](\w+)'", re.IGNORECASE),
+    re.compile(r"unresolved external symbol[:\s]*(\w+)", re.IGNORECASE),
+    re.compile(r"Link Error.*Undefined:\s*(\w+)", re.IGNORECASE),
+]
+
+# Pattern to extract file/line from MWCC compiler output
+# MWCC format examples:
+#   ### mwcc Compiler ...
+#   #   File: src/melee/ft/chara/ftKirby/ftKb_Init.c
+#   # ----------------------------------------
+#   #      118:   void ftKb_SpecialN_800F1CD8(HSD_GObj* gobj) {
+#   #   Error:                                        ^^^^
+#   # identifier expected
+MWCC_FILE_PATTERN = re.compile(r"#\s*File:\s*(.+?)(?:\s*$|\n)", re.MULTILINE)
+MWCC_LINE_PATTERN = re.compile(r"#\s*(\d+):\s*(.+?)(?:\s*$|\n)", re.MULTILINE)
+MWCC_ERROR_MARKER = re.compile(r"#\s*Error:\s*(\^+)", re.MULTILINE)
+
+# Pattern for clang/gcc style errors (file:line:col: error: message)
+CLANG_ERROR_PATTERN = re.compile(
+    r"([^\s:]+):(\d+):(\d+):\s*(error|warning):\s*(.+?)(?:\n|$)",
+    re.MULTILINE
+)
+
+
+def parse_mwcc_errors(error_output: str) -> list[CompilerError]:
+    """Parse MWCC compiler output into structured errors.
+
+    MWCC outputs errors in a specific format:
+        ### mwcc Compiler ...
+        #   File: path/to/file.c
+        # ----------------------------------------
+        #      123:   code line here
+        #   Error:              ^^^^
+        # error message here
+
+    Args:
+        error_output: Raw compiler output
+
+    Returns:
+        List of structured CompilerError objects
+    """
+    errors = []
+    current_file = ""
+    current_line = 0
+    current_context = ""
+
+    lines = error_output.split('\n')
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+
+        # Check for file marker
+        file_match = MWCC_FILE_PATTERN.search(line)
+        if file_match:
+            current_file = file_match.group(1).strip()
+            i += 1
+            continue
+
+        # Check for line number + context
+        line_match = MWCC_LINE_PATTERN.search(line)
+        if line_match:
+            current_line = int(line_match.group(1))
+            current_context = line_match.group(2).strip()
+            i += 1
+            continue
+
+        # Check for error marker (^^^^)
+        error_marker_match = MWCC_ERROR_MARKER.search(line)
+        if error_marker_match:
+            # Next line should be the error message
+            error_msg = ""
+            column = line.find('^') - line.find(':') if '^' in line else 0
+
+            # Look ahead for error message
+            if i + 1 < len(lines):
+                next_line = lines[i + 1].strip()
+                # Skip lines that are just markers or comments
+                if next_line and not next_line.startswith('#   Error:') and not next_line.startswith('---'):
+                    # Remove leading "# " if present
+                    if next_line.startswith('#'):
+                        next_line = next_line[1:].strip()
+                    error_msg = next_line
+
+            if current_file and error_msg:
+                errors.append(CompilerError(
+                    file_path=current_file,
+                    line_number=current_line,
+                    column=max(0, column),
+                    error_type="error",
+                    message=error_msg,
+                    context_line=current_context,
+                    raw_output=f"{line}\n{error_msg}" if error_msg else line,
+                ))
+            i += 1
+            continue
+
+        i += 1
+
+    # Also try clang/gcc style parsing as fallback
+    for match in CLANG_ERROR_PATTERN.finditer(error_output):
+        errors.append(CompilerError(
+            file_path=match.group(1),
+            line_number=int(match.group(2)),
+            column=int(match.group(3)),
+            error_type=match.group(4),
+            message=match.group(5),
+            context_line="",
+            raw_output=match.group(0),
+        ))
+
+    return errors
+
+
+def extract_linker_errors(error_output: str) -> list[str]:
+    """Extract undefined symbol names from linker errors.
+
+    Args:
+        error_output: Raw linker output
+
+    Returns:
+        List of undefined symbol names
+    """
+    symbols = set()
+    for pattern in LINKER_PATTERNS:
+        for match in pattern.finditer(error_output):
+            symbols.add(match.group(1))
+    return list(symbols)
+
+
+def find_header_for_function(function_name: str, melee_root: Path) -> Optional[str]:
+    """Find which header declares a given function.
+
+    Args:
+        function_name: Function to search for
+        melee_root: Path to melee project root
+
+    Returns:
+        Relative path to header file, or None if not found
+    """
+    import subprocess
+
+    try:
+        # Use grep to find the function declaration in headers
+        result = subprocess.run(
+            ["grep", "-rln", f"{function_name}(", str(melee_root / "src")],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+        for line in result.stdout.strip().split('\n'):
+            if line.endswith('.h'):
+                # Return relative path from src/
+                if "/src/" in line:
+                    return line.split("/src/", 1)[1]
+                return line
+
+    except (subprocess.TimeoutExpired, subprocess.SubprocessError):
+        pass
+
+    return None
+
+
+def get_header_line_number(header_path: Path, function_name: str) -> Optional[int]:
+    """Get the line number where a function is declared in a header.
+
+    Args:
+        header_path: Path to header file
+        function_name: Function to find
+
+    Returns:
+        Line number (1-indexed) or None
+    """
+    if not header_path.exists():
+        return None
+
+    try:
+        content = header_path.read_text()
+        lines = content.split('\n')
+
+        for i, line in enumerate(lines, 1):
+            if function_name in line and '(' in line and ';' in line:
+                return i
+    except Exception:
+        pass
+
+    return None
+
 
 def extract_undefined_identifiers(error_output: str) -> list[str]:
     """Extract undefined identifier names from compiler error output."""
@@ -166,12 +379,21 @@ def format_diagnostic_message(error_output: str) -> Optional[str]:
     return "\n".join(lines)
 
 
-def analyze_commit_error(error_output: str, file_path: str) -> str:
+def analyze_commit_error(
+    error_output: str,
+    file_path: str,
+    melee_root: Optional[Path] = None,
+    function_name: Optional[str] = None,
+    source_code: Optional[str] = None,
+) -> str:
     """Provide comprehensive analysis of a commit compilation error.
 
     Args:
         error_output: Raw compiler error output
         file_path: Path to the source file being compiled
+        melee_root: Path to melee project root (for header lookups)
+        function_name: Name of function being committed (for signature checks)
+        source_code: The source code being committed (for signature extraction)
 
     Returns:
         Formatted diagnostic message with suggestions
@@ -187,37 +409,119 @@ def analyze_commit_error(error_output: str, file_path: str) -> str:
     except Exception:
         pass  # Don't fail if we can't write the file
 
-    # Extract actual error lines for display
-    # MWCC format: "#   Error: ^^^^" marker on one line, actual message on next line
-    output_lines = error_output.split('\n')
-    error_lines = []
-    for i, line in enumerate(output_lines):
-        if 'error:' in line.lower() or 'Error:' in line:
-            error_lines.append(line)
-            # Include subsequent lines that contain the actual error description
-            for j in range(i + 1, min(i + 3, len(output_lines))):
-                next_line = output_lines[j]
-                # Stop if we hit another marker or empty line
-                if not next_line.strip() or '#   Error:' in next_line or \
-                   '#   File:' in next_line or next_line.startswith('---'):
-                    break
-                error_lines.append(next_line)
+    # Parse structured errors
+    parsed_errors = parse_mwcc_errors(error_output)
 
-    if error_lines:
-        lines.append("[red]Compilation errors:[/red]")
-        for line in error_lines[:10]:  # Show first 10 lines
-            lines.append(f"  {line.strip()}")
-        if len(error_lines) > 10:
-            lines.append(f"  [dim]... ({len(error_lines) - 10} more lines)[/dim]")
+    # Check for linker errors
+    linker_symbols = extract_linker_errors(error_output)
 
-    # Always show where full output is
+    # Display structured errors with file:line info
+    if parsed_errors:
+        lines.append("[bold red]Compilation errors:[/bold red]")
+        for err in parsed_errors[:5]:  # Show first 5 errors
+            if err.file_path and err.line_number:
+                lines.append(f"\n  [cyan]{err.file_path}:{err.line_number}[/cyan]")
+            if err.context_line:
+                lines.append(f"    [dim]{err.context_line}[/dim]")
+            lines.append(f"    [red]{err.message}[/red]")
+
+        if len(parsed_errors) > 5:
+            lines.append(f"\n  [dim]... and {len(parsed_errors) - 5} more errors[/dim]")
+    else:
+        # Fallback to raw extraction if structured parsing fails
+        output_lines = error_output.split('\n')
+        error_lines = []
+        for i, line in enumerate(output_lines):
+            if 'error:' in line.lower() or 'Error:' in line:
+                error_lines.append(line)
+                for j in range(i + 1, min(i + 3, len(output_lines))):
+                    next_line = output_lines[j]
+                    if not next_line.strip() or '#   Error:' in next_line or \
+                       '#   File:' in next_line or next_line.startswith('---'):
+                        break
+                    error_lines.append(next_line)
+
+        if error_lines:
+            lines.append("[bold red]Compilation errors:[/bold red]")
+            for line in error_lines[:10]:
+                lines.append(f"  {line.strip()}")
+            if len(error_lines) > 10:
+                lines.append(f"  [dim]... ({len(error_lines) - 10} more lines)[/dim]")
+
+    # Check for linker errors (undefined symbols)
+    if linker_symbols:
+        lines.append("\n[bold red]Linker errors - undefined symbols:[/bold red]")
+        for symbol in linker_symbols[:10]:
+            lines.append(f"  [yellow]{symbol}[/yellow]")
+            # Try to find where the symbol should be declared
+            if melee_root:
+                header = find_header_for_function(symbol, melee_root)
+                if header:
+                    lines.append(f"    [dim]Declared in: {header}[/dim]")
+                else:
+                    lines.append(f"    [dim]No declaration found - may need to add to header[/dim]")
+
+        if len(linker_symbols) > 10:
+            lines.append(f"  [dim]... and {len(linker_symbols) - 10} more[/dim]")
+
+    # Check for header signature mismatch if we have the context
+    if melee_root and function_name and source_code:
+        sig_check = check_header_sync(source_code, function_name, melee_root, file_path)
+        if sig_check and not sig_check.get("match"):
+            lines.append("\n[bold yellow]Header signature mismatch detected:[/bold yellow]")
+            lines.append(f"  [dim]Header:[/dim]         {sig_check.get('header', 'unknown')}")
+            lines.append(f"  [dim]Implementation:[/dim] {sig_check.get('scratch', 'unknown')}")
+
+            # Get line number in header
+            header_path = sig_check.get("header_path")
+            if header_path:
+                line_num = get_header_line_number(Path(header_path), function_name)
+                if line_num:
+                    lines.append(f"\n  [cyan]Suggested fix:[/cyan] Update header at {header_path}:{line_num}")
+                else:
+                    lines.append(f"\n  [cyan]Suggested fix:[/cyan] Update header at {header_path}")
+
+            if sig_check.get("issues"):
+                lines.append("\n  [yellow]Issues:[/yellow]")
+                for issue in sig_check["issues"]:
+                    lines.append(f"    - {issue}")
+
+    # Get undefined identifier suggestions
+    suggestions = suggest_includes(error_output)
+    conflicts = extract_conflicting_functions(error_output)
+
+    if suggestions:
+        lines.append("\n[bold cyan]Missing includes - suggested fixes:[/bold cyan]")
+        # Group by header
+        by_header: dict[str, list[str]] = {}
+        for type_name, header in suggestions:
+            if header not in by_header:
+                by_header[header] = []
+            by_header[header].append(type_name)
+
+        for header, types in by_header.items():
+            types_str = ", ".join(types)
+            lines.append(f"  [green]#include {header}[/green]")
+            lines.append(f"    [dim]Provides: {types_str}[/dim]")
+
+    if conflicts:
+        lines.append("\n[bold cyan]Signature conflicts:[/bold cyan]")
+        for func in conflicts:
+            lines.append(f"  [yellow]{func}()[/yellow] - signature mismatch between header and implementation")
+            if melee_root:
+                header = find_header_for_function(func, melee_root)
+                if header:
+                    header_path = melee_root / "src" / header
+                    line_num = get_header_line_number(header_path, func)
+                    if line_num:
+                        lines.append(f"    [dim]Check: {header}:{line_num}[/dim]")
+                    else:
+                        lines.append(f"    [dim]Check: {header}[/dim]")
+
+    # Show full output location
     lines.append(f"\n[dim]Full error output: {error_file}[/dim]")
 
-    # Add suggestions
-    diagnostic = format_diagnostic_message(error_output)
-    if diagnostic:
-        lines.append(diagnostic)
-    else:
+    if not suggestions and not conflicts and not parsed_errors and not linker_symbols:
         lines.append("\n[dim]No automatic suggestions available.[/dim]")
         lines.append("[dim]Check the scratch context for required types/functions.[/dim]")
 
@@ -396,19 +700,38 @@ def check_header_sync(
     return result
 
 
-def format_signature_mismatch(comparison: dict) -> str:
-    """Format a signature mismatch as a helpful message."""
+def format_signature_mismatch(comparison: dict, function_name: Optional[str] = None) -> str:
+    """Format a signature mismatch as a helpful message.
+
+    Args:
+        comparison: Result from compare_signatures() or check_header_sync()
+        function_name: Function name for line number lookup (optional)
+
+    Returns:
+        Formatted message string with Rich markup
+    """
     lines = ["\n[bold yellow]Header signature mismatch detected:[/bold yellow]"]
-    lines.append(f"  [dim]Header:[/dim]  {comparison['header']}")
-    lines.append(f"  [dim]Scratch:[/dim] {comparison['scratch']}")
+    lines.append(f"  [dim]Header:[/dim]         {comparison['header']}")
+    lines.append(f"  [dim]Implementation:[/dim] {comparison['scratch']}")
 
     if comparison.get("issues"):
         lines.append("\n  [yellow]Issues:[/yellow]")
         for issue in comparison["issues"]:
-            lines.append(f"    • {issue}")
+            lines.append(f"    - {issue}")
 
-    lines.append(f"\n  [dim]Header file: {comparison.get('header_path', 'unknown')}[/dim]")
-    lines.append("  [yellow]Consider updating the header declaration to match.[/yellow]")
+    # Show header location with line number if possible
+    header_path = comparison.get('header_path')
+    if header_path:
+        line_num = None
+        if function_name:
+            line_num = get_header_line_number(Path(header_path), function_name)
+
+        if line_num:
+            lines.append(f"\n  [cyan]Suggested fix:[/cyan] Update header at {header_path}:{line_num}")
+        else:
+            lines.append(f"\n  [cyan]Suggested fix:[/cyan] Update header at {header_path}")
+    else:
+        lines.append("\n  [yellow]Consider updating the header declaration to match.[/yellow]")
 
     return "\n".join(lines)
 

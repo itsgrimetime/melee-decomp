@@ -1002,6 +1002,81 @@ class StateDB:
                 (key, value)
             )
 
+    # =========================================================================
+    # Worktree Health Operations
+    # =========================================================================
+
+    def get_worktree_broken_count(self, worktree_path: str) -> tuple[int, list[str]]:
+        """Get count of functions with broken builds in a worktree.
+
+        Args:
+            worktree_path: Path to the worktree
+
+        Returns:
+            (broken_count, list of function names)
+        """
+        with self.connection() as conn:
+            cursor = conn.execute(
+                """
+                SELECT function_name FROM functions
+                WHERE worktree_path = ?
+                  AND build_status = 'broken'
+                ORDER BY updated_at DESC
+                """,
+                (worktree_path,)
+            )
+            functions = [row['function_name'] for row in cursor.fetchall()]
+            return len(functions), functions
+
+    def get_subdirectory_broken_count(self, subdirectory_key: str) -> tuple[int, list[str]]:
+        """Get count of functions with broken builds in a subdirectory.
+
+        Args:
+            subdirectory_key: Subdirectory key (e.g., "ft-chara-ftFox")
+
+        Returns:
+            (broken_count, list of function names)
+        """
+        # Map subdirectory key back to path pattern for matching source_file_path
+        # e.g., "ft-chara-ftFox" -> "/ft/chara/ftFox/" pattern
+        path_pattern = f"%/{subdirectory_key.replace('-', '/')}/%"
+
+        with self.connection() as conn:
+            cursor = conn.execute(
+                """
+                SELECT function_name FROM functions
+                WHERE (source_file_path LIKE ? OR worktree_path LIKE ?)
+                  AND build_status = 'broken'
+                ORDER BY updated_at DESC
+                """,
+                (path_pattern, f"%dir-{subdirectory_key}%")
+            )
+            functions = [row['function_name'] for row in cursor.fetchall()]
+            return len(functions), functions
+
+    def get_all_broken_builds(self) -> dict[str, list[str]]:
+        """Get all functions with broken builds, grouped by worktree.
+
+        Returns:
+            Dict mapping worktree_path to list of function names
+        """
+        with self.connection() as conn:
+            cursor = conn.execute(
+                """
+                SELECT worktree_path, function_name FROM functions
+                WHERE build_status = 'broken'
+                  AND worktree_path IS NOT NULL
+                ORDER BY worktree_path, updated_at DESC
+                """
+            )
+            result: dict[str, list[str]] = {}
+            for row in cursor.fetchall():
+                wt = row['worktree_path']
+                if wt not in result:
+                    result[wt] = []
+                result[wt].append(row['function_name'])
+            return result
+
 
 # Global instance (lazy initialized)
 _db: StateDB | None = None

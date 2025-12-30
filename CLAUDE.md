@@ -117,6 +117,7 @@ This enables easy merges since commits to different subdirectories rarely confli
 ## Skills
 
 - `/decomp [func]` - Full decompilation matching workflow (see `.claude/skills/decomp/SKILL.md`)
+- `/decomp-fixup [func]` - Fix build issues for matched functions (headers, callers, types)
 
 ## Build
 

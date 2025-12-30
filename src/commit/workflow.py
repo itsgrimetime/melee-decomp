@@ -81,7 +81,13 @@ class CommitWorkflow:
         if not compiles:
             print(f"❌ File does not compile after update:")
             # Show diagnostics with suggestions
-            diagnostic = analyze_commit_error(full_output, file_path)
+            diagnostic = analyze_commit_error(
+                full_output,
+                file_path,
+                melee_root=self.melee_root,
+                function_name=function_name,
+                source_code=new_code,
+            )
             print(diagnostic)
             print("\n  Reverting changes...")
             if await self._revert_file(f"src/{file_path}"):

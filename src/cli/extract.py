@@ -127,6 +127,9 @@ def extract_list(
     show_score: Annotated[
         bool, typer.Option("--show-score", help="Show recommendation score column")
     ] = False,
+    exclude_subdir: Annotated[
+        Optional[list[str]], typer.Option("--exclude-subdir", help="Exclude functions in these subdirectories (can be repeated)")
+    ] = None,
 ):
     """List unmatched functions from the melee project.
 
@@ -168,6 +171,16 @@ def extract_list(
     if not include_completed:
         completed = set(load_completed_functions().keys())
 
+    # Build subdirectory exclusion check
+    def _is_excluded_subdir(file_path: str) -> bool:
+        if not exclude_subdir:
+            return False
+        path_lower = file_path.lower()
+        for subdir in exclude_subdir:
+            if f"/{subdir.lower()}/" in path_lower:
+                return True
+        return False
+
     # Filter functions
     functions = [
         f for f in result.functions
@@ -176,6 +189,7 @@ def extract_list(
         and f.name not in completed
         and (not matching_only or f.object_status == "Matching")
         and (not module or f"/{module}/" in f.file_path.lower())
+        and not _is_excluded_subdir(f.file_path)
     ]
 
     # Sort functions
@@ -224,7 +238,8 @@ def extract_list(
     excluded_msg = f", {len(completed)} completed excluded" if completed else ""
     matching_msg = ", Matching files only" if matching_only else ""
     module_msg = f", {module}/ only" if module else ""
-    console.print(f"\n[dim]Found {len(functions)} functions (from {result.total_functions} total{excluded_msg}{matching_msg}{module_msg})[/dim]")
+    subdir_msg = f", excluding {', '.join(exclude_subdir)}" if exclude_subdir else ""
+    console.print(f"\n[dim]Found {len(functions)} functions (from {result.total_functions} total{excluded_msg}{matching_msg}{module_msg}{subdir_msg})[/dim]")
 
 
 @extract_app.command("get")

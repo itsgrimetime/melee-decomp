@@ -116,7 +116,7 @@ def commit_apply(
                     if sig_check["match"]:
                         console.print("[green]✓ Header signature matches[/green]")
                     else:
-                        console.print(format_signature_mismatch(sig_check))
+                        console.print(format_signature_mismatch(sig_check, function_name))
 
                 # Show code preview (markup=False to preserve brackets like [t0])
                 console.print(f"\n[bold]Code to insert ({len(source_code)} chars):[/bold]")
@@ -167,7 +167,13 @@ def commit_apply(
                         console.print("[red]✗ Compilation failed:[/red]")
                         # Show diagnostics with suggestions
                         full_output = result.stderr + result.stdout
-                        diagnostic = analyze_commit_error(full_output, file_path)
+                        diagnostic = analyze_commit_error(
+                            full_output,
+                            file_path,
+                            melee_root=melee_root,
+                            function_name=function_name,
+                            source_code=source_code,
+                        )
                         console.print(diagnostic)
                         raise typer.Exit(1)
 

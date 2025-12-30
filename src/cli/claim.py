@@ -20,8 +20,12 @@ from ._common import (
     db_get_subdirectory_lock,
     get_subdirectory_key,
     get_worktree_for_file,
+    get_subdirectory_worktree_path,
     DEFAULT_MELEE_ROOT,
 )
+
+# Maximum broken builds per worktree before blocking claims
+MAX_BROKEN_BUILDS_PER_WORKTREE = 3
 
 
 def _lookup_source_file(function_name: str) -> str | None:
@@ -105,6 +109,36 @@ def _check_subdirectory_availability(source_file: str, agent_id: str) -> tuple[b
     return True, None, subdir_key
 
 
+def _check_worktree_health(subdir_key: str) -> tuple[bool, str | None, list[str]]:
+    """Check if worktree has too many broken builds to accept new claims.
+
+    This prevents agents from getting into a situation where they match a function
+    but can't commit because the worktree build is broken.
+
+    Args:
+        subdir_key: Subdirectory key (e.g., "ft-chara-ftFox")
+
+    Returns:
+        (healthy, error_message, list of broken function names) tuple
+    """
+    try:
+        from src.db import get_db
+        db = get_db()
+        worktree_path = str(get_subdirectory_worktree_path(subdir_key))
+        broken_count, broken_funcs = db.get_worktree_broken_count(worktree_path)
+
+        if broken_count >= MAX_BROKEN_BUILDS_PER_WORKTREE:
+            return (
+                False,
+                f"Worktree has {broken_count} broken builds (max {MAX_BROKEN_BUILDS_PER_WORKTREE})",
+                broken_funcs
+            )
+        return True, None, broken_funcs
+    except Exception:
+        # Don't block on database errors
+        return True, None, []
+
+
 @claim_app.command("add")
 def claim_add(
     function_name: Annotated[str, typer.Argument(help="Function name to claim")],
@@ -140,6 +174,24 @@ def claim_add(
             else:
                 console.print(f"[red]{error}[/red]")
                 console.print(f"[yellow]Pick a function in a different subdirectory, or wait for the lock to expire.[/yellow]")
+            raise typer.Exit(1)
+
+        # Check worktree health - block claims if too many broken builds
+        healthy, health_error, broken_funcs = _check_worktree_health(subdir_key)
+        if not healthy:
+            if output_json:
+                print(json.dumps({
+                    "success": False,
+                    "error": "worktree_unhealthy",
+                    "message": health_error,
+                    "subdirectory": subdir_key,
+                    "broken_functions": broken_funcs,
+                }))
+            else:
+                console.print(f"[red]{health_error}[/red]")
+                console.print(f"[dim]Functions needing fixes: {', '.join(broken_funcs)}[/dim]")
+                console.print(f"\n[yellow]Run /decomp-fixup to fix these before claiming new functions.[/yellow]")
+                console.print(f"[dim]Or use 'melee-agent extract list --exclude-subdir {subdir_key}' to find functions elsewhere.[/dim]")
             raise typer.Exit(1)
 
     claims_path = Path(DECOMP_CLAIMS_FILE)
