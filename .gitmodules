@@ -4,6 +4,3 @@
 [submodule "decomp.me"]
 	path = decomp.me
 	url = git@github.com:decompme/decomp.me.git
-[submodule "decomp-me-mcp"]
-	path = decomp-me-mcp
-	url = https://github.com/itsgrimetime/decomp-me-mcp.git
