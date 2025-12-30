@@ -176,15 +176,42 @@ def analyze_commit_error(error_output: str, file_path: str) -> str:
     Returns:
         Formatted diagnostic message with suggestions
     """
+    import tempfile
+
     lines = []
 
+    # Write full error to a temp file for agent access
+    error_file = Path(tempfile.gettempdir()) / "decomp_compile_error.txt"
+    try:
+        error_file.write_text(error_output)
+    except Exception:
+        pass  # Don't fail if we can't write the file
+
     # Extract actual error lines for display
-    error_lines = [l for l in error_output.split('\n')
-                   if 'error:' in l.lower() or 'Error:' in l]
+    # MWCC format: "#   Error: ^^^^" marker on one line, actual message on next line
+    output_lines = error_output.split('\n')
+    error_lines = []
+    for i, line in enumerate(output_lines):
+        if 'error:' in line.lower() or 'Error:' in line:
+            error_lines.append(line)
+            # Include subsequent lines that contain the actual error description
+            for j in range(i + 1, min(i + 3, len(output_lines))):
+                next_line = output_lines[j]
+                # Stop if we hit another marker or empty line
+                if not next_line.strip() or '#   Error:' in next_line or \
+                   '#   File:' in next_line or next_line.startswith('---'):
+                    break
+                error_lines.append(next_line)
+
     if error_lines:
         lines.append("[red]Compilation errors:[/red]")
-        for line in error_lines[:5]:  # Show first 5 errors
+        for line in error_lines[:10]:  # Show first 10 lines
             lines.append(f"  {line.strip()}")
+        if len(error_lines) > 10:
+            lines.append(f"  [dim]... ({len(error_lines) - 10} more lines)[/dim]")
+
+    # Always show where full output is
+    lines.append(f"\n[dim]Full error output: {error_file}[/dim]")
 
     # Add suggestions
     diagnostic = format_diagnostic_message(error_output)
