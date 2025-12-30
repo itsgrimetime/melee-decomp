@@ -44,15 +44,15 @@ melee-agent claim add lbColl_80008440
 
 When you first run a `melee-agent` command, the system automatically:
 1. Validates your worktree builds with `--require-protos`
-2. If the build fails, archives the broken worktree and creates a fresh one
+2. If the build fails, shows the errors (your uncommitted changes are preserved)
 3. Caches the validation result for 30 minutes
 
 You'll see messages like:
 - `[dim]Running build validation (this may take a minute)...[/dim]`
 - `[green]Worktree build OK[/green]` - you're good to go
-- `[red]Worktree build FAILED - creating fresh worktree[/red]` - automatic recovery
+- `[yellow]Worktree build has errors - fix before committing[/yellow]` - fix the errors shown
 
-**No manual action needed** - just proceed with Step 1.
+**If build has errors:** Fix them then try again.
 
 ### Step 1: Choose and Claim a Function
 

@@ -187,10 +187,23 @@ class CommitWorkflow:
                 # Extract the actual error message from stderr
                 error_output = stderr.decode() if stderr else stdout.decode() if stdout else "Unknown error"
                 # Look for the actual compiler error
+                # MWCC format: "Error: ^^^^" marker followed by actual message on next line
                 lines = error_output.split('\n')
-                error_lines = [l for l in lines if 'Error:' in l or 'error:' in l.lower()]
+                error_lines = []
+                for i, line in enumerate(lines):
+                    if 'Error:' in line or 'error:' in line.lower():
+                        error_lines.append(line)
+                        # Include subsequent lines until we hit another marker or empty line
+                        # These contain the actual error description
+                        for j in range(i + 1, min(i + 3, len(lines))):
+                            next_line = lines[j].strip()
+                            # Stop if we hit another error marker, file marker, or dashes
+                            if not next_line or next_line.startswith('#   Error:') or \
+                               next_line.startswith('#   File:') or next_line.startswith('---'):
+                                break
+                            error_lines.append(lines[j])
                 if error_lines:
-                    return False, '\n'.join(error_lines[:5]), error_output
+                    return False, '\n'.join(error_lines[:10]), error_output
                 return False, error_output[:500], error_output
 
         except FileNotFoundError:

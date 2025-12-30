@@ -618,14 +618,20 @@ class StateDB:
                             return False, f"Locked by {current_lock}"
                     # Lock expired, we can take it
 
-            # Acquire or update lock
+            # Acquire or update lock (UPSERT to handle missing rows)
             conn.execute(
                 """
-                UPDATE subdirectory_allocations
-                SET locked_by_agent = ?, locked_at = ?, lock_expires_at = ?, updated_at = ?
-                WHERE subdirectory_key = ?
+                INSERT INTO subdirectory_allocations
+                    (subdirectory_key, worktree_path, branch_name,
+                     locked_by_agent, locked_at, lock_expires_at, updated_at)
+                VALUES (?, '', '', ?, ?, ?, ?)
+                ON CONFLICT(subdirectory_key) DO UPDATE SET
+                    locked_by_agent = excluded.locked_by_agent,
+                    locked_at = excluded.locked_at,
+                    lock_expires_at = excluded.lock_expires_at,
+                    updated_at = excluded.updated_at
                 """,
-                (agent_id, now, expires_at, now, subdirectory_key)
+                (subdirectory_key, agent_id, now, expires_at, now)
             )
 
             # Also record assignment

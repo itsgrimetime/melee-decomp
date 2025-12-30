@@ -141,11 +141,11 @@ def get_subdirectory_worktree(
             console.print(f"[dim]Validating worktree build: {worktree_path}[/dim]")
             if _validate_worktree_build(worktree_path):
                 console.print(f"[green]Worktree build OK[/green]")
-                return worktree_path
             else:
-                console.print(f"[red]Worktree build FAILED - creating fresh worktree[/red]")
-                _archive_broken_worktree(worktree_path, f"dir-{subdir_key}")
-                # Fall through to create new worktree
+                console.print(f"[yellow]Worktree build has errors - fix before committing[/yellow]")
+                console.print(f"[dim]Run 'cd {worktree_path} && ninja' to see full errors[/dim]")
+            # Always return existing worktree - don't destroy uncommitted work
+            return worktree_path
         else:
             console.print(f"[dim]Using worktree: {worktree_path}[/dim]")
             return worktree_path
@@ -608,6 +608,11 @@ def _validate_worktree_build(worktree_path: Path, max_age_minutes: int = 30) -> 
             timeout=30
         )
         if result.returncode != 0:
+            console.print(f"[red]configure.py failed:[/red]")
+            if result.stderr:
+                console.print(f"[dim]{result.stderr[:500]}[/dim]")
+            elif result.stdout:
+                console.print(f"[dim]{result.stdout[:500]}[/dim]")
             return False
 
         # Run ninja build (with timeout to avoid hanging)
@@ -626,9 +631,30 @@ def _validate_worktree_build(worktree_path: Path, max_age_minutes: int = 30) -> 
             # Remove marker if build fails
             if marker_file.exists():
                 marker_file.unlink()
+            # Print build error for diagnosis
+            console.print(f"[red]Build failed:[/red]")
+            error_output = result.stderr or result.stdout or "Unknown error"
+            # Extract meaningful error lines
+            lines = error_output.split('\n')
+            error_lines = [l for l in lines if 'error:' in l.lower() or 'Error:' in l]
+            if error_lines:
+                for line in error_lines[:10]:
+                    console.print(f"  [dim]{line.strip()}[/dim]")
+            else:
+                # Show last few lines of output if no obvious error lines
+                for line in lines[-10:]:
+                    if line.strip():
+                        console.print(f"  [dim]{line.strip()}[/dim]")
             return False
 
-    except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError):
+    except subprocess.TimeoutExpired:
+        console.print(f"[red]Build timed out[/red]")
+        return False
+    except FileNotFoundError as e:
+        console.print(f"[red]Build command not found: {e}[/red]")
+        return False
+    except subprocess.CalledProcessError as e:
+        console.print(f"[red]Build process error: {e}[/red]")
         return False
 
 
@@ -688,11 +714,11 @@ def get_agent_melee_root(agent_id: str | None = None, create_if_missing: bool = 
             console.print(f"[dim]Validating worktree build: {worktree_path}[/dim]")
             if _validate_worktree_build(worktree_path):
                 console.print(f"[green]Worktree build OK[/green]")
-                return worktree_path
             else:
-                console.print(f"[red]Worktree build FAILED - creating fresh worktree[/red]")
-                _archive_broken_worktree(worktree_path, aid)
-                # Fall through to create new worktree
+                console.print(f"[yellow]Worktree build has errors - fix before committing[/yellow]")
+                console.print(f"[dim]Run 'cd {worktree_path} && ninja' to see full errors[/dim]")
+            # Always return existing worktree - don't destroy uncommitted work
+            return worktree_path
         else:
             console.print(f"[dim]Using worktree: {worktree_path}[/dim]")
             return worktree_path
