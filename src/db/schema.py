@@ -1,6 +1,6 @@
 """SQLite schema for agent state management."""
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 SCHEMA_SQL = """
 -- Core function tracking
@@ -16,6 +16,10 @@ CREATE TABLE IF NOT EXISTS functions (
     -- Build status for committed functions
     build_status TEXT CHECK(build_status IN ('passing', 'broken') OR build_status IS NULL),
     build_diagnosis TEXT,  -- Agent's explanation of why build is broken
+    -- Documentation status
+    is_documented BOOLEAN DEFAULT FALSE,
+    documentation_status TEXT CHECK(documentation_status IN ('none', 'partial', 'complete') OR documentation_status IS NULL) DEFAULT 'none',
+    documented_at REAL,
     -- Scratch references
     local_scratch_slug TEXT,
     production_scratch_slug TEXT,
@@ -674,5 +678,25 @@ def get_migrations() -> dict[int, str]:
             FROM function_branch_progress fbp
             LEFT JOIN functions f ON fbp.function_name = f.function_name
             ORDER BY fbp.function_name, fbp.match_percent DESC;
+        """,
+        # Version 5 -> 6: Add documentation tracking columns
+        5: """
+            -- Add documentation tracking columns
+            ALTER TABLE functions ADD COLUMN is_documented BOOLEAN DEFAULT FALSE;
+            ALTER TABLE functions ADD COLUMN documentation_status TEXT CHECK(documentation_status IN ('none', 'partial', 'complete') OR documentation_status IS NULL) DEFAULT 'none';
+            ALTER TABLE functions ADD COLUMN documented_at REAL;
+
+            -- View for documented functions
+            CREATE VIEW IF NOT EXISTS v_documented_functions AS
+            SELECT
+                function_name,
+                match_percent,
+                documentation_status,
+                documented_at,
+                is_committed,
+                status,
+                updated_at
+            FROM functions
+            WHERE is_documented = TRUE OR documentation_status IN ('partial', 'complete');
         """,
     }

@@ -122,6 +122,8 @@ def state_status(
     - matched: 95%+ match achieved
     - committed: Committed to git
     - merged: PR merged
+    - documented: Has documentation (partial or complete)
+    - undocumented: No documentation yet
     - stale: Data needs refresh
     """
     db = get_db()
@@ -172,6 +174,15 @@ def state_status(
         elif func.get('build_status') == 'passing':
             console.print(f"[bold]Build:[/bold] [green]passing[/green]")
 
+        # Show documentation status
+        doc_status = func.get('documentation_status') or 'none'
+        if doc_status == 'complete':
+            console.print(f"[bold]Docs:[/bold] [green]complete[/green]")
+        elif doc_status == 'partial':
+            console.print(f"[bold]Docs:[/bold] [yellow]partial[/yellow]")
+        elif func.get('is_documented'):
+            console.print(f"[bold]Docs:[/bold] [green]yes[/green]")
+
         if func.get('worktree_path'):
             console.print(f"[bold]Worktree:[/bold] {func['worktree_path']}")
 
@@ -206,6 +217,10 @@ def state_status(
             query += " AND is_committed = TRUE AND (pr_state IS NULL OR pr_state != 'MERGED')"
         elif category == "merged":
             query += " AND pr_state = 'MERGED'"
+        elif category == "documented":
+            query += " AND (is_documented = TRUE OR documentation_status IN ('partial', 'complete'))"
+        elif category == "undocumented":
+            query += " AND (is_documented = FALSE OR is_documented IS NULL) AND (documentation_status IS NULL OR documentation_status = 'none')"
 
         if agent:
             query += " AND claimed_by_agent = ?"

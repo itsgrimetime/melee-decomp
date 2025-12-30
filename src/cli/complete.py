@@ -164,6 +164,57 @@ def complete_mark(
             console.print()
 
 
+@complete_app.command("document")
+def complete_document(
+    function_name: Annotated[str, typer.Argument(help="Function name")],
+    status: Annotated[
+        str, typer.Option("--status", "-s", help="Documentation status: partial or complete")
+    ] = "complete",
+    notes: Annotated[
+        Optional[str], typer.Option("--notes", help="Documentation notes")
+    ] = None,
+    output_json: Annotated[
+        bool, typer.Option("--json", help="Output as JSON")
+    ] = False,
+):
+    """Mark a function as documented (naming, comments, struct fields).
+
+    Use this after completing documentation work on a function:
+    - Naming the function and its parameters
+    - Adding @brief, @param, @return comments
+    - Naming struct fields used by the function
+
+    This is separate from matching (use 'complete mark' for match progress).
+    """
+    if status not in ("partial", "complete"):
+        console.print(f"[red]Invalid status: {status}. Use 'partial' or 'complete'[/red]")
+        raise typer.Exit(1)
+
+    # Update state database
+    db_upsert_function(
+        function_name,
+        is_documented=True,
+        documentation_status=status,
+        documented_at=time.time(),
+        notes=notes or "",
+    )
+
+    # Release any claim
+    db_release_claim(function_name)
+
+    if output_json:
+        print(json.dumps({
+            "success": True,
+            "function": function_name,
+            "documentation_status": status,
+        }))
+    else:
+        status_str = "[green]complete[/green]" if status == "complete" else "[yellow]partial[/yellow]"
+        console.print(f"[green]Documented:[/green] {function_name} ({status_str})")
+        if notes:
+            console.print(f"[dim]Notes: {notes}[/dim]")
+
+
 @complete_app.command("list")
 def complete_list(
     min_match: Annotated[
