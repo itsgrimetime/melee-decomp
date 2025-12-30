@@ -10,7 +10,7 @@ from typing import Annotated, Optional
 import typer
 from rich.console import Console
 
-from ._common import console, DEFAULT_MELEE_ROOT, DECOMP_CONFIG_DIR, get_local_api_url, resolve_melee_root, AGENT_ID, db_upsert_function, DEFAULT_API_URL, get_source_file_from_claim
+from ._common import console, DEFAULT_MELEE_ROOT, DECOMP_CONFIG_DIR, get_local_api_url, resolve_melee_root, AGENT_ID, db_upsert_function, get_source_file_from_claim
 from .complete import _load_completed, _save_completed, _get_current_branch
 from src.commit.diagnostics import (
     analyze_commit_error,

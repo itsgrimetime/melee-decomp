@@ -14,9 +14,9 @@ from rich.table import Table
 from ._common import (
     AGENT_ID,
     DECOMP_CONFIG_DIR,
-    LOCAL_DECOMP_ME,
     PRODUCTION_DECOMP_ME,
     console,
+    detect_local_api_url,
     extract_pr_info,
     get_local_api_url,
     get_pr_status_from_gh,
@@ -143,7 +143,8 @@ def state_status(
         console.print(f"[bold]Match:[/bold] {func.get('match_percent', 0):.1f}%")
 
         if func.get('local_scratch_slug'):
-            url = f"{LOCAL_DECOMP_ME}/scratch/{func['local_scratch_slug']}"
+            local_base = detect_local_api_url() or "http://localhost:8000"
+            url = f"{local_base}/scratch/{func['local_scratch_slug']}"
             console.print(f"[bold]Local:[/bold] {url}")
 
         if func.get('production_scratch_slug'):
@@ -273,7 +274,8 @@ def state_urls(
     if func:
         urls["match_percent"] = func.get('match_percent')
         if func.get('local_scratch_slug'):
-            urls["local_url"] = f"{LOCAL_DECOMP_ME}/scratch/{func['local_scratch_slug']}"
+            local_base = detect_local_api_url() or "http://localhost:8000"
+            urls["local_url"] = f"{local_base}/scratch/{func['local_scratch_slug']}"
         if func.get('production_scratch_slug'):
             urls["production_url"] = f"{PRODUCTION_DECOMP_ME}/scratch/{func['production_scratch_slug']}"
         urls["pr_url"] = func.get('pr_url')
@@ -624,9 +626,9 @@ def state_validate(
         import asyncio
         import httpx
 
-        api_base = os.environ.get("DECOMP_API_BASE", "")
+        api_base = detect_local_api_url()
         if not api_base:
-            console.print("[yellow]DECOMP_API_BASE not set - skipping server verification[/yellow]")
+            console.print("[yellow]Could not detect local decomp.me server - skipping server verification[/yellow]")
         else:
             # Normalize base URL - remove /api suffix if present (we add it in requests)
             if api_base.endswith("/api"):
@@ -1090,10 +1092,11 @@ def state_rebuild(
                 # Insert local scratch if present
                 local_slug = info.get('local_slug')
                 if local_slug:
+                    local_base = detect_local_api_url() or "http://localhost:8000"
                     db.upsert_scratch(
                         local_slug,
                         instance='local',
-                        base_url=LOCAL_DECOMP_ME,
+                        base_url=local_base,
                         function_name=info.get('function'),
                         match_percent=info.get('match_percent'),
                     )
@@ -1477,9 +1480,9 @@ def state_cleanup(
         import asyncio
         import httpx
 
-        api_base = os.environ.get("DECOMP_API_BASE", "")
+        api_base = detect_local_api_url()
         if not api_base:
-            console.print("\n[red]DECOMP_API_BASE not set - cannot verify server[/red]")
+            console.print("\n[red]Could not detect local decomp.me server - cannot verify[/red]")
         else:
             console.print(f"\n[bold]Verifying scratches on server ({api_base})...[/bold]")
 

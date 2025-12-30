@@ -556,21 +556,6 @@ def get_local_api_url() -> str:
     return url
 
 
-# Legacy compatibility - these now use auto-detection
-LOCAL_DECOMP_ME = os.environ.get("DECOMP_ME_URL", "http://nzxt-discord.local")  # Fallback
-_api_base = os.environ.get("DECOMP_API_BASE", "")
-DEFAULT_API_URL = _api_base[:-4] if _api_base.endswith("/api") else (_api_base or LOCAL_DECOMP_ME)
-
-
-def require_api_url(api_url: str) -> None:
-    """Validate that API URL is configured and show helpful error if not."""
-    if not api_url:
-        console.print("[red]Error: DECOMP_API_BASE environment variable is required[/red]")
-        console.print("[dim]Set it to your decomp.me instance URL, e.g.:[/dim]")
-        console.print(f"[dim]  export DECOMP_API_BASE={LOCAL_DECOMP_ME}[/dim]")
-        raise SystemExit(1)
-
-
 def _validate_worktree_build(worktree_path: Path, max_age_minutes: int = 30) -> bool:
     """Check if a worktree builds successfully with --require-protos.
 
