@@ -210,9 +210,9 @@ def _create_subdirectory_worktree(subdir_key: str, worktree_path: Path) -> Path:
                 capture_output=True, text=True, check=True
             )
         else:
-            # Create new branch from current HEAD
+            # Create new branch from upstream/master (not current HEAD)
             subprocess.run(
-                ["git", "worktree", "add", "-b", branch_name, str(worktree_path)],
+                ["git", "worktree", "add", "-b", branch_name, str(worktree_path), "upstream/master"],
                 cwd=DEFAULT_MELEE_ROOT,
                 capture_output=True, text=True, check=True
             )
@@ -240,7 +240,7 @@ def _create_subdirectory_worktree(subdir_key: str, worktree_path: Path) -> Path:
         console.print(f"  [dim]Subdirectory:[/dim] {subdir_key}")
         console.print(f"  [dim]Path:[/dim]   {worktree_path}")
         console.print(f"  [dim]Branch:[/dim] {branch_name}")
-        console.print(f"  [dim]Base:[/dim]   {base_branch} @ {base_commit}")
+        console.print(f"  [dim]Base:[/dim]   upstream/master")
 
         # Record in database
         db_upsert_subdirectory(subdir_key, str(worktree_path), branch_name)
