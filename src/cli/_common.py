@@ -1094,14 +1094,35 @@ def categorize_functions(data: dict, check_pr_status: bool = False) -> dict:
     return categories
 
 
-def extract_pr_info(pr_url: str) -> tuple[str, int]:
-    """Extract repo and PR number from URL.
+DEFAULT_PR_REPO = "doldecomp/melee"
+
+
+def extract_pr_info(pr_input: str, default_repo: str = DEFAULT_PR_REPO) -> tuple[str, int]:
+    """Extract repo and PR number from URL or PR number.
+
+    Accepts:
+    - Full URL: https://github.com/doldecomp/melee/pull/123
+    - Just PR number: 123 or 2049 (uses default_repo)
+    - Repo#number: doldecomp/melee#123
 
     Returns: (repo, pr_number) e.g. ("doldecomp/melee", 123)
     """
-    match = re.match(r'https?://github\.com/([^/]+/[^/]+)/pull/(\d+)', pr_url)
+    pr_input = pr_input.strip()
+
+    # Full URL
+    match = re.match(r'https?://github\.com/([^/]+/[^/]+)/pull/(\d+)', pr_input)
     if match:
         return match.group(1), int(match.group(2))
+
+    # Repo#number format (e.g., doldecomp/melee#123)
+    match = re.match(r'([^/]+/[^#]+)#(\d+)', pr_input)
+    if match:
+        return match.group(1), int(match.group(2))
+
+    # Just a PR number
+    if pr_input.isdigit():
+        return default_repo, int(pr_input)
+
     return "", 0
 
 

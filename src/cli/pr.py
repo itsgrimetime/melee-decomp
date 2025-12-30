@@ -387,8 +387,8 @@ def _validate_pr_description(body: str, functions: list[str], slug_map: dict) ->
 
 @pr_app.command("check")
 def pr_check(
-    pr_url: Annotated[
-        str, typer.Argument(help="GitHub PR URL to check")
+    pr_refs: Annotated[
+        list[str], typer.Argument(help="PR number(s) or URL(s) to check (defaults to doldecomp/melee)")
     ],
     validate: Annotated[
         bool, typer.Option("--validate", "-v", help="Validate PR description")
@@ -399,17 +399,39 @@ def pr_check(
 ):
     """Check PR status and validate description.
 
+    Accepts PR numbers (defaults to doldecomp/melee) or full URLs:
+        melee-agent pr check 2049
+        melee-agent pr check 2049 2051 2052
+        melee-agent pr check https://github.com/doldecomp/melee/pull/2049
+
     Shows:
     - PR state, review status, mergeability
     - Base and head branches
     - Functions mentioned in commits
     - Warnings if description has issues (local URLs, missing function names, etc.)
     """
-    repo, pr_number = extract_pr_info(pr_url)
-    if not pr_number:
-        console.print(f"[red]Invalid PR URL: {pr_url}[/red]")
-        console.print("[dim]Expected format: https://github.com/owner/repo/pull/123[/dim]")
-        raise typer.Exit(1)
+    all_results = []
+    for pr_ref in pr_refs:
+        repo, pr_number = extract_pr_info(pr_ref)
+        if not pr_number:
+            console.print(f"[red]Invalid PR reference: {pr_ref}[/red]")
+            console.print("[dim]Expected: PR number (e.g., 2049) or URL (e.g., https://github.com/owner/repo/pull/123)[/dim]")
+            raise typer.Exit(1)
+
+        result = _check_single_pr(repo, pr_number, pr_ref, validate, output_json)
+        if result:
+            all_results.append(result)
+
+        # Add separator between multiple PRs (except for JSON output)
+        if not output_json and len(pr_refs) > 1 and pr_ref != pr_refs[-1]:
+            console.print("\n" + "─" * 60 + "\n")
+
+    if output_json and len(all_results) > 1:
+        print(json.dumps(all_results, indent=2))
+
+
+def _check_single_pr(repo: str, pr_number: int, pr_ref: str, validate: bool, output_json: bool) -> dict | None:
+    """Check a single PR and display/return results."""
 
     pr_info = _get_extended_pr_info(repo, pr_number)
     if not pr_info:
@@ -436,23 +458,25 @@ def pr_check(
     slug_map = load_slug_map() if validate else {}
     warnings = _validate_pr_description(body, func_names, slug_map) if validate else []
 
+    output = {
+        "pr_number": pr_number,
+        "repo": repo,
+        "url": f"https://github.com/{repo}/pull/{pr_number}",
+        "title": title,
+        "state": state,
+        "is_draft": is_draft,
+        "review": review,
+        "mergeable": mergeable,
+        "base_branch": base_branch,
+        "head_branch": head_branch,
+        "commit_count": len(commits),
+        "functions": commit_functions,
+        "warnings": warnings,
+    }
+
     if output_json:
-        output = {
-            "pr_number": pr_number,
-            "url": pr_url,
-            "title": title,
-            "state": state,
-            "is_draft": is_draft,
-            "review": review,
-            "mergeable": mergeable,
-            "base_branch": base_branch,
-            "head_branch": head_branch,
-            "commit_count": len(commits),
-            "functions": commit_functions,
-            "warnings": warnings,
-        }
         print(json.dumps(output, indent=2))
-        return
+        return output
 
     # Display PR info
     console.print(f"[bold]PR #{pr_number}[/bold]: {title}\n")
@@ -493,6 +517,8 @@ def pr_check(
             console.print(f"  [yellow]• {warning}[/yellow]")
     elif validate:
         console.print(f"\n[green]✓ Description looks good[/green]")
+
+    return None
 
 
 def _get_production_scratch_url(func_name: str, slug_map: dict) -> str | None:
@@ -1250,8 +1276,8 @@ def _get_decomp_dev_report(repo: str, pr_number: int) -> dict | None:
 
 @pr_app.command("feedback")
 def pr_feedback(
-    pr_url: Annotated[
-        str, typer.Argument(help="GitHub PR URL")
+    pr_refs: Annotated[
+        list[str], typer.Argument(help="PR number(s) or URL(s) to check (defaults to doldecomp/melee)")
     ],
     include_logs: Annotated[
         bool, typer.Option("--logs", "-l", help="Include full CI failure logs")
@@ -1262,21 +1288,41 @@ def pr_feedback(
 ):
     """Get all feedback on a PR in one call.
 
+    Accepts PR numbers (defaults to doldecomp/melee) or full URLs:
+        melee-agent pr feedback 2039
+        melee-agent pr feedback 2049 2051 2055 2056
+        melee-agent pr feedback https://github.com/doldecomp/melee/pull/2039
+
     Consolidates:
     - CI check status (pass/fail) with parsed error messages
     - Review comments (inline and PR-level)
     - decomp-dev bot regression reports
 
     Designed for PR agents to quickly assess what needs to be fixed.
-
-    Example:
-        melee-agent pr feedback https://github.com/doldecomp/melee/pull/2039 --json
     """
-    repo, pr_number = extract_pr_info(pr_url)
-    if not pr_number:
-        console.print(f"[red]Invalid PR URL: {pr_url}[/red]")
-        raise typer.Exit(1)
+    all_results = []
+    for pr_ref in pr_refs:
+        repo, pr_number = extract_pr_info(pr_ref)
+        if not pr_number:
+            console.print(f"[red]Invalid PR reference: {pr_ref}[/red]")
+            console.print("[dim]Expected: PR number (e.g., 2039) or URL[/dim]")
+            raise typer.Exit(1)
 
+        result = _feedback_single_pr(repo, pr_number, include_logs, output_json)
+        if result:
+            all_results.append(result)
+
+        # Add separator between multiple PRs (except for JSON output)
+        if not output_json and len(pr_refs) > 1 and pr_ref != pr_refs[-1]:
+            console.print("\n" + "─" * 60 + "\n")
+
+    if output_json and len(all_results) > 1:
+        print(json.dumps(all_results, indent=2, default=str))
+
+
+def _feedback_single_pr(repo: str, pr_number: int, include_logs: bool, output_json: bool) -> dict | None:
+    """Get feedback for a single PR."""
+    pr_url = f"https://github.com/{repo}/pull/{pr_number}"
     feedback = {
         "pr_number": pr_number,
         "pr_url": pr_url,
@@ -1372,7 +1418,7 @@ def pr_feedback(
     # Output
     if output_json:
         print(json.dumps(feedback, indent=2, default=str))
-        return
+        return feedback
 
     # Human-readable output
     console.print(f"[bold]PR #{pr_number} Feedback Summary[/bold]\n")
@@ -1440,3 +1486,5 @@ def pr_feedback(
             console.print(f"  • {item}")
         if len(action_items) > 10:
             console.print(f"  [dim]... and {len(action_items) - 10} more[/dim]")
+
+    return None
