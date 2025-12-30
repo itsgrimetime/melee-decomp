@@ -249,6 +249,37 @@ melee-agent worktree list --commits  # See pending commits
 | `ef_` | Effect | Visual effects |
 | `sc_` | Scene | Scene management |
 
+## Type Improvements
+
+When you can determine more specific types, replace generic types with precise ones:
+
+| Generic Type | When to Improve | Better Type |
+|--------------|-----------------|-------------|
+| `void*` | Known data structure | `FighterData*`, `ItemData*` |
+| `void*` | Object pointer | `HSD_GObj*`, `HSD_JObj*` |
+| `int` | Boolean logic only | `bool` |
+| `int` | Known enum values | `enum_t` or specific enum |
+| `int` | Always positive | `u32` |
+| `int` | Can be negative | `s32` |
+| `float` | GameCube float | `f32` |
+| `double` | GameCube double | `f64` |
+| `char*` | String pointer | `const char*` if read-only |
+
+**Evidence required for type changes:**
+- `void*` → struct pointer: See how fields are accessed (`ptr->some_field`)
+- `int` → `bool`: Only returns 0/1, used in conditionals
+- `int` → enum: Limited set of values, compared with constants
+
+**Replace pointer arithmetic with struct access:**
+```c
+// Before: Raw pointer math is hard to understand
+HSD_GObj* temp = *(HSD_GObj**)((u8*)gp + 0xF8 + i * 4);
+
+// After: Struct field access is self-documenting
+HSD_GObj* temp = gp->gv.icemt.xF4[i + 1];
+```
+Calculate the offset to find the correct struct/field, then use proper access.
+
 ## Documentation Tags
 
 ```c
@@ -263,6 +294,38 @@ melee-agent worktree list --commits  # See pending commits
 /// @sz{size} Field size in bytes
 ```
 
+## Documentation Quality Guidelines
+
+**Understand purpose before documenting.** Don't write `@brief` comments that just describe mechanics:
+```c
+// BAD: Just restates the code
+/// @brief Iterates over xF4[1..5] calling grMaterial update on each.
+
+// GOOD: Explains purpose (when known)
+/// @brief Destroys material effect items when platform is removed.
+
+// GOOD: Admits uncertainty with @todo
+/// @todo Rename: callback3 (destroy) for row 5 in grIm_803E4718.
+```
+
+**Trace wrapper functions deeply.** If a function calls another, trace it:
+- `grMaterial_801C8CDC` → `Item_8026A8EC` → item destruction logic
+- Understanding the leaf function reveals the wrapper's true purpose
+
+**Recognize callback table patterns.** Stage callbacks often follow:
+- callback0 = init/create
+- callback1 = should_update check (returns bool)
+- callback2 = update/think
+- callback3 = destroy/cleanup
+
+**Check struct union variants.** In `Ground`, `gv.icemt` and `gv.icemt2` are union members overlaying the same memory with different interpretations. Verify which variant a function actually uses.
+
+**Mixed-type arrays exist.** A `void*` array may store different types at different indices. Document this rather than assuming uniform types:
+```c
+/// @brief Mixed pointer array: xF4[0] = Params*, xF4[1-5] = Item_GObj*.
+void* xF4[6];
+```
+
 ## What NOT to Do
 
 1. **Don't work in the main `melee/` directory** - Always use the worktree path after claiming
@@ -272,8 +335,9 @@ melee-agent worktree list --commits  # See pending commits
 5. **Don't break the build** - Always verify with `ninja` in the worktree
 6. **Don't rename matched code carelessly** - Matched functions have verified behavior
 7. **Don't guess struct types** - Use `unk`/`x` prefix if uncertain
-8. **Don't remove useful address comments** - Keep `/* 0D7268 */` style comments
-9. **Don't forget to commit and record** - Use `complete mark --documented` to track progress
+8. **Don't change parameter types on matched functions** - Type changes can break assembly matches
+9. **Don't remove useful address comments** - Keep `/* 0D7268 */` style comments
+10. **Don't write superficial @brief comments** - If you only know mechanics, use `@todo` instead
 
 ## Troubleshooting
 
