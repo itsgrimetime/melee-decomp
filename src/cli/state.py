@@ -993,6 +993,8 @@ def state_validate(
 
     # Show suggestions for non-auto-fixable issues
     suggestions = []
+    if 'missing_local_scratch' in by_type:
+        suggestions.append("missing_local_scratch: run with --fix to search, or 'melee-agent extract get <func> --create-scratch'")
     if 'committed_no_pr' in by_type:
         suggestions.append("committed_no_pr: run 'melee-agent audit discover-prs'")
     if 'missing_prod_scratch' in by_type:
