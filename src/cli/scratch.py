@@ -27,7 +27,9 @@ from ._common import (
     db_record_match_score,
     db_upsert_function,
     get_compiler_for_source,
+    AGENT_ID,
 )
+from .complete import _get_current_branch
 
 # Shared scratch tokens file - all agents use the same file
 # Tokens are keyed by scratch slug, so no conflicts between agents
@@ -857,6 +859,24 @@ def scratch_sync_from_repo(
             match_percent=match_pct,
             status='matched' if match_pct >= 95 else 'in_progress',
         )
+
+        # Record branch-specific progress for recovery/traceability
+        branch = _get_current_branch(melee_root)
+        if branch:
+            from src.db import get_db
+            try:
+                db = get_db()
+                db.upsert_branch_progress(
+                    function_name=function_name,
+                    branch=branch,
+                    scratch_slug=slug,
+                    match_percent=match_pct,
+                    score=result.diff_output.current_score,
+                    max_score=result.diff_output.max_score,
+                    agent_id=AGENT_ID,
+                )
+            except Exception:
+                pass  # Don't fail compile for branch tracking issues
 
         console.print(f"[green]Synced![/green] Match: {match_pct:.1f}%")
 

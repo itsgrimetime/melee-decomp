@@ -164,6 +164,19 @@ def state_status(
             console.print(f"[bold]Notes:[/bold] {func['notes']}")
 
         console.print(f"[dim]Updated: {_format_datetime(func.get('updated_at'))}[/dim]")
+
+        # Show branch progress if any
+        branch_progress = db.get_branch_progress(function_name)
+        if branch_progress:
+            console.print(f"\n[bold]Branch Progress:[/bold]")
+            for bp in branch_progress[:5]:  # Show top 5
+                status_icon = "✓" if bp.get('is_committed') else "○"
+                console.print(
+                    f"  {status_icon} {bp['branch']}: {bp['match_percent']:.1f}% "
+                    f"[dim]({_format_datetime(bp.get('updated_at'))})[/dim]"
+                )
+            if len(branch_progress) > 5:
+                console.print(f"  [dim]... and {len(branch_progress) - 5} more[/dim]")
         return
 
     # Build query based on category

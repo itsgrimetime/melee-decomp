@@ -482,6 +482,99 @@ class StateDB:
             )
 
     # =========================================================================
+    # Branch Progress Operations
+    # =========================================================================
+
+    def upsert_branch_progress(
+        self,
+        function_name: str,
+        branch: str,
+        scratch_slug: str | None = None,
+        match_percent: float = 0.0,
+        score: int | None = None,
+        max_score: int | None = None,
+        agent_id: str | None = None,
+        worktree_path: str | None = None,
+        is_committed: bool = False,
+        commit_hash: str | None = None,
+    ) -> None:
+        """Record or update progress for a function on a specific branch.
+
+        This tracks match state per (function, branch) for recovery and debugging.
+        """
+        now = time.time()
+        with self.transaction() as conn:
+            # Check if record exists
+            cursor = conn.execute(
+                "SELECT * FROM function_branch_progress WHERE function_name = ? AND branch = ?",
+                (function_name, branch)
+            )
+            old_row = cursor.fetchone()
+            old_value = dict(old_row) if old_row else None
+
+            conn.execute(
+                """
+                INSERT INTO function_branch_progress
+                    (function_name, branch, scratch_slug, match_percent, score, max_score,
+                     agent_id, worktree_path, is_committed, commit_hash, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(function_name, branch) DO UPDATE SET
+                    scratch_slug = COALESCE(excluded.scratch_slug, scratch_slug),
+                    match_percent = excluded.match_percent,
+                    score = excluded.score,
+                    max_score = excluded.max_score,
+                    agent_id = COALESCE(excluded.agent_id, agent_id),
+                    worktree_path = COALESCE(excluded.worktree_path, worktree_path),
+                    is_committed = excluded.is_committed,
+                    commit_hash = COALESCE(excluded.commit_hash, commit_hash),
+                    updated_at = excluded.updated_at
+                """,
+                (function_name, branch, scratch_slug, match_percent, score, max_score,
+                 agent_id, worktree_path, is_committed, commit_hash, now)
+            )
+
+            self.log_audit(
+                'branch_progress', f"{function_name}@{branch}",
+                'updated' if old_value else 'created',
+                agent_id=agent_id,
+                old_value=old_value,
+                new_value={
+                    'function_name': function_name,
+                    'branch': branch,
+                    'match_percent': match_percent,
+                    'is_committed': is_committed,
+                }
+            )
+
+    def get_branch_progress(self, function_name: str) -> list[dict]:
+        """Get all branch progress entries for a function."""
+        with self.connection() as conn:
+            cursor = conn.execute(
+                """
+                SELECT * FROM function_branch_progress
+                WHERE function_name = ?
+                ORDER BY match_percent DESC
+                """,
+                (function_name,)
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_best_branch_progress(self, function_name: str) -> dict | None:
+        """Get the branch with the highest match for a function."""
+        with self.connection() as conn:
+            cursor = conn.execute(
+                """
+                SELECT * FROM function_branch_progress
+                WHERE function_name = ?
+                ORDER BY match_percent DESC
+                LIMIT 1
+                """,
+                (function_name,)
+            )
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+    # =========================================================================
     # Agent Operations
     # =========================================================================
 

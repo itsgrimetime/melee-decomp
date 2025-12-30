@@ -1,6 +1,6 @@
 """SQLite schema for agent state management."""
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA_SQL = """
 -- Core function tracking
@@ -104,6 +104,28 @@ CREATE TABLE IF NOT EXISTS agent_subdirectory_assignments (
 
 CREATE INDEX IF NOT EXISTS idx_agent_subdir_agent ON agent_subdirectory_assignments(agent_id);
 CREATE INDEX IF NOT EXISTS idx_agent_subdir_key ON agent_subdirectory_assignments(subdirectory_key);
+
+-- Per-branch progress tracking for functions
+-- Allows tracking different match states across branches/worktrees
+CREATE TABLE IF NOT EXISTS function_branch_progress (
+    function_name TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    scratch_slug TEXT,
+    match_percent REAL DEFAULT 0.0,
+    score INTEGER,
+    max_score INTEGER,
+    agent_id TEXT,
+    worktree_path TEXT,
+    is_committed BOOLEAN DEFAULT FALSE,
+    commit_hash TEXT,
+    created_at REAL DEFAULT (unixepoch('now', 'subsec')),
+    updated_at REAL DEFAULT (unixepoch('now', 'subsec')),
+    PRIMARY KEY (function_name, branch)
+);
+
+CREATE INDEX IF NOT EXISTS idx_branch_progress_function ON function_branch_progress(function_name);
+CREATE INDEX IF NOT EXISTS idx_branch_progress_branch ON function_branch_progress(branch);
+CREATE INDEX IF NOT EXISTS idx_branch_progress_match ON function_branch_progress(match_percent DESC);
 
 -- Full audit trail
 CREATE TABLE IF NOT EXISTS audit_log (
@@ -252,6 +274,23 @@ SELECT
     (SELECT COUNT(*) FROM agent_subdirectory_assignments asa
      WHERE asa.subdirectory_key = sa.subdirectory_key) as assigned_agents
 FROM subdirectory_allocations sa;
+
+-- Branch progress summary per function
+CREATE VIEW IF NOT EXISTS v_function_branch_progress AS
+SELECT
+    fbp.function_name,
+    fbp.branch,
+    fbp.scratch_slug,
+    fbp.match_percent,
+    fbp.agent_id,
+    fbp.is_committed,
+    fbp.updated_at,
+    f.match_percent as canonical_match_percent,
+    f.status as canonical_status,
+    CASE WHEN fbp.match_percent > COALESCE(f.match_percent, 0) THEN 1 ELSE 0 END as is_best_match
+FROM function_branch_progress fbp
+LEFT JOIN functions f ON fbp.function_name = f.function_name
+ORDER BY fbp.function_name, fbp.match_percent DESC;
 """
 
 INITIAL_META = [
@@ -429,5 +468,45 @@ def get_migrations() -> dict[int, str]:
                 sa.pending_commits,
                 sa.last_commit_at
             FROM subdirectory_allocations sa;
+        """,
+        # Version 3 -> 4: Add per-branch progress tracking
+        3: """
+            -- Per-branch progress tracking for functions
+            CREATE TABLE IF NOT EXISTS function_branch_progress (
+                function_name TEXT NOT NULL,
+                branch TEXT NOT NULL,
+                scratch_slug TEXT,
+                match_percent REAL DEFAULT 0.0,
+                score INTEGER,
+                max_score INTEGER,
+                agent_id TEXT,
+                worktree_path TEXT,
+                is_committed BOOLEAN DEFAULT FALSE,
+                commit_hash TEXT,
+                created_at REAL DEFAULT (unixepoch('now', 'subsec')),
+                updated_at REAL DEFAULT (unixepoch('now', 'subsec')),
+                PRIMARY KEY (function_name, branch)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_branch_progress_function ON function_branch_progress(function_name);
+            CREATE INDEX IF NOT EXISTS idx_branch_progress_branch ON function_branch_progress(branch);
+            CREATE INDEX IF NOT EXISTS idx_branch_progress_match ON function_branch_progress(match_percent DESC);
+
+            -- Branch progress summary view
+            CREATE VIEW IF NOT EXISTS v_function_branch_progress AS
+            SELECT
+                fbp.function_name,
+                fbp.branch,
+                fbp.scratch_slug,
+                fbp.match_percent,
+                fbp.agent_id,
+                fbp.is_committed,
+                fbp.updated_at,
+                f.match_percent as canonical_match_percent,
+                f.status as canonical_status,
+                CASE WHEN fbp.match_percent > COALESCE(f.match_percent, 0) THEN 1 ELSE 0 END as is_best_match
+            FROM function_branch_progress fbp
+            LEFT JOIN functions f ON fbp.function_name = f.function_name
+            ORDER BY fbp.function_name, fbp.match_percent DESC;
         """,
     }
