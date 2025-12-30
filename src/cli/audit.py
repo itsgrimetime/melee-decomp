@@ -690,14 +690,22 @@ def audit_discover_prs(
         pr_state = pr.get("state", "UNKNOWN")
         is_merged = pr.get("mergedAt") is not None or pr.get("_queried_state") == "merged"
 
+        # Determine actual PR state
+        actual_pr_state = "MERGED" if is_merged else pr_state.upper() if pr_state else "OPEN"
+
+        # First, update any functions already linked to this PR (even if not in diff)
+        # This handles cases where a PR is closed but the function wasn't matched
+        for func, current in completed.items():
+            if current.get("pr_url") == pr_url and current.get("pr_state") != actual_pr_state:
+                current["pr_state"] = actual_pr_state
+                total_updated += 1
+
         functions = _extract_functions_from_pr(pr, repo)
         if not functions:
             continue
 
         linked_funcs = []
         all_funcs_in_pr = []
-        # Determine actual PR state
-        actual_pr_state = "MERGED" if is_merged else pr_state.upper() if pr_state else "OPEN"
 
         for func_info in functions:
             func = func_info["function"]
@@ -778,7 +786,7 @@ def audit_discover_prs(
     console.print(f"[bold]Summary:[/bold]")
     console.print(f"  PRs scanned: {len(all_prs)}")
     console.print(f"  Functions newly linked: {total_linked}")
-    console.print(f"  Functions marked merged: {total_updated}")
+    console.print(f"  PR states updated: {total_updated}")
 
     if not dry_run and (total_linked > 0 or total_updated > 0):
         save_completed_functions(completed)
@@ -786,13 +794,15 @@ def audit_discover_prs(
         # Also update state database
         for func_name, info in completed.items():
             if info.get("pr_url"):
-                db_upsert_function(
-                    func_name,
-                    pr_url=info.get("pr_url"),
-                    pr_number=info.get("pr_number"),
-                    pr_state=info.get("pr_state"),
-                    status='merged' if info.get("pr_state") == "MERGED" else None,
-                )
+                update_fields = {
+                    'pr_url': info.get("pr_url"),
+                    'pr_number': info.get("pr_number"),
+                    'pr_state': info.get("pr_state"),
+                }
+                # Only set status to merged when PR is merged; don't clear status otherwise
+                if info.get("pr_state") == "MERGED":
+                    update_fields['status'] = 'merged'
+                db_upsert_function(func_name, **update_fields)
 
         console.print(f"\n[green]Saved changes to state database[/green]")
     elif dry_run:
