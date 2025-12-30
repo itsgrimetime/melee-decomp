@@ -82,12 +82,6 @@ def _save_claims(claims: dict[str, Any]) -> None:
         json.dump(claims, f, indent=2)
 
 
-def _load_completed() -> dict[str, Any]:
-    """Load completed functions from database."""
-    from ._common import load_completed_functions
-    return load_completed_functions()
-
-
 def _check_subdirectory_availability(source_file: str, agent_id: str) -> tuple[bool, str | None, str | None]:
     """Check if subdirectory is available for claiming.
 
@@ -135,16 +129,6 @@ def claim_add(
         source_file = _lookup_source_file(function_name)
         if source_file and not output_json:
             console.print(f"[dim]Auto-detected source file: {source_file}[/dim]")
-
-    # Check if already completed
-    completed = _load_completed()
-    if function_name in completed:
-        info = completed[function_name]
-        if output_json:
-            print(json.dumps({"success": False, "error": "already_completed", "info": info}))
-        else:
-            console.print(f"[red]Function already completed:[/red] {info.get('match_percent', 0):.1f}% match")
-        raise typer.Exit(1)
 
     # Check subdirectory availability if source file provided
     subdir_key = None
