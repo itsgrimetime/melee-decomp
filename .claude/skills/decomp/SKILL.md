@@ -170,6 +170,103 @@ Before committing, you MUST ensure:
 
 **Build passes with --require-protos** - The `workflow finish` command validates this. If it fails due to header mismatches or caller issues, use the `/decomp-fixup` skill to resolve them.
 
+## Human Readability
+
+Matching is not just about achieving 100% - the code should be readable. Apply these improvements when the purpose is **clear from the code**:
+
+### Function Names
+
+Rename `fn_XXXXXXXX` when the function's purpose is obvious:
+```c
+// Before
+fn_80022120(data, row, col, &r, &g, &b, &a);
+
+// After - function clearly reads RGBA8 texture coordinates
+lbRefract_ReadTexCoordRGBA8(data, row, col, &r, &g, &b, &a);
+```
+
+Keep the address-based name if purpose is unclear.
+
+### Parameter Names
+
+Rename parameters when their usage is obvious in the function body:
+```c
+// Before
+void lbBgFlash_800205F0(s32 arg0) {
+    if (arg0 < 1) { arg0 = 1; }
+    ...
+}
+
+// After - clearly a duration/count
+void lbBgFlash_800205F0(s32 duration) {
+    if (duration < 1) { duration = 1; }
+    ...
+}
+```
+
+Keep `arg0`, `arg1`, etc. if the parameter is unused or purpose is unclear.
+
+### Variable Names
+
+Use descriptive names instead of decompiler defaults:
+```c
+// Before
+s32 temp_r3 = gobj->user_data;
+f32 var_f1 = fp->x2C;
+
+// After
+FighterData* fp = gobj->user_data;
+f32 facing_dir = fp->facing_direction;
+```
+
+### Struct Field Access
+
+**Never use pointer arithmetic.** If you need to access a field by offset, update the struct definition:
+```c
+// BAD - pointer arithmetic
+if (((u8*)&lbl_80472D28)[0x116] == 1) {
+
+// GOOD - proper struct access (update struct definition if needed)
+if (lbl_80472D28.some_flag == 1) {
+```
+
+If you don't know the field name, use an `x` prefix with the offset:
+```c
+// Acceptable when field purpose is unknown
+if (lbl_80472D28.x116 == 1) {
+```
+
+### Struct Field Renaming
+
+When you access a field and understand its purpose, rename it:
+```c
+// Before - in types.h
+struct BgFlashData {
+    int x4;
+    int x8;
+    int xC;
+};
+
+// After - if you see xC is set from a duration parameter
+struct BgFlashData {
+    int x4;
+    int x8;
+    int duration;  // or keep as xC if uncertain
+};
+```
+
+**Only rename fields you've seen accessed and understood.** Don't guess.
+
+### Conservative Principle
+
+When uncertain, prefer:
+- Address-based function names over guessed names
+- `arg0`/`arg1` over guessed parameter names
+- `x4`/`x8` over guessed field names
+- Simple `@brief` over detailed speculative docs
+
+See `/understand` skill for detailed conservative documentation guidelines.
+
 ## Type and Context Tips
 
 **Quick struct lookup:** Use the struct command to find field offsets and known issues:
