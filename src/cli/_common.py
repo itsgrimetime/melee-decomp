@@ -583,9 +583,12 @@ def _validate_worktree_build(worktree_path: Path, max_age_minutes: int = 30) -> 
             # Quick check: just look at a few key directories
             for check_dir in [src_dir / "melee" / "lb", src_dir / "melee" / "ft"]:
                 if check_dir.exists():
-                    for f in check_dir.rglob("*.c"):
-                        if f.stat().st_mtime > marker_mtime:
-                            needs_revalidation = True
+                    for pattern in ["*.c", "*.h"]:
+                        for f in check_dir.rglob(pattern):
+                            if f.stat().st_mtime > marker_mtime:
+                                needs_revalidation = True
+                                break
+                        if needs_revalidation:
                             break
                     if needs_revalidation:
                         break
@@ -736,6 +739,18 @@ def resolve_melee_root(
     """
     if melee_root is not None:
         return melee_root
+
+    # Check if current working directory is inside a worktree
+    cwd = Path.cwd()
+    try:
+        # Check if cwd is inside melee-worktrees/
+        cwd.relative_to(MELEE_WORKTREES_DIR)
+        # Find the worktree root (has .git file or directory)
+        for parent in [cwd] + list(cwd.parents):
+            if (parent / ".git").exists() and parent.is_relative_to(MELEE_WORKTREES_DIR):
+                return parent
+    except ValueError:
+        pass  # Not inside worktrees dir
 
     # If target_file is known, use subdirectory-based worktree
     if target_file:
