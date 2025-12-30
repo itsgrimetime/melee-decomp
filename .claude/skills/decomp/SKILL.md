@@ -29,12 +29,6 @@ melee/src/melee/ft/chara/ftCommon/*.c → melee-worktrees/dir-ft-chara-ftCommon/
 ```bash
 # Just claim the function - source file is auto-detected
 melee-agent claim add lbColl_80008440
-
-# List subdirectory worktrees
-melee-agent worktree list
-
-# Check subdirectory status
-melee-agent worktree status lb
 ```
 
 **High-contention zone:** `ft/chara/ftCommon/` contains 123 behavior files used by ALL characters. Subdirectory locks expire after 30 minutes to prevent blocking.
@@ -42,7 +36,6 @@ melee-agent worktree status lb
 **Do NOT:**
 - Create branches directly in `melee/` - use subdirectory worktrees
 - Manually specify `--melee-root` - if you think you need to, stop and ask the user for confirmation, stating your justification
-- Set `DECOMP_API_BASE` manually - let auto-detection find the server
 - Work on functions in locked subdirectories owned by other agents
 
 ## Workflow
@@ -100,9 +93,8 @@ Then read the source file in `melee/src/` for context. Look for:
 
 ### Step 3: Compile and Iterate
 
-Write code and compile using one of these methods:
+Write code and run compile command with code inline:
 
-**Option A: Inline code (preferred for agents)**
 ```bash
 melee-agent scratch compile <slug> --code '
 void func(s32 arg0) {
@@ -114,13 +106,7 @@ void func(s32 arg0) {
 ' --diff
 ```
 
-**Option B: File-based**
-```bash
-# Write to file, then compile
-melee-agent scratch compile <slug> -s /tmp/decomp_<slug>.c --diff
-```
-
-The compile also shows **match % history**:
+The compile shows **match % history**:
 ```
 Compiled successfully!
 Match: 85.0%
@@ -148,11 +134,7 @@ History: 45% → 71.5% → 85%  # Shows your progress over iterations
 
 **Threshold:** Any improvement over the starting match %. Progress is progress.
 
-> **WARNING:** Using `complete mark` WITHOUT `commit apply` does NOT save your work!
-> The function will appear in your tracking file but will NOT be in the repository.
-> Your match will be LOST when the scratch expires or you move on.
-
-**RECOMMENDED: Use the workflow command (combines both steps):**
+**Use the workflow command:**
 ```bash
 melee-agent workflow finish <function_name> <slug>
 ```
@@ -162,13 +144,6 @@ This single command:
 2. Applies the code to the melee repo
 3. Records the function as committed
 4. Releases any claims
-
-**Alternative: Manual two-step process:**
-```bash
-melee-agent commit apply <function_name> <slug> --dry-run  # Always verify first
-melee-agent commit apply <function_name> <slug>            # Then commit
-melee-agent complete mark <function_name> <slug> <pct> --committed
-```
 
 **CRITICAL: Commit Requirements**
 
@@ -188,6 +163,9 @@ Before committing, you MUST ensure:
    ```bash
    grep -r "function_name" <worktree>/src/melee/
    ```
+5. **No naming regressions** - Do not change names of functions, params, variables, etc. from an "english" name to their address-based name, e.g. do not change `ItemStateTable_GShell[] -> it_803F5BA8[]`
+
+6. **No pointer arithmetic/magic numbers** - don't do things like `if (((u8*)&lbl_80472D28)[0x116] == 1) {`, if you find yourself needing to do this to get a 100% match, you should investigate and update the struct definition accordingly.
 
 **Common header fixes needed:**
 ```c
@@ -198,10 +176,10 @@ Before committing, you MUST ensure:
 /* 0D7268 */ M2C_UNK ftCo_800D7268(void* arg0);
 ```
 
-**Improved commit diagnostics:** When `--dry-run` fails, the CLI now:
-- Suggests missing `#include` statements based on undefined types
-- Detects header signature mismatches (e.g., `UNK_RET` vs actual signature)
-- Shows which header file needs updating
+**Improved commit diagnostics:** When `--dry-run` fails, you should see:
+- Suggestions for missing `#include` statements based on undefined types
+- Detection of header signature mismatches (e.g., `UNK_RET` vs actual signature)
+- Notes about which header file needs updating
 
 ## Type and Context Tips
 
@@ -223,7 +201,7 @@ melee-agent scratch search-context <slug> "HSD_GObj" "FtCmd2" "ColorOverlay"
 
 ## Known Type Issues
 
-The context headers have some incorrect type declarations. When you see assembly that doesn't match the declared type, use these workarounds:
+The context headers may have some incorrect type declarations. When you see assembly that doesn't match the declared type, use these workarounds:
 
 | Field | Declared | Actual | Detection | Workaround |
 |-------|----------|--------|-----------|------------|
