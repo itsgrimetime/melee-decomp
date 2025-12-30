@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Annotated, Optional
 
 import typer
+from rich.console import Console
+from rich.panel import Panel
 from rich.table import Table
 
 from ._common import (
@@ -1019,3 +1021,422 @@ def pr_describe(
             console.print("\n[green]Copied to clipboard[/green]")
         except (subprocess.CalledProcessError, FileNotFoundError):
             console.print("\n[yellow]Could not copy to clipboard[/yellow]")
+
+
+# =============================================================================
+# PR Feedback Command - Consolidated feedback for PR agents
+# =============================================================================
+
+
+def _get_pr_checks(repo: str, pr_number: int) -> list[dict]:
+    """Get CI check status for a PR."""
+    try:
+        result = subprocess.run(
+            ["gh", "pr", "view", str(pr_number), "--repo", repo,
+             "--json", "statusCheckRollup"],
+            capture_output=True, text=True, check=True
+        )
+        data = json.loads(result.stdout)
+        return data.get("statusCheckRollup", [])
+    except (subprocess.CalledProcessError, json.JSONDecodeError):
+        return []
+
+
+def _get_failed_check_logs(repo: str, run_id: str, max_lines: int = 100) -> str:
+    """Get failed logs from a GitHub Actions run."""
+    try:
+        result = subprocess.run(
+            ["gh", "run", "view", run_id, "--repo", repo, "--log-failed"],
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode == 0:
+            lines = result.stdout.split("\n")
+            # Filter out noise, keep relevant error lines
+            filtered = []
+            for line in lines:
+                # Skip setup/boilerplate lines
+                if any(skip in line for skip in [
+                    "Current runner version",
+                    "##[group]",
+                    "##[endgroup]",
+                    "Runner Image",
+                    "GITHUB_TOKEN",
+                    "Secret source",
+                    "Prepare workflow",
+                    "Download action",
+                    "Getting action download",
+                    "Complete job name",
+                    "Operating System",
+                    "Image:",
+                    "Version:",
+                    "Included Software:",
+                    "Hosted Compute Agent",
+                ]):
+                    continue
+                filtered.append(line)
+            return "\n".join(filtered[-max_lines:])
+        return ""
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return ""
+
+
+def _parse_build_errors(log_output: str) -> list[dict]:
+    """Parse build errors from CI log output."""
+    errors = []
+    seen = set()
+
+    # Pattern for compiler errors: file.c:123: error: message
+    error_pattern = re.compile(
+        r'(?P<file>[\w/]+\.[ch]):(?P<line>\d+):\s*(?:error|Error):\s*(?P<message>.+)'
+    )
+
+    # Pattern for linker errors
+    linker_pattern = re.compile(
+        r"undefined reference to [`'](?P<symbol>\w+)'|"
+        r"multiple definition of [`'](?P<multi>\w+)'"
+    )
+
+    # Pattern for ninja build failures
+    ninja_pattern = re.compile(
+        r'FAILED:\s*(?P<target>.+)'
+    )
+
+    for line in log_output.split("\n"):
+        # Check for compiler errors
+        match = error_pattern.search(line)
+        if match:
+            key = (match.group("file"), match.group("line"), match.group("message")[:50])
+            if key not in seen:
+                seen.add(key)
+                errors.append({
+                    "type": "compile",
+                    "file": match.group("file"),
+                    "line": int(match.group("line")),
+                    "message": match.group("message").strip(),
+                })
+            continue
+
+        # Check for linker errors
+        match = linker_pattern.search(line)
+        if match:
+            symbol = match.group("symbol") or match.group("multi")
+            error_type = "undefined_reference" if match.group("symbol") else "multiple_definition"
+            key = (error_type, symbol)
+            if key not in seen:
+                seen.add(key)
+                errors.append({
+                    "type": error_type,
+                    "symbol": symbol,
+                    "message": line.strip(),
+                })
+            continue
+
+        # Check for ninja failures
+        match = ninja_pattern.search(line)
+        if match:
+            target = match.group("target")
+            if target not in seen:
+                seen.add(target)
+                errors.append({
+                    "type": "build_failed",
+                    "target": target,
+                    "message": f"Build failed: {target}",
+                })
+
+    return errors
+
+
+def _get_pr_review_comments(repo: str, pr_number: int) -> list[dict]:
+    """Get review comments on a PR."""
+    try:
+        # Get inline review comments
+        result = subprocess.run(
+            ["gh", "api", f"repos/{repo}/pulls/{pr_number}/comments",
+             "--jq", '.[] | {path: .path, line: .line, body: .body, author: .user.login, created_at: .created_at}'],
+            capture_output=True, text=True, check=True
+        )
+        comments = []
+        for line in result.stdout.strip().split("\n"):
+            if line.strip():
+                try:
+                    comments.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
+
+        # Get PR-level comments (not inline)
+        result = subprocess.run(
+            ["gh", "pr", "view", str(pr_number), "--repo", repo,
+             "--json", "comments", "--jq", '.comments[] | {body: .body, author: .author.login, created_at: .createdAt}'],
+            capture_output=True, text=True, check=True
+        )
+        for line in result.stdout.strip().split("\n"):
+            if line.strip():
+                try:
+                    comment = json.loads(line)
+                    comment["path"] = None  # Mark as PR-level comment
+                    comments.append(comment)
+                except json.JSONDecodeError:
+                    pass
+
+        return comments
+    except subprocess.CalledProcessError:
+        return []
+
+
+def _parse_decomp_dev_report(body: str) -> dict | None:
+    """Parse decomp-dev bot report for regressions."""
+    if not body:
+        return None
+
+    result = {
+        "has_changes": False,
+        "regressions": [],
+        "improvements": [],
+        "raw_report": body,
+    }
+
+    # Check for "No changes" (good)
+    if "No changes" in body:
+        return result
+
+    result["has_changes"] = True
+
+    # Parse regression lines: function_name | X% -> Y% (regression)
+    regression_pattern = re.compile(
+        r'`?(\w+)`?\s*\|\s*(\d+(?:\.\d+)?)\s*%?\s*->\s*(\d+(?:\.\d+)?)\s*%?.*\(regression\)',
+        re.IGNORECASE
+    )
+    for match in regression_pattern.finditer(body):
+        result["regressions"].append({
+            "function": match.group(1),
+            "from_pct": float(match.group(2)),
+            "to_pct": float(match.group(3)),
+        })
+
+    # Parse improvement lines (just for info)
+    improvement_pattern = re.compile(
+        r'`?(\w+)`?\s*\|\s*(\d+(?:\.\d+)?)\s*%?\s*->\s*(\d+(?:\.\d+)?)\s*%?(?!.*regression)',
+        re.IGNORECASE
+    )
+    for match in improvement_pattern.finditer(body):
+        from_pct = float(match.group(2))
+        to_pct = float(match.group(3))
+        if to_pct > from_pct:  # Only count actual improvements
+            result["improvements"].append({
+                "function": match.group(1),
+                "from_pct": from_pct,
+                "to_pct": to_pct,
+            })
+
+    return result
+
+
+def _get_decomp_dev_report(repo: str, pr_number: int) -> dict | None:
+    """Get the latest decomp-dev bot report from PR comments."""
+    try:
+        result = subprocess.run(
+            ["gh", "pr", "view", str(pr_number), "--repo", repo,
+             "--json", "comments", "--jq", '.comments[] | select(.author.login == "decomp-dev") | .body'],
+            capture_output=True, text=True, check=True
+        )
+        # Get the last (most recent) comment from decomp-dev
+        comments = result.stdout.strip().split("\n")
+        if comments and comments[-1]:
+            return _parse_decomp_dev_report(comments[-1])
+    except subprocess.CalledProcessError:
+        pass
+    return None
+
+
+@pr_app.command("feedback")
+def pr_feedback(
+    pr_url: Annotated[
+        str, typer.Argument(help="GitHub PR URL")
+    ],
+    include_logs: Annotated[
+        bool, typer.Option("--logs", "-l", help="Include full CI failure logs")
+    ] = False,
+    output_json: Annotated[
+        bool, typer.Option("--json", help="Output as JSON (for agents)")
+    ] = False,
+):
+    """Get all feedback on a PR in one call.
+
+    Consolidates:
+    - CI check status (pass/fail) with parsed error messages
+    - Review comments (inline and PR-level)
+    - decomp-dev bot regression reports
+
+    Designed for PR agents to quickly assess what needs to be fixed.
+
+    Example:
+        melee-agent pr feedback https://github.com/doldecomp/melee/pull/2039 --json
+    """
+    repo, pr_number = extract_pr_info(pr_url)
+    if not pr_number:
+        console.print(f"[red]Invalid PR URL: {pr_url}[/red]")
+        raise typer.Exit(1)
+
+    feedback = {
+        "pr_number": pr_number,
+        "pr_url": pr_url,
+        "checks": {
+            "passing": [],
+            "failing": [],
+            "pending": [],
+            "errors": [],  # Parsed errors from failed checks
+        },
+        "review_comments": [],
+        "decomp_dev_report": None,
+        "action_items": [],  # Summary of what needs to be fixed
+    }
+
+    # 1. Get CI checks
+    checks = _get_pr_checks(repo, pr_number)
+    for check in checks:
+        name = check.get("name", "Unknown")
+        conclusion = check.get("conclusion")
+        status = check.get("status")
+        details_url = check.get("detailsUrl", "")
+
+        check_info = {
+            "name": name,
+            "status": status,
+            "conclusion": conclusion,
+            "url": details_url,
+        }
+
+        if status != "COMPLETED":
+            feedback["checks"]["pending"].append(check_info)
+        elif conclusion == "SUCCESS":
+            feedback["checks"]["passing"].append(check_info)
+        else:
+            feedback["checks"]["failing"].append(check_info)
+
+            # Extract run ID from URL and get logs
+            run_id_match = re.search(r'/runs/(\d+)', details_url)
+            if run_id_match and (include_logs or output_json):
+                run_id = run_id_match.group(1)
+                log_output = _get_failed_check_logs(repo, run_id)
+                if log_output:
+                    errors = _parse_build_errors(log_output)
+                    feedback["checks"]["errors"].extend(errors)
+                    if include_logs:
+                        check_info["log_snippet"] = log_output[:2000]
+
+    # 2. Get review comments
+    comments = _get_pr_review_comments(repo, pr_number)
+    # Filter out bot comments for the review section
+    human_comments = [c for c in comments if c.get("author") not in ("github-actions", "decomp-dev")]
+    feedback["review_comments"] = human_comments
+
+    # 3. Get decomp-dev report
+    decomp_report = _get_decomp_dev_report(repo, pr_number)
+    feedback["decomp_dev_report"] = decomp_report
+
+    # 4. Generate action items summary
+    action_items = []
+
+    # From CI failures
+    if feedback["checks"]["failing"]:
+        failing_names = [c["name"] for c in feedback["checks"]["failing"]]
+        action_items.append(f"Fix {len(failing_names)} failing CI check(s): {', '.join(failing_names)}")
+
+    for error in feedback["checks"]["errors"]:
+        if error["type"] == "compile":
+            action_items.append(f"Fix compile error in {error['file']}:{error['line']}: {error['message'][:80]}")
+        elif error["type"] == "undefined_reference":
+            action_items.append(f"Fix undefined reference to '{error['symbol']}'")
+        elif error["type"] == "multiple_definition":
+            action_items.append(f"Fix multiple definition of '{error['symbol']}'")
+
+    # From review comments
+    for comment in human_comments:
+        body = comment.get("body", "").strip()
+        if body and len(body) < 200:  # Short actionable comments
+            path = comment.get("path")
+            if path:
+                action_items.append(f"Address review comment on {path}: {body[:100]}")
+            else:
+                action_items.append(f"Address review comment: {body[:100]}")
+
+    # From decomp-dev regressions
+    if decomp_report and decomp_report.get("regressions"):
+        for reg in decomp_report["regressions"]:
+            action_items.append(
+                f"Fix regression in {reg['function']}: {reg['from_pct']}% -> {reg['to_pct']}%"
+            )
+
+    feedback["action_items"] = action_items[:20]  # Limit to 20 items
+
+    # Output
+    if output_json:
+        print(json.dumps(feedback, indent=2, default=str))
+        return
+
+    # Human-readable output
+    console.print(f"[bold]PR #{pr_number} Feedback Summary[/bold]\n")
+
+    # CI Status
+    passing = len(feedback["checks"]["passing"])
+    failing = len(feedback["checks"]["failing"])
+    pending = len(feedback["checks"]["pending"])
+
+    if failing > 0:
+        console.print(f"[red]CI Checks: {failing} failing[/red], {passing} passing, {pending} pending")
+        for check in feedback["checks"]["failing"]:
+            console.print(f"  [red]✗[/red] {check['name']}")
+    elif pending > 0:
+        console.print(f"[yellow]CI Checks: {pending} pending[/yellow], {passing} passing")
+    else:
+        console.print(f"[green]CI Checks: All {passing} passing[/green]")
+
+    # Parsed errors
+    if feedback["checks"]["errors"]:
+        console.print(f"\n[bold red]Build Errors ({len(feedback['checks']['errors'])}):[/bold red]")
+        for error in feedback["checks"]["errors"][:10]:
+            if error["type"] == "compile":
+                console.print(f"  {error['file']}:{error['line']}: {error['message'][:80]}")
+            else:
+                console.print(f"  {error['message'][:100]}")
+        if len(feedback["checks"]["errors"]) > 10:
+            console.print(f"  [dim]... and {len(feedback['checks']['errors']) - 10} more[/dim]")
+
+    # Review comments
+    if human_comments:
+        console.print(f"\n[bold]Review Comments ({len(human_comments)}):[/bold]")
+        for comment in human_comments[:5]:
+            author = comment.get("author", "unknown")
+            path = comment.get("path")
+            body = comment.get("body", "")[:100]
+            if path:
+                console.print(f"  [@{author}] on {path}: {body}")
+            else:
+                console.print(f"  [@{author}]: {body}")
+        if len(human_comments) > 5:
+            console.print(f"  [dim]... and {len(human_comments) - 5} more[/dim]")
+    else:
+        console.print(f"\n[dim]No review comments[/dim]")
+
+    # decomp-dev report
+    if decomp_report:
+        if decomp_report.get("regressions"):
+            console.print(f"\n[bold red]Regressions ({len(decomp_report['regressions'])}):[/bold red]")
+            for reg in decomp_report["regressions"][:5]:
+                console.print(f"  [red]↓[/red] {reg['function']}: {reg['from_pct']}% -> {reg['to_pct']}%")
+        elif decomp_report.get("has_changes"):
+            improvements = decomp_report.get("improvements", [])
+            if improvements:
+                console.print(f"\n[green]decomp-dev: {len(improvements)} improvements, no regressions[/green]")
+        else:
+            console.print(f"\n[green]decomp-dev: No changes detected[/green]")
+    else:
+        console.print(f"\n[dim]No decomp-dev report found[/dim]")
+
+    # Action items
+    if action_items:
+        console.print(f"\n[bold]Action Items ({len(action_items)}):[/bold]")
+        for item in action_items[:10]:
+            console.print(f"  • {item}")
+        if len(action_items) > 10:
+            console.print(f"  [dim]... and {len(action_items) - 10} more[/dim]")

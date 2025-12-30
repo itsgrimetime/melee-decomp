@@ -8,6 +8,7 @@ Validates:
 4. clang-format has been run on C files
 5. No merge conflict markers in staged files
 6. Header signatures match implementations
+7. No local scratch URLs in commit messages (must use production URLs)
 
 Usage:
     python -m src.hooks.validate_commit [--fix]
@@ -21,9 +22,45 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+# Local decomp.me server URL patterns
+LOCAL_URL_PATTERNS = [
+    r'https?://nzxt-discord\.local[:/]',
+    r'https?://10\.200\.0\.1[:/]',
+    r'https?://localhost:8000[:/]',
+    r'https?://127\.0\.0\.1:8000[:/]',
+]
+LOCAL_URL_REGEX = re.compile('|'.join(LOCAL_URL_PATTERNS))
+
+# Pattern to extract slug from a decomp.me URL
+SCRATCH_URL_PATTERN = re.compile(r'https?://[^/]+/scratch/([a-zA-Z0-9]+)')
+
 # Project paths
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 MELEE_ROOT = PROJECT_ROOT / "melee"
+
+
+def get_slug_mapping() -> dict[str, str]:
+    """Get mapping of local slugs to production slugs from database.
+
+    Returns:
+        Dict mapping local_slug -> production_slug
+    """
+    try:
+        from src.db import get_db
+        db = get_db()
+
+        mapping = {}
+        with db.connection() as conn:
+            cursor = conn.execute(
+                "SELECT local_slug, production_slug FROM sync_state"
+            )
+            for row in cursor.fetchall():
+                mapping[row['local_slug']] = row['production_slug']
+        return mapping
+    except Exception:
+        return {}
+
+
 SYMBOLS_FILE = MELEE_ROOT / "config" / "GALE01" / "symbols.txt"
 COMPILE_COMMANDS = MELEE_ROOT / "compile_commands.json"
 
@@ -247,13 +284,13 @@ class CommitValidator:
                 symbols_content = SYMBOLS_FILE.read_text()
                 missing = [f for f in new_functions if f not in symbols_content]
                 if missing:
-                    self.warnings.append(ValidationError(
-                        f"New functions may need symbols.txt update: {missing[:5]}",
+                    self.errors.append(ValidationError(
+                        f"New functions need symbols.txt update: {missing[:5]}",
                         str(SYMBOLS_FILE)
                     ))
 
     def validate_coding_style(self) -> None:
-        """Check CONTRIBUTING.md coding guidelines."""
+        """Check CONTRIBUTING.md coding guidelines and doldecomp/melee PR review standards."""
         staged_files = self._get_staged_files()
         c_files = [f for f in staged_files if f.startswith("melee/src/") and f.endswith(".c")]
 
@@ -278,35 +315,57 @@ class CommitValidator:
                     line_num += 1
                     content = line[1:]  # Remove + prefix
 
-                    # Check for implicit NULL checks
-                    # Pattern: if (!ptr) or if (ptr) without explicit NULL
-                    if re.search(r'\bif\s*\(\s*!\s*\w+\s*\)', content):
-                        # Could be a bool, so just warn
-                        pass  # Skip - too many false positives
+                    # Skip if line is a comment
+                    stripped = content.strip()
+                    if stripped.startswith("//") or stripped.startswith("/*") or stripped.startswith("*"):
+                        continue
+
+                    # Check for TRUE/FALSE instead of true/false
+                    # PR feedback: "Use `true` and `false`, not `TRUE` and `FALSE`"
+                    if re.search(r'\bTRUE\b', content):
+                        self.errors.append(ValidationError(
+                            "Use 'true' not 'TRUE' (lowercase boolean literals required)",
+                            c_file, line_num
+                        ))
+                    if re.search(r'\bFALSE\b', content):
+                        self.errors.append(ValidationError(
+                            "Use 'false' not 'FALSE' (lowercase boolean literals required)",
+                            c_file, line_num
+                        ))
 
                     # Check for floating point literals without F suffix
                     # Pattern: number with decimal but no F/L suffix
-                    float_matches = re.findall(r'\b\d+\.\d+(?![FLfl])\b', content)
+                    float_matches = re.findall(r'\b\d+\.\d+(?![FLfl\w])\b', content)
                     for fm in float_matches:
                         # Skip if in a comment
-                        if "//" in content and content.index("//") < content.index(fm):
-                            continue
-                        self.warnings.append(ValidationError(
+                        if "//" in content:
+                            comment_start = content.index("//")
+                            if content.index(fm) > comment_start:
+                                continue
+                        self.errors.append(ValidationError(
                             f"Float literal '{fm}' missing F suffix (use {fm}F for f32)",
                             c_file, line_num
                         ))
 
                     # Check for lowercase hex (0xabc instead of 0xABC)
-                    hex_matches = re.findall(r'0x[0-9a-f]+', content.lower())
+                    hex_matches = re.findall(r'0x[0-9a-fA-F]+', content)
                     for hm in hex_matches:
-                        if any(c.islower() for c in hm[2:] if c.isalpha()):
-                            actual = re.search(r'0[xX][0-9a-fA-F]+', content)
-                            if actual and any(c.islower() for c in actual.group()[2:] if c.isalpha()):
-                                self.warnings.append(ValidationError(
-                                    f"Hex literal should use uppercase (0xABC not 0xabc)",
-                                    c_file, line_num
-                                ))
-                                break
+                        # Only flag if there are lowercase letters in hex digits
+                        hex_part = hm[2:]  # Remove 0x prefix
+                        if any(c.islower() and c.isalpha() for c in hex_part):
+                            self.errors.append(ValidationError(
+                                f"Hex literal '{hm}' should use uppercase (e.g., 0x{hex_part.upper()})",
+                                c_file, line_num
+                            ))
+                            break  # Only report once per line
+
+                    # Check for raw struct pointer arithmetic (PR feedback)
+                    # Pattern: *(type*)((u8*)ptr + offset) or similar
+                    if re.search(r'\*\s*\([^)]+\*\)\s*\(\s*\([^)]+\*\)\s*\w+\s*\+', content):
+                        self.errors.append(ValidationError(
+                            "Raw pointer arithmetic for struct access - use M2C_FIELD or fill in struct fields",
+                            c_file, line_num
+                        ))
 
                 elif not line.startswith("-"):
                     line_num += 1
@@ -327,7 +386,7 @@ class CommitValidator:
                 cwd=PROJECT_ROOT
             )
             if result.stdout.strip() and "no modified files" not in result.stdout.lower():
-                self.warnings.append(ValidationError(
+                self.errors.append(ValidationError(
                     "clang-format would make changes - run 'git clang-format' before committing",
                     fixable=True
                 ))
@@ -336,6 +395,29 @@ class CommitValidator:
             pass
         except subprocess.CalledProcessError:
             pass
+
+    def validate_forbidden_files(self) -> None:
+        """Check for files that should never be modified.
+
+        PR feedback: Some files like orig/GALE01/sys/.gitkeep should never
+        be touched - they're placeholders for the build system.
+        """
+        forbidden_patterns = [
+            "orig/GALE01/sys/.gitkeep",
+            "orig/GALE01/asm/.gitkeep",
+            "orig/GALE01/bin/.gitkeep",
+            ".gitkeep",  # Generally .gitkeep files shouldn't be modified
+        ]
+
+        staged_files = self._get_staged_files()
+        for f in staged_files:
+            for pattern in forbidden_patterns:
+                if f.endswith(pattern):
+                    self.errors.append(ValidationError(
+                        f"File should not be modified: {f} - revert this change",
+                        f
+                    ))
+                    break
 
     def validate_conflict_markers(self) -> None:
         """Check for merge conflict markers in staged files."""
@@ -464,13 +546,180 @@ class CommitValidator:
                             header_file
                         ))
 
+    def validate_extern_declarations(self) -> None:
+        """Check for unnecessary file-scope extern declarations.
+
+        PR feedback: extern declarations should be avoided - prefer including
+        headers or creating them. Raw extern declarations are hard to maintain.
+        """
+        staged_files = self._get_staged_files()
+        c_files = [f for f in staged_files if f.startswith("melee/src/") and f.endswith(".c")]
+
+        if not c_files:
+            return
+
+        for c_file in c_files:
+            diff = self._get_staged_diff(c_file)
+            if not diff:
+                continue
+
+            line_num = 0
+            for line in diff.split("\n"):
+                if line.startswith("@@"):
+                    match = re.search(r'\+(\d+)', line)
+                    if match:
+                        line_num = int(match.group(1)) - 1
+                    continue
+
+                if line.startswith("+") and not line.startswith("+++"):
+                    line_num += 1
+                    content = line[1:].strip()
+
+                    # Check for new extern declarations at file scope
+                    # Pattern: extern Type symbol_name; (not in function)
+                    if re.match(r'^extern\s+(?:static\s+)?\w+[\w\s\*]*\s+\w+\s*[;\[]', content):
+                        # Skip if it's a function declaration (has parentheses)
+                        if '(' not in content:
+                            self.errors.append(ValidationError(
+                                "New extern declaration - include proper header instead",
+                                c_file, line_num
+                            ))
+
+                elif not line.startswith("-"):
+                    line_num += 1
+
+    def validate_symbol_renames(self) -> None:
+        """Check for suspicious symbol renames (descriptive name -> address name).
+
+        PR feedback: Don't rename descriptive symbols like `ItemStateTable_GShell`
+        to address-based names like `it_803F5BA8`.
+        """
+        staged_files = self._get_staged_files()
+
+        # Check for symbol renames in both C files and headers
+        code_files = [f for f in staged_files if f.endswith((".c", ".h")) and "melee/" in f]
+
+        if not code_files:
+            return
+
+        for code_file in code_files:
+            diff = self._get_staged_diff(code_file)
+            if not diff:
+                continue
+
+            # Look for lines where a descriptive name is removed and address name added
+            removed_names = set()
+            added_names = set()
+
+            for line in diff.split("\n"):
+                if line.startswith("-") and not line.startswith("---"):
+                    # Look for symbol names being removed
+                    names = re.findall(r'\b([A-Z][a-zA-Z0-9_]*(?:Table|State|Data|Info|List|Array)[a-zA-Z0-9_]*)\b', line)
+                    removed_names.update(names)
+
+                elif line.startswith("+") and not line.startswith("+++"):
+                    # Look for address-based names being added
+                    names = re.findall(r'\b((?:fn|it|ft|gr|lb|gm|if|mp|vi)_[0-9A-Fa-f]{8})\b', line)
+                    added_names.update(names)
+
+            # If we removed descriptive names and added address names, error
+            if removed_names and added_names:
+                self.errors.append(ValidationError(
+                    f"Bad rename: removed descriptive names {list(removed_names)[:3]}, "
+                    f"added address-based names {list(added_names)[:3]} - keep descriptive names",
+                    code_file
+                ))
+
+    def validate_local_urls_in_commits(self) -> None:
+        """Check for local decomp.me URLs in pending commit messages.
+
+        PR feedback: Commit messages should use production decomp.me URLs,
+        not local server URLs like nzxt-discord.local or 10.200.0.1.
+
+        This check only runs when there are staged melee submodule changes,
+        indicating we're about to commit decompilation work.
+        """
+        # Only check if we're staging melee submodule changes
+        staged_files = self._get_staged_files()
+        melee_changes = [f for f in staged_files if f.startswith("melee/")]
+        if not melee_changes:
+            return
+
+        # Get all pending commits in melee submodule (not yet pushed to upstream)
+        if not self.melee_root.exists():
+            return
+
+        try:
+            result = subprocess.run(
+                ["git", "log", "--oneline", "upstream/master..HEAD", "--format=%H %s"],
+                capture_output=True, text=True, check=True,
+                cwd=self.melee_root
+            )
+            commits = result.stdout.strip().split("\n") if result.stdout.strip() else []
+        except subprocess.CalledProcessError:
+            return
+
+        if not commits:
+            return
+
+        # Get local->production slug mapping
+        slug_mapping = get_slug_mapping()
+
+        for commit_line in commits:
+            if not commit_line.strip():
+                continue
+
+            parts = commit_line.split(" ", 1)
+            if len(parts) < 2:
+                continue
+
+            commit_hash = parts[0][:8]
+            commit_subject = parts[1]
+
+            # Get full commit message
+            try:
+                result = subprocess.run(
+                    ["git", "log", "-1", "--format=%B", parts[0]],
+                    capture_output=True, text=True, check=True,
+                    cwd=self.melee_root
+                )
+                full_message = result.stdout
+            except subprocess.CalledProcessError:
+                full_message = commit_subject
+
+            # Check for local URLs
+            if LOCAL_URL_REGEX.search(full_message):
+                # Find all scratch URLs and check if they have production mappings
+                local_urls = SCRATCH_URL_PATTERN.findall(full_message)
+                unmapped_slugs = []
+
+                for slug in local_urls:
+                    if slug not in slug_mapping:
+                        unmapped_slugs.append(slug)
+
+                if unmapped_slugs:
+                    self.errors.append(ValidationError(
+                        f"Commit {commit_hash} has local scratch URL(s) without production mapping: {unmapped_slugs}. "
+                        f"Run 'melee-agent sync production' first to sync scratches.",
+                    ))
+                else:
+                    # Has mapping but URL not replaced
+                    self.errors.append(ValidationError(
+                        f"Commit {commit_hash} has local scratch URL(s) - amend to use production URLs. "
+                        f"Local slugs found: {local_urls}",
+                    ))
+
     def run(self) -> tuple[list[ValidationError], list[ValidationError]]:
         """Run all validations."""
+        self.validate_forbidden_files()
         self.validate_conflict_markers()
         self.validate_header_signatures()
         self.validate_implicit_declarations()
         self.validate_symbols_txt()
         self.validate_coding_style()
+        self.validate_extern_declarations()
+        self.validate_symbol_renames()
+        self.validate_local_urls_in_commits()
         self.validate_clang_format()
         return self.errors, self.warnings
 

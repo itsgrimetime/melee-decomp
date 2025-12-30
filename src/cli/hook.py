@@ -22,11 +22,32 @@ def hook_validate(
 ):
     """Validate staged changes against project guidelines.
 
-    Checks:
-    - Implicit function declarations (uses clang, like CI's Issues check)
-    - symbols.txt is updated if needed
-    - CONTRIBUTING.md coding style guidelines
-    - clang-format has been run
+    All checks are ERRORS that block commits (based on doldecomp/melee PR feedback):
+
+    Code Style:
+    - TRUE/FALSE instead of true/false (lowercase required)
+    - Float literals missing F suffix (1.0 should be 1.0F)
+    - Lowercase hex literals (0xabc should be 0xABC)
+    - clang-format would make changes
+
+    Type/Struct Issues:
+    - Raw pointer arithmetic for struct access (use M2C_FIELD)
+
+    Symbol Issues:
+    - New extern declarations (include proper headers instead)
+    - Descriptive symbol renamed to address-based name
+    - New functions need symbols.txt update
+
+    Build Issues:
+    - Implicit function declarations (uses clang)
+    - Header signatures don't match implementations
+    - Merge conflict markers in code
+
+    File Issues:
+    - Forbidden files modified (.gitkeep files, orig/ placeholders)
+
+    PR/Commit Issues:
+    - Local scratch URLs in commits (must use production decomp.me URLs)
     """
     from src.hooks.validate_commit import CommitValidator
 

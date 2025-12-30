@@ -27,15 +27,16 @@ from ._common import (
 _context_env = os.environ.get("DECOMP_CONTEXT_FILE", "")
 
 
-def _get_context_file(source_file: str | None = None) -> Path:
+def _get_context_file(source_file: str | None = None, melee_root: Path | None = None) -> Path:
     """Get context file path.
 
     Args:
         source_file: Optional source file path to find per-file .ctx context.
+        melee_root: Optional melee root path (for worktree support).
     """
     if _context_env:
         return Path(_context_env)
-    return get_context_file(source_file=source_file)
+    return get_context_file(source_file=source_file, melee_root=melee_root)
 
 extract_app = typer.Typer(help="Extract and list unmatched functions")
 
@@ -320,7 +321,7 @@ def extract_get(
             console.print("[red]Cannot create scratch - ASM not available[/red]")
             raise typer.Exit(1)
 
-        ctx_path = _get_context_file(source_file=func.file_path)
+        ctx_path = _get_context_file(source_file=func.file_path, melee_root=melee_root)
         if not ctx_path.exists():
             console.print(f"[yellow]Context file not found, building...[/yellow]")
             import subprocess

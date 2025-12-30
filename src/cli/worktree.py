@@ -252,6 +252,57 @@ def worktree_prune(
     console.print(f"\n[green]Pruned {removed} worktrees[/green]")
 
 
+def _is_function_match_commit(subject: str) -> bool:
+    """Determine if a commit is a function match (vs a fix-up commit).
+
+    Function match commits typically:
+    - Start with "Match " or "Implement "
+    - Contain function names with percentage (e.g., "fn_80123456: 100%")
+    - Add new decompiled functions
+
+    Fix-up commits typically:
+    - Fix build issues, headers, signatures
+    - Update types, includes, NonMatching annotations
+    - Are smaller maintenance commits
+    """
+    import re
+    subject_lower = subject.lower()
+
+    # Fix-up commit patterns (these are NOT function matches)
+    fixup_patterns = [
+        r'\bfix\b',
+        r'\bupdate\b.*\b(header|signature|type|include)\b',
+        r'\badd\b.*\b(include|header)\b',
+        r'\brevert\b',
+        r'\bnonmatching\b',
+        r'\bbuild\b',
+        r'\bformat\b',
+        r'\bcleanup\b',
+        r'\brefactor\b',
+        r'\brename\b',
+        r'\bremove\b.*\bunused\b',
+    ]
+
+    for pattern in fixup_patterns:
+        if re.search(pattern, subject_lower):
+            return False
+
+    # Function match patterns
+    match_patterns = [
+        r'^match\b',
+        r'^implement\b',
+        r'\b\d+(\.\d+)?%',  # Contains percentage
+        r'\b(fn|ft|gr|lb|gm|it|if|mp|vi)_[0-9A-Fa-f]{8}\b',  # Contains function address
+    ]
+
+    for pattern in match_patterns:
+        if re.search(pattern, subject_lower):
+            return True
+
+    # Default: assume it's a function match if we can't tell
+    return True
+
+
 @worktree_app.command("collect")
 def worktree_collect(
     melee_root: Annotated[
@@ -266,10 +317,20 @@ def worktree_collect(
     dry_run: Annotated[
         bool, typer.Option("--dry-run", "-n", help="Show what would be collected")
     ] = False,
+    max_functions: Annotated[
+        int, typer.Option("--max-functions", "-m", help="Max function match commits (fix-ups don't count)")
+    ] = 7,
+    no_limit: Annotated[
+        bool, typer.Option("--no-limit", help="Disable the function match limit")
+    ] = False,
 ):
     """Collect all pending subdirectory commits into a single branch.
 
     Cherry-picks commits in subdirectory order to minimize conflicts.
+
+    By default, limits to 7 function match commits per PR to keep reviews manageable.
+    Fix-up commits (build fixes, header updates, etc.) don't count toward this limit.
+    Use --no-limit to collect all pending commits, or --max-functions to adjust.
     """
     worktrees = _get_worktree_info(melee_root)
 
@@ -283,22 +344,88 @@ def worktree_collect(
     # Sort by subdirectory key for consistent ordering
     pending.sort(key=lambda wt: wt["subdir_key"])
 
-    # Show what we'll collect
-    total_commits = sum(wt["commits_ahead"] for wt in pending)
-    console.print(f"Found {total_commits} commits across {len(pending)} subdirectory worktrees:\n")
-
+    # Classify and collect commits
     all_commits = []
+    function_match_count = 0
+    fixup_count = 0
+
     for wt in pending:
-        console.print(f"[cyan]{wt['subdir_key']}[/cyan]:")
         for subject in wt["commit_subjects"]:
-            console.print(f"  {subject}")
-            # Extract commit hash
             commit_hash = subject.split()[0]
-            all_commits.append((commit_hash, wt["branch"], wt["subdir_key"]))
+            # Get just the subject without hash for classification
+            subject_text = " ".join(subject.split()[1:]) if len(subject.split()) > 1 else subject
+            is_match = _is_function_match_commit(subject_text)
+
+            all_commits.append({
+                "hash": commit_hash,
+                "subject": subject,
+                "subject_text": subject_text,
+                "branch": wt["branch"],
+                "subdir_key": wt["subdir_key"],
+                "is_function_match": is_match,
+            })
+
+            if is_match:
+                function_match_count += 1
+            else:
+                fixup_count += 1
+
+    # Apply limit if not disabled
+    limit_active = not no_limit and function_match_count > max_functions
+    commits_to_collect = []
+    commits_deferred = []
+    collected_function_matches = 0
+
+    for commit in all_commits:
+        if commit["is_function_match"]:
+            if no_limit or collected_function_matches < max_functions:
+                commits_to_collect.append(commit)
+                collected_function_matches += 1
+            else:
+                commits_deferred.append(commit)
+        else:
+            # Fix-up commits always included (if their function match is included or no limit)
+            # For simplicity, include all fix-ups - they're usually small
+            commits_to_collect.append(commit)
+
+    # Show what we'll collect
+    console.print(f"Found {len(all_commits)} commits ({function_match_count} function matches, {fixup_count} fix-ups)")
+    if limit_active:
+        console.print(f"[yellow]Limiting to {max_functions} function matches (use --no-limit to override)[/yellow]")
+    console.print()
+
+    # Group by subdirectory for display
+    by_subdir_collect = defaultdict(list)
+    for c in commits_to_collect:
+        by_subdir_collect[c["subdir_key"]].append(c)
+
+    by_subdir_defer = defaultdict(list)
+    for c in commits_deferred:
+        by_subdir_defer[c["subdir_key"]].append(c)
+
+    console.print("[bold]Commits to collect:[/bold]")
+    for subdir_key in sorted(by_subdir_collect.keys()):
+        console.print(f"  [cyan]{subdir_key}[/cyan]:")
+        for c in by_subdir_collect[subdir_key]:
+            tag = "[green]match[/green]" if c["is_function_match"] else "[blue]fixup[/blue]"
+            console.print(f"    {c['hash'][:8]} {tag} {c['subject_text'][:60]}")
+    console.print()
+
+    if commits_deferred:
+        console.print("[bold yellow]Commits deferred (will remain on worktree branches):[/bold yellow]")
+        for subdir_key in sorted(by_subdir_defer.keys()):
+            console.print(f"  [cyan]{subdir_key}[/cyan]:")
+            for c in by_subdir_defer[subdir_key]:
+                console.print(f"    {c['hash'][:8]} {c['subject_text'][:60]}")
         console.print()
 
     if dry_run:
         console.print("[yellow]DRY RUN - no changes made[/yellow]")
+        console.print(f"Would collect {len(commits_to_collect)} commits, defer {len(commits_deferred)}")
+        return
+
+    if not commits_to_collect:
+        console.print("[yellow]No commits to collect after applying limits[/yellow]")
         return
 
     # Generate branch name if not provided
@@ -322,25 +449,32 @@ def worktree_collect(
     # Cherry-pick commits in order (oldest first within each subdirectory)
     # Group by subdirectory, then reverse within each group
     by_subdir = defaultdict(list)
-    for commit_hash, source_branch, subdir_key in all_commits:
-        by_subdir[subdir_key].append((commit_hash, source_branch))
+    for commit in commits_to_collect:
+        by_subdir[commit["subdir_key"]].append(commit)
 
     success_count = 0
+    function_matches_collected = 0
     failed = []
     for subdir_key in sorted(by_subdir.keys()):
         commits = by_subdir[subdir_key]
         commits.reverse()  # Oldest first
-        for commit_hash, source_branch in commits:
-            ret, _, err = _run_git(["cherry-pick", commit_hash], melee_root)
+        for commit in commits:
+            ret, _, err = _run_git(["cherry-pick", commit["hash"]], melee_root)
             if ret != 0:
                 _run_git(["cherry-pick", "--abort"], melee_root)
-                failed.append((commit_hash, source_branch, subdir_key, err))
-                console.print(f"  [red]Failed to cherry-pick {commit_hash}[/red]")
+                failed.append((commit["hash"], commit["branch"], subdir_key, err))
+                console.print(f"  [red]Failed to cherry-pick {commit['hash'][:8]}[/red]")
             else:
                 success_count += 1
-                console.print(f"  [green]✓[/green] {commit_hash} ({subdir_key})")
+                if commit["is_function_match"]:
+                    function_matches_collected += 1
+                tag = "[green]match[/green]" if commit["is_function_match"] else "[blue]fixup[/blue]"
+                console.print(f"  [green]✓[/green] {commit['hash'][:8]} {tag} ({subdir_key})")
 
-    console.print(f"\n[green]Collected {success_count}/{len(all_commits)} commits onto {branch_name}[/green]")
+    console.print(f"\n[green]Collected {success_count}/{len(commits_to_collect)} commits onto {branch_name}[/green]")
+    console.print(f"  ({function_matches_collected} function matches, {success_count - function_matches_collected} fix-ups)")
+    if commits_deferred:
+        console.print(f"  [yellow]{len(commits_deferred)} commits deferred for next PR[/yellow]")
 
     if failed:
         console.print(f"\n[yellow]Failed commits ({len(failed)}):[/yellow]")
@@ -360,17 +494,25 @@ def worktree_collect(
             return
 
         # Create PR with gh
-        pr_body = f"Batch collection of {success_count} matched functions from subdirectory worktrees.\n\n"
+        pr_body = f"Batch collection of {function_matches_collected} matched functions"
+        if success_count > function_matches_collected:
+            pr_body += f" + {success_count - function_matches_collected} fix-up commits"
+        pr_body += ".\n\n"
+
         pr_body += "## Commits by Subdirectory\n"
-        for wt in pending:
-            pr_body += f"\n### {wt['subdir_key']}\n"
-            for subject in wt["commit_subjects"]:
-                pr_body += f"- {subject}\n"
+        for subdir_key in sorted(by_subdir_collect.keys()):
+            pr_body += f"\n### {subdir_key}\n"
+            for c in by_subdir_collect[subdir_key]:
+                tag = "🎯" if c["is_function_match"] else "🔧"
+                pr_body += f"- {tag} {c['subject_text']}\n"
+
+        if commits_deferred:
+            pr_body += f"\n---\n*{len(commits_deferred)} additional commits deferred for next PR*\n"
 
         result = subprocess.run(
             [
                 "gh", "pr", "create",
-                "--title", f"Batch: {success_count} matched functions",
+                "--title", f"Match {function_matches_collected} functions",
                 "--body", pr_body,
                 "--base", "master",
             ],
@@ -382,10 +524,13 @@ def worktree_collect(
         if result.returncode == 0:
             console.print(f"[green]PR created: {result.stdout.strip()}[/green]")
 
-            # Reset pending commit counts in database
+            # Only reset pending commits for subdirectories that had ALL their commits collected
+            # (i.e., no deferred commits from that subdirectory)
+            deferred_subdirs = set(c["subdir_key"] for c in commits_deferred)
             db = get_db()
-            for wt in pending:
-                db.reset_pending_commits(wt["subdir_key"])
+            for subdir_key in by_subdir_collect.keys():
+                if subdir_key not in deferred_subdirs:
+                    db.reset_pending_commits(subdir_key)
         else:
             console.print(f"[red]Failed to create PR: {result.stderr}[/red]")
             console.print(f"Branch {branch_name} is ready - create PR manually")

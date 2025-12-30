@@ -26,11 +26,13 @@ This shows all subdirectory worktrees with their pending commits. Look for:
 - **Pending commits**: How many commits are waiting on each worktree
 - **Total across worktrees**: Whether there's enough work to batch
 
-**Guidance on thresholds:**
-- **4-7 commits**: Good batch size, create PR
-- **2-3 commits**: Consider waiting unless work has stalled
-- **8+ commits**: Consider creating PR soon to avoid large batches
-- **1 commit**: Usually wait, unless it's the only work available
+**Automatic limits:**
+The collect command now automatically limits PRs to **7 function match commits** by default.
+Fix-up commits (build fixes, header updates, etc.) don't count toward this limit.
+
+- Use `--max-functions N` to adjust the limit
+- Use `--no-limit` to collect all pending commits
+- Deferred commits remain on worktree branches for the next PR
 
 ### Step 2: Dry Run First
 
@@ -82,7 +84,30 @@ If cherry-picks fail:
 2. The commits remain on their subdirectory branches
 3. They can be collected in a future PR after resolving
 
-### Step 5: Post-PR Cleanup
+### Step 5: Monitor PR and Fix Issues
+
+After creating the PR, use the feedback command to monitor for issues:
+
+```bash
+# Get all PR feedback in one call
+melee-agent pr feedback https://github.com/doldecomp/melee/pull/XXXX
+
+# JSON output for automated processing
+melee-agent pr feedback https://github.com/doldecomp/melee/pull/XXXX --json
+```
+
+This command consolidates:
+- **CI check status** - Pass/fail with parsed error messages (compile errors, linker errors)
+- **Review comments** - Both inline and PR-level comments from reviewers
+- **decomp-dev report** - Regressions and improvements detected by the bot
+- **Action items** - Generated list of what needs to be fixed
+
+**If issues are found:**
+1. Fix the issues on the appropriate subdirectory worktree
+2. Push fix commits to the PR branch
+3. Re-run `melee-agent pr feedback` to verify fixes
+
+### Step 6: Post-PR Cleanup
 
 After the PR is merged, clean up empty worktrees:
 
@@ -97,12 +122,14 @@ melee-agent worktree prune            # Execute
 
 | Situation | Recommendation |
 |-----------|----------------|
-| 4-7 commits across multiple subdirectories | Yes, good batch size |
-| 8+ commits | Yes, before batch gets too large |
-| 2-3 commits but work has stopped | Yes, ship what's ready |
-| 1-2 commits with active work ongoing | Wait for more |
-| Commits from single high-activity module (ft, lb) | Yes, clean merge likely |
-| Mixed commits with potential conflicts | Consider smaller batches |
+| 5-7 function matches ready | Yes, good batch size (default limit) |
+| 8+ function matches | Run collect (it will auto-limit to 7, defer the rest) |
+| 2-4 function matches but work has stopped | Yes, ship what's ready |
+| 1-2 function matches with active work ongoing | Wait for more |
+| Many fix-up commits | Include them - they don't count toward limit |
+
+**Note:** The `--max-functions` limit only counts function match commits. Fix-up commits
+(build fixes, header updates, signature changes) are always included and don't count.
 
 ### PR Timing
 
@@ -133,27 +160,133 @@ Removes worktrees with no pending commits:
 - Use `--force` to remove with uncommitted changes
 - Use `--max-age N` to only prune old worktrees
 
+### `pr feedback <url>`
+Gets all feedback on a PR in one call:
+- CI check status with parsed build errors
+- Review comments (inline and PR-level)
+- decomp-dev bot regression reports
+- Generated action items list
+- Use `--json` for agent-friendly output
+
 ## Example Session
 
 ```bash
 # Check what's available
 melee-agent worktree list --commits
 # Output shows:
-#   lb:           3 commits
-#   ft-chara-ftFox: 2 commits
-#   gr:           2 commits
-# Total: 7 commits - good batch!
+#   lb:           3 commits (match, match, match)
+#   ft-chara-ftFox: 2 commits (match, fixup)
+#   gr:           2 commits (match, match)
+# Total: 7 commits (6 matches, 1 fixup) - good batch!
 
 # Preview collection
 melee-agent worktree collect --dry-run
 # Shows all 7 commits that will be cherry-picked
+# Classifies each as [match] or [fixup]
 
 # Create the PR
 melee-agent worktree collect --create-pr
 # Creates batch/20241230 branch, cherry-picks 7 commits, creates PR
+# Returns PR URL: https://github.com/doldecomp/melee/pull/XXXX
+
+# Monitor PR for issues
+melee-agent pr feedback https://github.com/doldecomp/melee/pull/XXXX
+# Shows CI status, review comments, decomp-dev report, action items
+
+# If CI fails or reviewers request changes, fix and push
+# Then re-check:
+melee-agent pr feedback https://github.com/doldecomp/melee/pull/XXXX
 
 # After PR merges, clean up
 melee-agent worktree prune
+```
+
+## PR Quality Checklist
+
+**IMPORTANT**: Before creating a PR, you MUST review ALL commits in the batch against this checklist. These are common issues identified from doldecomp/melee PR reviews:
+
+### Automated Checks (ALL are errors that block commits)
+
+Run `melee-agent hook validate` - ALL issues below will block the commit:
+
+1. **Use `true`/`false` not `TRUE`/`FALSE`**
+   - Lowercase boolean literals are required
+
+2. **Float literals need F suffix**
+   - Use `1.0F` not `1.0` for f32 values
+
+3. **Hex literals use uppercase**
+   - Use `0xABCD` not `0xabcd`
+
+4. **Don't use raw struct accesses/pointer arithmetic**
+   - BAD: `*(s32*)((u8*)ptr + 0x10)`
+   - GOOD: Use `M2C_FIELD(ptr, 0x10, s32)` or fill in actual struct fields
+
+5. **Don't add unnecessary extern declarations**
+   - BAD: `extern UNK_T lbl_804D1234;` at file top
+   - GOOD: Include the proper header or create one
+
+6. **Don't rename descriptive symbols to address-based names**
+   - BAD: Renaming `ItemStateTable_GShell` → `it_803F5BA8`
+   - GOOD: Keep meaningful names
+
+7. **clang-format must pass**
+   - Run `git clang-format` before committing
+
+8. **symbols.txt must be updated**
+   - New functions need corresponding symbols.txt entries
+
+9. **No implicit function declarations**
+   - All functions must have proper prototypes
+
+10. **Header signatures must match implementations**
+    - No UNK_RET/UNK_PARAMS mismatches
+
+11. **No local scratch URLs in commits**
+    - Commit messages must use production decomp.me URLs
+    - Run `melee-agent sync production` before committing to sync scratches
+    - Local URLs like `nzxt-discord.local`, `10.200.0.1`, `localhost:8000` will be rejected
+
+### Manual Review Required (not yet automated)
+
+12. **Use `bool` return type for boolean functions**
+    - If a function returns 0/1 for false/true, use `bool` not `s32`
+
+13. **Change argument/field types instead of casting**
+    - BAD: Adding casts to work around type mismatches
+    - GOOD: Change the actual type in the struct or function signature
+
+14. **Keep temporary struct types instead of raw pointer arithmetic**
+    - If m2c created a temp struct for field access, keep it
+
+15. **Don't modify unrelated files**
+    - If a file shouldn't be in the PR (like `.gitkeep`), revert it
+
+16. **Don't mess with NonMatching/symbols.txt incorrectly**
+    - Understand the matching/nonmatching workflow
+
+17. **Always use m2c first**
+    - Don't try to one-shot decompile without using m2c
+    - m2c output should be the starting point, then cleaned up
+
+### Pre-PR Review Process
+
+Before running `melee-agent worktree collect --create-pr`:
+
+```bash
+# 1. Run automated checks
+melee-agent hook validate -v
+
+# 2. Review each commit's diff for manual issues
+git log upstream/master..HEAD --oneline  # List commits
+git show <hash>  # Review each commit
+
+# 3. Search for common issues
+grep -r "TRUE\|FALSE" melee/src/  # Boolean literals
+grep -rn "0x[0-9a-f]*[a-f]" melee/src/  # Lowercase hex
+
+# 4. If issues found, fix them BEFORE creating PR
+# Make fix commits on the subdirectory worktrees
 ```
 
 ## What NOT to Do
@@ -163,6 +296,7 @@ melee-agent worktree prune
 3. **Don't force-prune worktrees with uncommitted changes** without checking first
 4. **Don't create multiple overlapping PRs** - wait for CI on previous PR
 5. **Don't ignore cherry-pick failures** - note them for future resolution
+6. **Don't skip the quality checklist** - reviewers will request changes
 
 ## Troubleshooting
 
