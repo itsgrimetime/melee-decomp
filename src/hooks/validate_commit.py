@@ -22,12 +22,14 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-# Local decomp.me server URL patterns
+# Local decomp.me server URL patterns (private subnets, loopback, .local domains)
 LOCAL_URL_PATTERNS = [
-    r'https?://nzxt-discord\.local[:/]',
-    r'https?://10\.200\.0\.1[:/]',
-    r'https?://localhost:8000[:/]',
-    r'https?://127\.0\.0\.1:8000[:/]',
+    r'https?://[^/]*\.local[:/]',                              # .local domains
+    r'https?://localhost[:/]',                                  # localhost
+    r'https?://127\.\d{1,3}\.\d{1,3}\.\d{1,3}[:/]',            # 127.x.x.x (loopback)
+    r'https?://10\.\d{1,3}\.\d{1,3}\.\d{1,3}[:/]',             # 10.x.x.x (Class A private)
+    r'https?://172\.(1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3}[:/]', # 172.16-31.x.x (Class B private)
+    r'https?://192\.168\.\d{1,3}\.\d{1,3}[:/]',                # 192.168.x.x (Class C private)
 ]
 LOCAL_URL_REGEX = re.compile('|'.join(LOCAL_URL_PATTERNS))
 
@@ -360,10 +362,21 @@ class CommitValidator:
                             break  # Only report once per line
 
                     # Check for raw struct pointer arithmetic (PR feedback)
-                    # Pattern: *(type*)((u8*)ptr + offset) or similar
-                    if re.search(r'\*\s*\([^)]+\*\)\s*\(\s*\([^)]+\*\)\s*\w+\s*\+', content):
+                    # Patterns to catch:
+                    #   *(f32*)((u8*)fp + 0x844)
+                    #   *(s32*)((char*)ptr + 0x28)
+                    #   *(u32*)((u8*)cmd->u + 8)
+                    #   *((type*)(ptr + offset))
+                    ptr_arith_match = re.search(
+                        r'\*\s*\(([^)]+\*)\)\s*\(\s*\(([^)]+\*)\)\s*([^+]+)\s*\+\s*([^)]+)\)',
+                        content
+                    )
+                    if ptr_arith_match:
+                        cast_type = ptr_arith_match.group(1).strip()
+                        ptr_expr = ptr_arith_match.group(3).strip()
+                        offset = ptr_arith_match.group(4).strip()
                         self.errors.append(ValidationError(
-                            "Raw pointer arithmetic for struct access - use M2C_FIELD or fill in struct fields",
+                            f"Raw pointer arithmetic for struct access - use M2C_FIELD({ptr_expr}, {offset}, {cast_type}) instead",
                             c_file, line_num
                         ))
 
