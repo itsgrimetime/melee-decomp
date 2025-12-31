@@ -1,0 +1,539 @@
+"""Tests for inline function stripping in context generation.
+
+These tests ensure that the _strip_inline_functions function correctly
+removes inline function bodies while preserving:
+1. Function declarations (signatures with ; // body stripped)
+2. All non-inline code including #endif guards
+3. Correct brace depth tracking (ignoring braces in comments/strings)
+"""
+
+import pytest
+from src.cli.extract import _count_braces, _strip_inline_functions, _strip_target_function
+
+
+class TestCountBraces:
+    """Tests for the _count_braces helper function."""
+
+    def test_normal_braces(self):
+        """Normal braces should be counted."""
+        assert _count_braces("{ }") == (1, 1)
+        assert _count_braces("{{}}") == (2, 2)
+        assert _count_braces("{") == (1, 0)
+        assert _count_braces("}") == (0, 1)
+
+    def test_line_comment_braces_ignored(self):
+        """Braces after // should be ignored."""
+        assert _count_braces("// { }") == (0, 0)
+        assert _count_braces("code; // { comment }") == (0, 0)
+        assert _count_braces("x = 1; // {{{}}}") == (0, 0)
+
+    def test_code_before_comment(self):
+        """Braces before // should be counted."""
+        assert _count_braces("{ // }") == (1, 0)
+        assert _count_braces("if (x) { // close later }") == (1, 0)
+        assert _count_braces("} // open {") == (0, 1)
+
+    def test_string_braces_ignored(self):
+        """Braces inside string literals should be ignored."""
+        assert _count_braces('str = "{}";') == (0, 0)
+        assert _count_braces("str = '{'") == (0, 0)
+        assert _count_braces('printf("{");') == (0, 0)
+        assert _count_braces('x = "{" + "}";') == (0, 0)
+
+    def test_mixed_real_and_string_braces(self):
+        """Real braces outside strings should be counted."""
+        assert _count_braces('if (s == "{") {') == (1, 0)
+        assert _count_braces('} else if (s == "}") {') == (1, 1)
+
+    def test_empty_and_no_braces(self):
+        """Lines without braces should return (0, 0)."""
+        assert _count_braces("") == (0, 0)
+        assert _count_braces("int x = 5;") == (0, 0)
+        assert _count_braces("// just a comment") == (0, 0)
+
+    def test_assert_macro_in_comment(self):
+        """Real-world case: __assert in comment with braces."""
+        line = '    // ((jobj) ? ((void) 0) : __assert("jobj.h", 1065, "jobj"));'
+        assert _count_braces(line) == (0, 0)
+
+    def test_commented_if_with_brace(self):
+        """Real-world case: commented out if statement."""
+        line = "    // if (!(jobj->flags & (1 << 25))) {"
+        assert _count_braces(line) == (0, 0)
+
+    def test_multiple_braces_in_comment(self):
+        """Real-world case: multiple braces in comment."""
+        line = "        // { if (jobj != ((void*) 0) && !HSD_JObjMtxIsDirty(jobj)) {"
+        assert _count_braces(line) == (0, 0)
+
+    def test_closing_braces_in_comment(self):
+        """Real-world case: closing braces in comment."""
+        line = "        // HSD_JObjSetMtxDirtySub(jobj); } };"
+        assert _count_braces(line) == (0, 0)
+
+
+class TestStripInlineFunctions:
+    """Tests for the _strip_inline_functions function."""
+
+    def test_simple_inline_stripped(self):
+        """Simple inline function should be stripped to declaration."""
+        code = """static inline void foo() {
+    return;
+}"""
+        result, count = _strip_inline_functions(code)
+        assert count == 1
+        assert "static inline void foo();" in result
+        assert "// body stripped" in result
+        assert "return;" not in result
+
+    def test_inline_declaration_preserved(self):
+        """Inline declarations (no body) should be preserved as-is."""
+        code = "static inline void foo();"
+        result, count = _strip_inline_functions(code)
+        assert count == 0
+        assert "static inline void foo();" in result
+
+    def test_endif_preserved_after_inline(self):
+        """#endif after inline function must be preserved."""
+        code = """static inline void foo() {
+    int x = 0;
+}
+
+#endif"""
+        result, count = _strip_inline_functions(code)
+        assert count == 1
+        assert result.rstrip().endswith("#endif")
+
+    def test_code_after_inline_preserved(self):
+        """Code after inline function must be preserved."""
+        code = """static inline void foo() {
+    return;
+}
+
+void bar() {
+    foo();
+}"""
+        result, count = _strip_inline_functions(code)
+        assert count == 1
+        assert "void bar()" in result
+        assert "foo();" in result
+
+    def test_multiple_inline_functions(self):
+        """Multiple inline functions should all be stripped."""
+        code = """static inline void foo() { return; }
+
+static inline int bar() {
+    return 42;
+}
+
+static inline void baz() {
+    int x;
+    x = 1;
+}
+
+#endif"""
+        result, count = _strip_inline_functions(code)
+        assert count == 3
+        assert "static inline void foo();" in result
+        assert "static inline int bar();" in result
+        assert "static inline void baz();" in result
+        assert result.rstrip().endswith("#endif")
+
+    def test_nested_braces(self):
+        """Nested braces should be handled correctly."""
+        code = """static inline void nested() {
+    if (x) {
+        if (y) {
+            while (z) {
+            }
+        }
+    }
+}
+
+after();"""
+        result, count = _strip_inline_functions(code)
+        assert count == 1
+        assert "after();" in result
+
+    def test_braces_in_comments_ignored(self):
+        """Braces in // comments should not affect depth tracking."""
+        code = """static inline void commented() {
+    // if (!(jobj->flags & (1 << 25))) {
+    if (!(jobj->flags & JOBJ_MTX_INDEP_SRT)) {
+        // { if (jobj != ((void*) 0) && !HSD_JObjMtxIsDirty(jobj)) {
+        // HSD_JObjSetMtxDirtySub(jobj); } };
+        HSD_JObjSetMtxDirty(jobj);
+    }
+}
+
+#endif"""
+        result, count = _strip_inline_functions(code)
+        assert count == 1
+        assert result.rstrip().endswith("#endif")
+        # Should NOT contain the function body
+        assert "JOBJ_MTX_INDEP_SRT" not in result
+
+    def test_multiline_signature(self):
+        """Inline function with signature spanning multiple lines."""
+        code = """static inline void long_sig(
+    int a,
+    int b,
+    int c)
+{
+    return;
+}
+
+done();"""
+        result, count = _strip_inline_functions(code)
+        assert count == 1
+        assert "done();" in result
+
+    def test_inline_without_static(self):
+        """inline without static should also be stripped."""
+        code = """inline void foo() {
+    return;
+}
+
+after();"""
+        result, count = _strip_inline_functions(code)
+        assert count == 1
+        assert "after();" in result
+
+    def test_single_line_inline(self):
+        """Inline function all on one line."""
+        code = """static inline int get() { return 42; }
+next();"""
+        result, count = _strip_inline_functions(code)
+        assert count == 1
+        assert "static inline int get();" in result
+        assert "next();" in result
+
+    def test_real_jobj_addscalex(self):
+        """Real-world case: HSD_JObjAddScaleX from jobj.h."""
+        code = """static inline void HSD_JObjAddScaleX(HSD_JObj* jobj, float x)
+{
+    // ((jobj) ? ((void) 0) : __assert("jobj.h", 1065, "jobj"));
+    HSD_ASSERT(1065, jobj);
+    jobj->scale.x += x;
+    // if (!(jobj->flags & (1 << 25))) {
+    if (!(jobj->flags & JOBJ_MTX_INDEP_SRT)) {
+        // { if (jobj != ((void*) 0) && !HSD_JObjMtxIsDirty(jobj)) {
+        // HSD_JObjSetMtxDirtySub(jobj); } };
+        HSD_JObjSetMtxDirty(jobj);
+    }
+}
+
+static inline void HSD_JObjAddScaleY(HSD_JObj* jobj, float y)
+{
+    HSD_ASSERT(1077, jobj);
+    jobj->scale.y += y;
+    if (!(jobj->flags & JOBJ_MTX_INDEP_SRT)) {
+        HSD_JObjSetMtxDirty(jobj);
+    }
+}
+
+#endif"""
+        result, count = _strip_inline_functions(code)
+        assert count == 2
+        assert "HSD_JObjAddScaleX" in result
+        assert "HSD_JObjAddScaleY" in result
+        assert result.rstrip().endswith("#endif")
+        # Bodies should not be present
+        assert "HSD_ASSERT" not in result
+        assert "scale.x" not in result
+
+    def test_empty_input(self):
+        """Empty input should return empty output."""
+        result, count = _strip_inline_functions("")
+        assert count == 0
+        assert result == ""
+
+    def test_no_inline_functions(self):
+        """Input without inline functions should be unchanged."""
+        code = """void foo() {
+    return;
+}
+
+#endif"""
+        result, count = _strip_inline_functions(code)
+        assert count == 0
+        assert "void foo()" in result
+        assert "return;" in result
+        assert "#endif" in result
+
+
+class TestRegressionCases:
+    """Regression tests for specific bugs."""
+
+    def test_jobj_h_truncation_bug(self):
+        """Regression test for jobj.h truncation bug.
+
+        The original bug caused context to be truncated after HSD_JObjAddScaleX
+        because braces in comments threw off depth tracking, leaving in_inline=True
+        and eating all subsequent content including the #endif.
+        """
+        # Minimal reproduction of the bug
+        code = """static inline void HSD_JObjAddScaleX(HSD_JObj* jobj, float x)
+{
+    // if (!(jobj->flags & (1 << 25))) {
+    if (!(jobj->flags & JOBJ_MTX_INDEP_SRT)) {
+        // { if (jobj != ((void*) 0) {
+        // } };
+        HSD_JObjSetMtxDirty(jobj);
+    }
+}
+
+void HSD_JObjResolveRefs(HSD_JObj* jobj, HSD_Joint* joint);
+
+#endif"""
+        result, count = _strip_inline_functions(code)
+
+        # The bug would cause these to be missing
+        assert "HSD_JObjResolveRefs" in result, "Declaration after inline was eaten"
+        assert result.rstrip().endswith("#endif"), "#endif was eaten by inline stripping"
+
+    def test_consecutive_inline_with_comments(self):
+        """Multiple consecutive inline functions with problematic comments."""
+        code = """static inline void a() {
+    // {
+}
+
+static inline void b() {
+    // }
+}
+
+static inline void c() {
+    // { }
+}
+
+final();
+#endif"""
+        result, count = _strip_inline_functions(code)
+        assert count == 3
+        assert "final();" in result
+        assert result.rstrip().endswith("#endif")
+
+
+class TestStripTargetFunction:
+    """Tests for _strip_target_function."""
+
+    def test_strips_definition(self):
+        """Function definition should be stripped."""
+        code = """void myFunc(int x) {
+    return;
+}"""
+        result = _strip_target_function(code, "myFunc")
+        assert "// myFunc definition stripped" in result
+        assert "return;" not in result
+
+    def test_preserves_declaration(self):
+        """Function declaration (prototype) should be preserved."""
+        code = """void myFunc(int x);
+
+void other() {
+    myFunc(5);
+}"""
+        result = _strip_target_function(code, "myFunc")
+        assert "void myFunc(int x);" in result
+        assert "myFunc(5);" in result
+
+    def test_preserves_call_in_function(self):
+        """Function calls inside other functions should be preserved."""
+        code = """void myFunc(int x) {
+    return;
+}
+
+void caller() {
+    myFunc(42);
+}"""
+        result = _strip_target_function(code, "myFunc")
+        assert "// myFunc definition stripped" in result
+        assert "myFunc(42);" in result
+
+    def test_preserves_multiline_call(self):
+        """Multi-line function calls should be preserved."""
+        code = """void myFunc(int x) {
+    return;
+}
+
+void caller() {
+    myFunc(
+        42);
+}"""
+        result = _strip_target_function(code, "myFunc")
+        assert "// myFunc definition stripped" in result
+        assert "myFunc(" in result
+        assert "42);" in result
+
+    def test_preserves_call_at_line_start(self):
+        """Function call at start of line (no return type) should be preserved."""
+        code = """void myFunc(int x) {
+    return;
+}
+
+void caller() {
+    myFunc(1);
+}"""
+        result = _strip_target_function(code, "myFunc")
+        assert "myFunc(1);" in result
+
+    def test_preserves_call_in_if_condition(self):
+        """Function call in if condition should be preserved."""
+        code = """int myFunc(int x) {
+    return x;
+}
+
+void caller() {
+    if (myFunc(5)) {
+        do_something();
+    }
+}"""
+        result = _strip_target_function(code, "myFunc")
+        assert "if (myFunc(5))" in result
+
+    def test_preserves_call_with_assignment(self):
+        """Function call with assignment should be preserved."""
+        code = """int myFunc(int x) {
+    return x;
+}
+
+void caller() {
+    int y = myFunc(5);
+}"""
+        result = _strip_target_function(code, "myFunc")
+        assert "int y = myFunc(5);" in result
+
+    def test_preserves_call_in_return(self):
+        """Function call in return statement should be preserved."""
+        code = """int myFunc(int x) {
+    return x;
+}
+
+int caller() {
+    return myFunc(5);
+}"""
+        result = _strip_target_function(code, "myFunc")
+        assert "return myFunc(5);" in result
+
+    def test_preserves_comment_with_funcname(self):
+        """Comments mentioning function should be preserved."""
+        code = """// myFunc does something important
+void myFunc(int x) {
+    return;
+}"""
+        result = _strip_target_function(code, "myFunc")
+        assert "// myFunc does something important" in result
+        assert "// myFunc definition stripped" in result
+
+    def test_no_match_returns_unchanged(self):
+        """If function not in context, return unchanged."""
+        code = "void other() { return; }"
+        result = _strip_target_function(code, "myFunc")
+        assert result == code
+
+    def test_nested_braces_in_definition(self):
+        """Nested braces in function body should be handled."""
+        code = """void myFunc(int x) {
+    if (x) {
+        while (y) {
+            for (;;) {
+            }
+        }
+    }
+}
+
+void after() {}"""
+        result = _strip_target_function(code, "myFunc")
+        assert "// myFunc definition stripped" in result
+        assert "void after() {}" in result
+
+    def test_preserves_call_in_comma_expression(self):
+        """Function call after comma should be preserved."""
+        code = """void myFunc() {
+    return;
+}
+
+void caller() {
+    x = 1, myFunc();
+}"""
+        result = _strip_target_function(code, "myFunc")
+        # The line "    x = 1, myFunc();" ends with ; so it's preserved
+        assert "myFunc()" in result
+
+
+class TestTargetFunctionRegressions:
+    """Regression tests for target function stripping bugs."""
+
+    def test_call_site_stripping_bug(self):
+        """Regression test for call site stripping bug.
+
+        The original bug stripped function calls that looked like definitions
+        because they didn't end with ; (multi-line calls or calls without
+        proper return type detection).
+        """
+        code = """void mpLib_8004ED5C(int x) {
+    // definition body
+    return;
+}
+
+void mpCheckFloor() {
+    mpLib_8004ED5C(arg);
+}
+
+void otherFunc() {
+    if (condition) {
+        mpLib_8004ED5C(
+            multiline_arg);
+    }
+}"""
+        result = _strip_target_function(code, "mpLib_8004ED5C")
+
+        # Definition should be stripped
+        assert "// mpLib_8004ED5C definition stripped" in result
+
+        # Call sites must be preserved
+        assert "mpLib_8004ED5C(arg);" in result, "Call in mpCheckFloor was incorrectly stripped"
+        assert "mpLib_8004ED5C(" in result, "Multi-line call was incorrectly stripped"
+
+    def test_multiple_calls_preserved(self):
+        """All call sites should be preserved, not just the first."""
+        code = """void target(int x) { return; }
+
+void a() { target(1); }
+void b() { target(2); }
+void c() { target(3); }"""
+        result = _strip_target_function(code, "target")
+
+        assert "// target definition stripped" in result
+        assert "target(1);" in result
+        assert "target(2);" in result
+        assert "target(3);" in result
+
+    def test_multiline_signature_body_stripped(self):
+        """Regression: multiline function signature must have body fully stripped.
+
+        The bug was that when the opening brace was on a separate line from
+        the function name, the body was not being stripped because depth
+        tracking started at 0 and immediately set in_func=False.
+        """
+        code = """void mpLib_8004ED5C(
+    int arg1,
+    int arg2)
+{
+    bool calculated_distance = false;
+    MapLine* line = groundCollLine[line_id].x0;
+    return;
+}
+
+void after() {}"""
+        result = _strip_target_function(code, "mpLib_8004ED5C")
+
+        # Definition should be stripped
+        assert "// mpLib_8004ED5C definition stripped" in result
+
+        # Body must NOT be present
+        assert "calculated_distance" not in result, "Function body was not stripped"
+        assert "{" not in result or "void after()" in result, "Opening brace was not stripped"
+
+        # Code after the function must be preserved
+        assert "void after() {}" in result
