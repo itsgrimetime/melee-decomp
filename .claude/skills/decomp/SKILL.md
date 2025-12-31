@@ -308,6 +308,60 @@ The context headers may have some incorrect type declarations. When you see asse
 #define DMG_X1894(fp) ((HSD_GObj*)(fp)->dmg.x1894)
 ```
 
+## melee-re Reference Materials
+
+The `melee-re/` submodule contains reverse-engineering documentation that can help with decompilation:
+
+### Symbol Lookup
+```bash
+# Look up a function by address
+grep "80008440" melee-re/meta_GALE01.map
+
+# Find all symbols in an address range
+awk '$1 >= "80070000" && $1 < "80080000"' melee-re/meta_GALE01.map
+```
+
+### Key Documentation Files
+
+| File | Contents |
+|------|----------|
+| `melee-re/docs/STRUCT.md` | Function table layouts, callback signatures, memory structures |
+| `melee-re/docs/LINKERMAP.md` | Which addresses belong to which modules (SDK, HSD, game code) |
+| `melee-re/bin/analysis/ntsc102_defs.py` | Enums for character IDs, stage IDs, action states, item IDs |
+
+### Character ID Mapping
+
+When working on fighter code, know the difference between **external** and **internal** IDs:
+
+```python
+# External IDs (CSS order, used in saves/replays)
+CaptainFalcon=0x00, DonkeyKong=0x01, Fox=0x02, MrGameNWatch=0x03...
+
+# Internal IDs (used in code, function tables)
+Mario=0x00, Fox=0x01, CaptainFalcon=0x02, DonkeyKong=0x03, Kirby=0x04...
+```
+
+See `melee-re/bin/analysis/ntsc102_defs.py` for complete mappings.
+
+### Function Table Addresses
+
+From `melee-re/docs/STRUCT.md`:
+- **Global action states**: 0x803c2800 (341 entries × 0x20 bytes)
+- **Character-specific tables**: 0x803c12e0 (pointers indexed by internal char ID)
+- **Stage function tables**: 0x803dfedc (0x1bc bytes, indexed by internal stage ID)
+- **Item tables**: 0x803f14c4 (regular), 0x803f3100 (projectiles), 0x803f23cc (pokemon)
+
+### Per-Character Special Move Entry Counts
+
+| Character | Entries | Character | Entries |
+|-----------|---------|-----------|---------|
+| Mario | 12 | Kirby | 203 |
+| Fox | 35 | Marth | 32 |
+| Captain Falcon | 23 | Jigglypuff | 32 |
+| Link | 31 | Game & Watch | 40 |
+
+Kirby's high count is due to copy abilities.
+
 ## PowerPC / MWCC Reference
 
 ### Calling Convention

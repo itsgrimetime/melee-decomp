@@ -4,3 +4,6 @@
 [submodule "decomp.me"]
 	path = decomp.me
 	url = git@github.com:decompme/decomp.me.git
+[submodule "melee-re"]
+	path = melee-re
+	url = git@github.com:eigenform/melee-re.git

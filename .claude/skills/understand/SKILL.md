@@ -131,9 +131,11 @@ Look up Melee game information to aid naming:
 - `ftFox_SpecialHiStart` → Fire Fox startup
 - `ftFox_SpecialLwStart` → Reflector (shine) startup
 
+**Exception - melee-re submodule:** The `melee-re/` submodule is part of this project and contains valuable reference material (see below).
+
 **Do NOT** look up:
 - Other decompilation projects' naming (avoid copying potentially wrong names)
-- Reverse engineering documentation or symbol maps
+- External reverse engineering documentation or symbol maps (outside this project)
 
 ### Step 5: Propose Names
 
@@ -339,6 +341,73 @@ Calculate the offset to find the correct struct/field, then use proper access.
 /// @brief Mixed pointer array: xF4[0] = Params*, xF4[1-5] = Item_GObj*.
 void* xF4[6];
 ```
+
+## melee-re Reference Materials
+
+The `melee-re/` submodule contains reverse-engineering documentation that aids understanding:
+
+### Symbol Map Lookup
+```bash
+# Look up existing symbol names by address
+grep "80008440" melee-re/meta_GALE01.map
+
+# Find all symbols in a module's address range
+awk '$1 >= "800e0000" && $1 < "80160000"' melee-re/meta_GALE01.map  # Fighter code
+```
+
+The symbol map contains 19,601 entries from community research.
+
+### Key Documentation Files
+
+| File | Use For |
+|------|---------|
+| `melee-re/docs/STRUCT.md` | Understanding function table layouts, callback conventions |
+| `melee-re/docs/LINKERMAP.md` | Identifying which module owns an address range |
+| `melee-re/bin/analysis/ntsc102_defs.py` | Character/stage/item ID enums for naming |
+
+### Callback Naming Conventions
+
+From `melee-re/docs/STRUCT.md`, common callback patterns:
+
+**Character callbacks** (indexed by internal char ID):
+- `onLoad` - Character initialization
+- `playerblockOnDeath` - Death handling
+- `GroundSideB`, `AerialUpB`, etc. - Special move entry points
+- `onAbsorb`, `onItemPickup`, `onItemDrop` - Item interactions
+- `onHit`, `onRespawn` - Combat/respawn events
+
+**Item callbacks**:
+- `OnCreate`, `OnDestroy` - Lifecycle
+- `OnPickup`, `OnRelease`, `OnThrow` - Interaction
+- `OnHitCollision`, `OnTakeDamage`, `OnReflect` - Combat
+
+**Stage callbacks**:
+- `StageInit`, `OnLoad`, `OnGO` - Initialization
+- Entity subtables have 4-5 callbacks per entity
+
+### Character ID Reference
+
+When naming fighter functions, use **internal IDs** (code order):
+```
+Mario=0, Fox=1, CaptainFalcon=2, DonkeyKong=3, Kirby=4, Bowser=5,
+Link=6, Sheik=7, Ness=8, Peach=9, Popo=10, Nana=11, Pikachu=12...
+```
+
+**External IDs** (CSS order) are different - don't confuse them.
+
+### Memory Region Reference
+
+From `melee-re/docs/LINKERMAP.md`:
+
+| Address Range | Contents |
+|---------------|----------|
+| 0x800e0960 - 0x80155e1c | Character onLoad functions |
+| 0x8016d32c - 0x801b099c | Scene/mode functions |
+| 0x801cbb84 - 0x8021a620 | Stage-specific functions |
+| 0x80267978 - 0x802d73f0 | Item functions |
+| 0x8035dda0+ | HAL sysdolphin (HSD_*) libraries |
+
+This helps identify what module a function belongs to based on its address.
 
 ## What NOT to Do
 
