@@ -38,6 +38,81 @@ def _get_context_file(source_file: str | None = None, melee_root: Path | None = 
         return Path(_context_env)
     return get_context_file(source_file=source_file, melee_root=melee_root)
 
+
+def _strip_inline_functions(context: str) -> tuple[str, int]:
+    """Strip inline function bodies from context, keeping declarations.
+
+    This reduces context pollution where inline functions get compiled
+    and appear in the diff output, making it harder to match the target function.
+
+    Returns:
+        Tuple of (filtered context, number of functions stripped)
+    """
+    import re
+
+    lines = context.split('\n')
+    filtered = []
+    in_inline = False
+    depth = 0
+    stripped_count = 0
+    signature_lines = []
+
+    # Pattern to detect inline function definitions (not declarations ending with ;)
+    inline_pattern = re.compile(r'^(?:static\s+)?inline\s+')
+
+    for line in lines:
+        stripped = line.strip()
+
+        if not in_inline:
+            # Check if this line starts an inline function definition
+            if inline_pattern.match(stripped):
+                # Skip if it's just a declaration (ends with ;)
+                if stripped.endswith(';'):
+                    filtered.append(line)
+                    continue
+
+                # This is a definition - collect the signature
+                in_inline = True
+                signature_lines = [stripped]
+                depth = line.count('{') - line.count('}')
+                stripped_count += 1
+
+                # If opening brace is on this line, we have the full signature
+                if '{' in stripped:
+                    # Extract signature up to the brace
+                    sig = stripped[:stripped.find('{')].rstrip()
+                    filtered.append(sig + ';  // body stripped')
+                    signature_lines = []
+
+                    if depth <= 0:
+                        in_inline = False
+                continue
+
+        if in_inline:
+            # Still collecting signature or skipping body
+            if depth == 0 and '{' not in ''.join(signature_lines):
+                # Still in multi-line signature
+                signature_lines.append(stripped)
+                if '{' in stripped:
+                    # Found the opening brace - emit declaration
+                    full_sig = ' '.join(signature_lines)
+                    sig = full_sig[:full_sig.find('{')].rstrip()
+                    filtered.append(sig + ';  // body stripped')
+                    signature_lines = []
+                    depth = stripped.count('{') - stripped.count('}')
+                    if depth <= 0:
+                        in_inline = False
+                continue
+
+            depth += line.count('{') - line.count('}')
+            if depth <= 0:
+                in_inline = False
+            continue
+
+        filtered.append(line)
+
+    return '\n'.join(filtered), stripped_count
+
 extract_app = typer.Typer(help="Extract and list unmatched functions")
 
 
@@ -261,6 +336,9 @@ def extract_get(
     api_url: Annotated[
         Optional[str], typer.Option("--api-url", help="Decomp.me API URL (auto-detected if not provided)")
     ] = None,
+    strip_inline: Annotated[
+        bool, typer.Option("--strip-inline/--no-strip-inline", help="Strip inline function bodies from context (reduces pollution)")
+    ] = True,
 ):
     """Extract a specific function's ASM and context.
 
@@ -377,6 +455,12 @@ def extract_get(
 
         melee_context = ctx_path.read_text()
         console.print(f"\n[dim]Loaded {len(melee_context):,} bytes of context[/dim]")
+
+        # Strip inline function bodies to reduce context pollution
+        if strip_inline:
+            melee_context, inline_count = _strip_inline_functions(melee_context)
+            if inline_count > 0:
+                console.print(f"[dim]Stripped {inline_count} inline function bodies[/dim]")
 
         # Strip function definition (but keep declaration) to avoid redefinition errors
         if func.name in melee_context:
