@@ -52,7 +52,11 @@ def _get_worktree_info(melee_root: Path) -> List[dict]:
             continue
 
         subdir_key = name[4:]  # Remove "dir-" prefix
-        branch = f"subdirs/{subdir_key}"
+
+        # Get the actual branch name from the worktree
+        ret, branch, _ = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], wt_path)
+        if ret != 0 or not branch:
+            branch = f"subdirs/{subdir_key}"  # Fallback
 
         # Get commits ahead of upstream/master
         ret, out, _ = _run_git(
@@ -60,6 +64,13 @@ def _get_worktree_info(melee_root: Path) -> List[dict]:
             melee_root
         )
         commits_ahead = int(out) if ret == 0 and out.isdigit() else 0
+
+        # Get commits behind upstream/master
+        ret, out, _ = _run_git(
+            ["rev-list", "--count", f"{branch}..upstream/master"],
+            melee_root
+        )
+        commits_behind = int(out) if ret == 0 and out.isdigit() else 0
 
         # Get commit subjects if any
         commit_subjects = []
@@ -96,6 +107,7 @@ def _get_worktree_info(melee_root: Path) -> List[dict]:
             "path": wt_path,
             "branch": branch,
             "commits_ahead": commits_ahead,
+            "commits_behind": commits_behind,
             "commit_subjects": commit_subjects,
             "last_commit_date": last_commit_date,
             "has_uncommitted": has_uncommitted,
@@ -128,12 +140,14 @@ def worktree_list(
 
     table = Table(title="Subdirectory Worktrees")
     table.add_column("Subdirectory", style="cyan")
-    table.add_column("Commits", justify="right")
+    table.add_column("Ahead", justify="right")
+    table.add_column("Behind", justify="right")
     table.add_column("Last Activity", style="dim")
     table.add_column("Locked By", style="yellow")
     table.add_column("Status")
 
     total_pending = 0
+    total_behind = 0
     for wt in worktrees:
         # Format last activity
         if wt["last_commit_date"]:
@@ -154,12 +168,18 @@ def worktree_list(
             total_pending += wt["commits_ahead"]
         else:
             status_parts.append("[dim]clean[/dim]")
+        total_behind += wt["commits_behind"]
         if wt["has_uncommitted"]:
             status_parts.append("[yellow]uncommitted[/yellow]")
 
+        # Format ahead/behind
+        ahead_str = f"[green]{wt['commits_ahead']}[/green]" if wt["commits_ahead"] > 0 else "[dim]0[/dim]"
+        behind_str = f"[red]{wt['commits_behind']}[/red]" if wt["commits_behind"] > 0 else "[dim]0[/dim]"
+
         table.add_row(
             wt["subdir_key"],
-            str(wt["commits_ahead"]),
+            ahead_str,
+            behind_str,
             age_str,
             wt.get("locked_by", "") or "[dim]unlocked[/dim]",
             " ".join(status_parts),
@@ -168,10 +188,13 @@ def worktree_list(
         # Show commits if requested
         if show_commits and wt["commit_subjects"]:
             for subject in wt["commit_subjects"]:
-                table.add_row("", "", "", "", f"  [dim]{subject}[/dim]")
+                table.add_row("", "", "", "", "", f"  [dim]{subject}[/dim]")
 
     console.print(table)
-    console.print(f"\nTotal: {len(worktrees)} subdirectory worktrees, {total_pending} pending commits")
+    summary = f"\nTotal: {len(worktrees)} subdirectory worktrees, {total_pending} pending commits"
+    if total_behind > 0:
+        summary += f", [red]{total_behind} behind upstream[/red]"
+    console.print(summary)
 
 
 @worktree_app.command("prune")
