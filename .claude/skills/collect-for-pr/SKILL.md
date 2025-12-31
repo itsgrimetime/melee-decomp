@@ -36,40 +36,38 @@ Fix-up commits (build fixes, header updates, etc.) don't count toward this limit
 
 ### Step 2: Dry Run First
 
-Always preview what will be collected:
+Always preview what will be collected. The `--source-dir` parameter is required:
 
 ```bash
-melee-agent worktree collect --dry-run
+melee-agent worktree collect --source-dir lb --dry-run
 ```
 
 This shows:
-- Which commits will be cherry-picked
-- Which subdirectories are involved
+- Which commits will be cherry-picked from that subdirectory
 - Total commit count
 
 **Review the output for:**
 - Build fix commits that should go together with function matches
-- Any commits that might conflict
-- Logical groupings (same module tends to merge cleanly)
+- Logical groupings within the subdirectory
 
 ### Step 3: Collect and Create PR
 
 If the dry run looks good, collect and create the PR:
 
 ```bash
-melee-agent worktree collect --create-pr
+melee-agent worktree collect --source-dir lb --create-pr
 ```
 
 This will:
-1. Create a new branch from `upstream/master` (named `batch/YYYYMMDD`)
-2. Cherry-pick all pending commits in subdirectory order
+1. Create a new branch from `upstream/master` (named `batch/lb-YYYYMMDD`)
+2. Cherry-pick pending commits from the specified subdirectory
 3. Push the branch to origin
 4. Create a GitHub PR with organized commit listing
 5. Reset pending commit counts in the database
 
 **Custom branch name (optional):**
 ```bash
-melee-agent worktree collect --create-pr --branch "batch/lb-module-cleanup"
+melee-agent worktree collect --source-dir lb --create-pr --branch "batch/lb-module-cleanup"
 ```
 
 ### Step 4: Handle Conflicts
@@ -120,9 +118,11 @@ melee-agent worktree prune            # Execute
 
 ### Should I Create a PR Now?
 
+Each subdirectory worktree is collected separately. Consider each subdirectory independently:
+
 | Situation | Recommendation |
 |-----------|----------------|
-| 5-7 function matches ready | Yes, good batch size (default limit) |
+| 5-7 function matches in a subdirectory | Yes, good batch size (default limit) |
 | 8+ function matches | Run collect (it will auto-limit to 7, defer the rest) |
 | 2-4 function matches but work has stopped | Yes, ship what's ready |
 | 1-2 function matches with active work ongoing | Wait for more |
@@ -147,12 +147,13 @@ Shows all subdirectory worktrees with status:
 - Last activity time
 - Uncommitted changes (work in progress)
 
-### `worktree collect`
-Cherry-picks commits from subdirectory branches:
-- Creates new branch from upstream/master
-- Picks commits in subdirectory order (minimizes conflicts)
+### `worktree collect --source-dir <subdir>`
+Cherry-picks commits from a specific subdirectory branch:
+- Requires `--source-dir` to specify which subdirectory to collect
+- Creates new branch from upstream/master (named `batch/<subdir>-YYYYMMDD`)
+- Cherry-picks commits from that subdirectory
 - Tracks success/failure per commit
-- Optionally creates GitHub PR
+- Optionally creates GitHub PR with `--create-pr`
 
 ### `worktree prune`
 Removes worktrees with no pending commits:
@@ -174,19 +175,18 @@ Gets all feedback on a PR in one call:
 # Check what's available
 melee-agent worktree list --commits
 # Output shows:
-#   lb:           3 commits (match, match, match)
+#   lb:           6 commits (match, match, match, fixup, match, match)
 #   ft-chara-ftFox: 2 commits (match, fixup)
 #   gr:           2 commits (match, match)
-# Total: 7 commits (6 matches, 1 fixup) - good batch!
 
-# Preview collection
-melee-agent worktree collect --dry-run
-# Shows all 7 commits that will be cherry-picked
+# Preview collection for lb subdirectory
+melee-agent worktree collect --source-dir lb --dry-run
+# Shows commits from lb that will be cherry-picked
 # Classifies each as [match] or [fixup]
 
-# Create the PR
-melee-agent worktree collect --create-pr
-# Creates batch/20241230 branch, cherry-picks 7 commits, creates PR
+# Create the PR for lb
+melee-agent worktree collect --source-dir lb --create-pr
+# Creates batch/lb-20241230 branch, cherry-picks commits, creates PR
 # Returns PR URL: https://github.com/doldecomp/melee/pull/XXXX
 
 # Monitor PR for issues
@@ -312,4 +312,4 @@ grep -rn "0x[0-9a-f]*[a-f]" melee/src/  # Lowercase hex
 
 - **After `/decomp`**: Commits accumulate on subdirectory worktrees
 - **Before `/decomp-fixup`**: Check if fixes should go in same batch
-- **Coordination**: Multiple agents can commit to different subdirectories, then one agent collects
+- **Coordination**: Each subdirectory is collected separately, avoiding cross-subdirectory conflicts

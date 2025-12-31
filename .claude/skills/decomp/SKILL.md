@@ -238,6 +238,38 @@ If you don't know the field name, use an `x` prefix with the offset:
 if (lbl_80472D28.x116 == 1) {
 ```
 
+**Important:** If you think pointer arithmetic is "required for matching" - you're almost certainly wrong. The real solution is to properly define the struct with correct padding and alignment:
+
+```c
+// BAD - pointer arithmetic with index (NEVER DO THIS)
+*(s16*)((u8*)gp + idx * 0x1C + 0xDE) = 1;
+*(float*)((u8*)gp + idx * 0x1C + 0xCC) += delta;
+
+// GOOD - define the struct properly with padding, then use array access
+struct AwningData {
+    /* +0x00 */ float accumulator;
+    /* +0x04 */ float velocity;
+    /* +0x08 */ float position;
+    /* +0x0C */ s16 counter;
+    /* +0x0E */ s16 prev_counter;
+    /* +0x10 */ s16 cooldown;
+    /* +0x12 */ s16 flag;
+    /* +0x14 */ u8 pad[8];   // Padding to 0x1C stride
+};
+
+struct GroundVars {
+    u8 x0_b0 : 1;
+    u8 pad[0xCC - 0xC5];     // Align array to correct offset
+    struct AwningData awnings[2];
+};
+
+// Now use clean struct access - this DOES match!
+gp->gv.onett.awnings[idx].flag = 1;
+gp->gv.onett.awnings[idx].accumulator += delta;
+```
+
+The `mulli` instruction pattern (e.g., `mulli r0, r6, 0x1c`) proves the struct stride, which tells you the element size for the array.
+
 ### Struct Field Renaming
 
 When you access a field and understand its purpose, rename it:

@@ -62,7 +62,7 @@ melee-agent worktree status lb        # Status for specific subdirectory
 melee-agent worktree lock lb          # Lock subdirectory for agent
 melee-agent worktree unlock lb        # Unlock subdirectory
 melee-agent worktree prune --force    # Clean up merged worktrees
-melee-agent worktree collect          # Batch commits into PR branch
+melee-agent worktree collect -s lb    # Collect commits from subdirectory into PR branch
 
 # Sync to production decomp.me
 melee-agent sync auth                 # Configure cf_clearance cookie
