@@ -328,6 +328,9 @@ def _is_function_match_commit(subject: str) -> bool:
 
 @worktree_app.command("collect")
 def worktree_collect(
+    source_dir: Annotated[
+        str, typer.Option("--source-dir", "-s", help="Subdirectory key to collect (e.g., 'lb', 'ft-chara-ftFox')")
+    ],
     melee_root: Annotated[
         Path, typer.Option("--melee-root", "-r", help="Path to melee project root")
     ] = DEFAULT_MELEE_ROOT,
@@ -347,9 +350,9 @@ def worktree_collect(
         bool, typer.Option("--no-limit", help="Disable the function match limit")
     ] = False,
 ):
-    """Collect all pending subdirectory commits into a single branch.
+    """Collect pending commits from a specific subdirectory worktree into a branch.
 
-    Cherry-picks commits in subdirectory order to minimize conflicts.
+    Cherry-picks commits from the specified subdirectory's worktree.
 
     By default, limits to 7 function match commits per PR to keep reviews manageable.
     Fix-up commits (build fixes, header updates, etc.) don't count toward this limit.
@@ -357,11 +360,20 @@ def worktree_collect(
     """
     worktrees = _get_worktree_info(melee_root)
 
-    # Find worktrees with pending commits
-    pending = [wt for wt in worktrees if wt["commits_ahead"] > 0]
+    # Find the specified worktree
+    pending = [wt for wt in worktrees if wt["subdir_key"] == source_dir and wt["commits_ahead"] > 0]
 
     if not pending:
-        console.print("[yellow]No pending commits in subdirectory worktrees[/yellow]")
+        # Check if worktree exists but has no pending commits
+        exists = any(wt["subdir_key"] == source_dir for wt in worktrees)
+        if exists:
+            console.print(f"[yellow]No pending commits in subdirectory worktree '{source_dir}'[/yellow]")
+        else:
+            console.print(f"[red]Subdirectory worktree '{source_dir}' not found[/red]")
+            console.print("\nAvailable worktrees:")
+            for wt in worktrees:
+                status = f"[green]{wt['commits_ahead']} pending[/green]" if wt["commits_ahead"] > 0 else "[dim]no pending[/dim]"
+                console.print(f"  {wt['subdir_key']}: {status}")
         return
 
     # Sort by subdirectory key for consistent ordering
@@ -454,7 +466,7 @@ def worktree_collect(
     # Generate branch name if not provided
     if not branch_name:
         date_str = datetime.now().strftime("%Y%m%d")
-        branch_name = f"batch/{date_str}"
+        branch_name = f"batch/{source_dir}-{date_str}"
 
     # Check if branch already exists
     ret, _, _ = _run_git(["rev-parse", "--verify", branch_name], melee_root)
@@ -535,7 +547,7 @@ def worktree_collect(
         result = subprocess.run(
             [
                 "gh", "pr", "create",
-                "--title", f"Match {function_matches_collected} functions",
+                "--title", f"[{source_dir}] Match {function_matches_collected} functions",
                 "--body", pr_body,
                 "--base", "master",
             ],

@@ -39,6 +39,42 @@ def _get_context_file(source_file: str | None = None, melee_root: Path | None = 
     return get_context_file(source_file=source_file, melee_root=melee_root)
 
 
+def _count_braces(line: str) -> tuple[int, int]:
+    """Count opening and closing braces, ignoring those in comments and strings.
+
+    Returns:
+        Tuple of (open_count, close_count)
+    """
+    # Remove // comments
+    comment_pos = line.find('//')
+    if comment_pos != -1:
+        line = line[:comment_pos]
+
+    # Remove string literals (handle escaped quotes)
+    result = []
+    in_string = False
+    string_char = None
+    i = 0
+    while i < len(line):
+        c = line[i]
+        if in_string:
+            if c == '\\' and i + 1 < len(line):
+                i += 2  # Skip escaped character
+                continue
+            if c == string_char:
+                in_string = False
+        else:
+            if c in '"\'':
+                in_string = True
+                string_char = c
+            else:
+                result.append(c)
+        i += 1
+
+    cleaned = ''.join(result)
+    return cleaned.count('{'), cleaned.count('}')
+
+
 def _strip_inline_functions(context: str) -> tuple[str, int]:
     """Strip inline function bodies from context, keeping declarations.
 
@@ -74,11 +110,12 @@ def _strip_inline_functions(context: str) -> tuple[str, int]:
                 # This is a definition - collect the signature
                 in_inline = True
                 signature_lines = [stripped]
-                depth = line.count('{') - line.count('}')
+                open_braces, close_braces = _count_braces(line)
+                depth = open_braces - close_braces
                 stripped_count += 1
 
                 # If opening brace is on this line, we have the full signature
-                if '{' in stripped:
+                if open_braces > 0:
                     # Extract signature up to the brace
                     sig = stripped[:stripped.find('{')].rstrip()
                     filtered.append(sig + ';  // body stripped')
@@ -90,21 +127,22 @@ def _strip_inline_functions(context: str) -> tuple[str, int]:
 
         if in_inline:
             # Still collecting signature or skipping body
+            open_braces, close_braces = _count_braces(line)
             if depth == 0 and '{' not in ''.join(signature_lines):
                 # Still in multi-line signature
                 signature_lines.append(stripped)
-                if '{' in stripped:
+                if open_braces > 0:
                     # Found the opening brace - emit declaration
                     full_sig = ' '.join(signature_lines)
                     sig = full_sig[:full_sig.find('{')].rstrip()
                     filtered.append(sig + ';  // body stripped')
                     signature_lines = []
-                    depth = stripped.count('{') - stripped.count('}')
+                    depth = open_braces - close_braces
                     if depth <= 0:
                         in_inline = False
                 continue
 
-            depth += line.count('{') - line.count('}')
+            depth += open_braces - close_braces
             if depth <= 0:
                 in_inline = False
             continue
@@ -112,6 +150,222 @@ def _strip_inline_functions(context: str) -> tuple[str, int]:
         filtered.append(line)
 
     return '\n'.join(filtered), stripped_count
+
+
+def _strip_all_function_bodies(context: str, keep_functions: set[str] | None = None) -> tuple[str, int]:
+    """Strip ALL function bodies from context, keeping only declarations.
+
+    This is more aggressive than _strip_inline_functions - it strips any
+    function definition, not just those marked inline. This prevents the
+    compiler from auto-inlining functions with -inline auto.
+
+    Args:
+        context: The context string to process
+        keep_functions: Optional set of function names to NOT strip (keep their bodies)
+
+    Returns:
+        Tuple of (filtered context, number of functions stripped)
+    """
+    import re
+
+    if keep_functions is None:
+        keep_functions = set()
+
+    lines = context.split('\n')
+    filtered = []
+    in_func = False
+    in_signature = False
+    depth = 0
+    stripped_count = 0
+    signature_lines = []
+    current_func_name = None
+
+    # Pattern to detect function definitions:
+    # - Starts with optional storage class (static, extern, inline)
+    # - Has a return type (void, int, s32, struct X*, etc.)
+    # - Has a function name followed by (
+    # - Does NOT end with ; (that would be a declaration)
+    # Matches: "void func(", "static int foo(", "struct X* bar(", etc.
+    func_def_pattern = re.compile(
+        r'^(?:static\s+)?(?:inline\s+)?'  # optional static/inline
+        r'(?:(?:const\s+)?'  # optional const
+        r'(?:struct\s+\w+\s*\*?|union\s+\w+\s*\*?|enum\s+\w+|'  # struct/union/enum types
+        r'unsigned\s+\w+|signed\s+\w+|'  # unsigned/signed types
+        r'\w+)\s*\**\s+)'  # other types with optional pointer
+        r'(\w+)\s*\('  # function name and opening paren
+    )
+
+    for line in lines:
+        stripped = line.strip()
+
+        if not in_func and not in_signature:
+            # Check if this is a function definition
+            match = func_def_pattern.match(stripped)
+            if match and not stripped.endswith(';'):
+                func_name = match.group(1)
+
+                # Skip if this function should be kept
+                if func_name in keep_functions:
+                    filtered.append(line)
+                    continue
+
+                # Skip if line looks like a declaration or forward ref
+                # (ends with ); after possible multi-line)
+                if stripped.endswith(');'):
+                    filtered.append(line)
+                    continue
+
+                # This is a function definition - start stripping
+                in_signature = True
+                signature_lines = [stripped]
+                current_func_name = func_name
+                stripped_count += 1
+
+                open_braces, close_braces = _count_braces(line)
+                if open_braces > 0:
+                    # Found the opening brace - emit declaration and enter body
+                    sig = stripped[:stripped.find('{')].rstrip()
+                    filtered.append(sig + ';  /* body stripped: auto-inline prevention */')
+                    in_signature = False
+                    in_func = True
+                    depth = open_braces - close_braces
+                    signature_lines = []
+                    if depth <= 0:
+                        in_func = False
+                        current_func_name = None
+                continue
+
+        if in_signature:
+            # Collecting multi-line signature
+            signature_lines.append(stripped)
+            open_braces, close_braces = _count_braces(line)
+            if open_braces > 0:
+                # Found the opening brace - emit declaration
+                full_sig = ' '.join(signature_lines)
+                sig_end = full_sig.find('{')
+                if sig_end > 0:
+                    sig = full_sig[:sig_end].rstrip()
+                else:
+                    sig = full_sig.rstrip()
+                filtered.append(sig + ';  /* body stripped: auto-inline prevention */')
+                in_signature = False
+                in_func = True
+                depth = open_braces - close_braces
+                signature_lines = []
+                if depth <= 0:
+                    in_func = False
+                    current_func_name = None
+            continue
+
+        if in_func:
+            # Inside function body - skip lines until we exit
+            open_braces, close_braces = _count_braces(line)
+            depth += open_braces - close_braces
+            if depth <= 0:
+                in_func = False
+                current_func_name = None
+            continue
+
+        filtered.append(line)
+
+    return '\n'.join(filtered), stripped_count
+
+
+def _strip_target_function(context: str, func_name: str) -> str:
+    """Strip the target function's definition from context, preserving calls.
+
+    This removes the function definition to avoid redefinition errors when
+    compiling the scratch, while keeping:
+    - Function declarations (prototypes ending with ;)
+    - Function calls (func_name appears without return type before it)
+    - Comments mentioning the function
+
+    Args:
+        context: The full context string
+        func_name: Name of the function to strip
+
+    Returns:
+        Context with function definition removed
+    """
+    if func_name not in context:
+        return context
+
+    lines = context.split('\n')
+    filtered = []
+    in_func = False
+    in_signature = False  # True when we've seen the function name but not yet the opening {
+    depth = 0
+
+    for line in lines:
+        if not in_func and not in_signature and func_name in line and '(' in line:
+            s = line.strip()
+            # Skip comments, control flow
+            if s.startswith('//') or s.startswith('if') or s.startswith('while'):
+                filtered.append(line)
+                continue
+            # Keep declarations (prototypes) - they end with );
+            if s.endswith(';'):
+                filtered.append(line)
+                continue
+            # Check if this is a function CALL vs DEFINITION
+            # A definition has a return type before the function name
+            # A call starts with the function name (possibly with leading whitespace)
+            # Also check for assignment (function pointer) or control flow
+            func_pos = s.find(func_name)
+            if func_pos > 0:
+                before_func = s[:func_pos].rstrip()
+                # If there's only whitespace before the function name, it's a call
+                if not before_func:
+                    filtered.append(line)
+                    continue
+                # If it's inside a block, after operator, or in a call, it's not a definition
+                # { = inside function body, ( = inside call/condition, etc.
+                if before_func.endswith(('=', ',', '(', '{', '!', '&', '|', '?', ':', ';')):
+                    filtered.append(line)
+                    continue
+                # If it ends with a keyword/operator, it's likely a call context
+                if before_func.endswith(('return', 'case')):
+                    filtered.append(line)
+                    continue
+            elif func_pos == 0:
+                # Function name at start of stripped line = likely a call
+                filtered.append(line)
+                continue
+            # This is a function definition (has return type before name)
+            filtered.append(f'// {func_name} definition stripped')
+            open_b, close_b = _count_braces(line)
+            if open_b > 0:
+                # Opening brace on same line - we're in the body
+                in_func = True
+                depth = open_b - close_b
+                if depth <= 0:
+                    in_func = False
+            else:
+                # No brace yet - we're in a multi-line signature
+                in_signature = True
+            continue
+        if in_signature:
+            # Still looking for the opening brace
+            open_b, close_b = _count_braces(line)
+            if open_b > 0:
+                # Found the opening brace - now we're in the body
+                in_signature = False
+                in_func = True
+                depth = open_b - close_b
+                if depth <= 0:
+                    in_func = False
+            # Either way, skip this line (it's part of the signature or opening brace)
+            continue
+        if in_func:
+            open_b, close_b = _count_braces(line)
+            depth += open_b - close_b
+            if depth <= 0:
+                in_func = False
+            continue
+        filtered.append(line)
+
+    return '\n'.join(filtered)
+
 
 extract_app = typer.Typer(help="Extract and list unmatched functions")
 
@@ -464,37 +718,7 @@ def extract_get(
 
         # Strip function definition (but keep declaration) to avoid redefinition errors
         if func.name in melee_context:
-            lines = melee_context.split('\n')
-            filtered = []
-            in_func = False
-            depth = 0
-            for line in lines:
-                if not in_func and func.name in line and '(' in line:
-                    s = line.strip()
-                    # Skip comments, control flow
-                    if s.startswith('//') or s.startswith('if') or s.startswith('while'):
-                        filtered.append(line)
-                        continue
-                    # Keep declarations (prototypes) - they end with );
-                    if s.endswith(';'):
-                        filtered.append(line)
-                        continue
-                    # This is a function definition
-                    in_func = True
-                    depth = line.count('{') - line.count('}')
-                    filtered.append(f'// {func.name} definition stripped')
-                    if '{' not in line:
-                        depth = 0
-                    elif depth <= 0:
-                        in_func = False
-                    continue
-                if in_func:
-                    depth += line.count('{') - line.count('}')
-                    if depth <= 0:
-                        in_func = False
-                    continue
-                filtered.append(line)
-            melee_context = '\n'.join(filtered)
+            melee_context = _strip_target_function(melee_context, func.name)
             console.print(f"[dim]Stripped {func.name} definition from context[/dim]")
 
         # Detect correct compiler for this source file
