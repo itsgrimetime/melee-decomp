@@ -593,6 +593,9 @@ def extract_get(
     strip_inline: Annotated[
         bool, typer.Option("--strip-inline/--no-strip-inline", help="Strip inline function bodies from context (reduces pollution)")
     ] = True,
+    strip_all_bodies: Annotated[
+        bool, typer.Option("--strip-all-bodies/--no-strip-all-bodies", help="Strip ALL function bodies from context (prevents -inline auto issues)")
+    ] = False,
 ):
     """Extract a specific function's ASM and context.
 
@@ -710,8 +713,14 @@ def extract_get(
         melee_context = ctx_path.read_text()
         console.print(f"\n[dim]Loaded {len(melee_context):,} bytes of context[/dim]")
 
-        # Strip inline function bodies to reduce context pollution
-        if strip_inline:
+        # Strip function bodies to reduce context pollution
+        if strip_all_bodies:
+            # Strip ALL function bodies - prevents -inline auto from inlining anything
+            melee_context, body_count = _strip_all_function_bodies(melee_context)
+            if body_count > 0:
+                console.print(f"[dim]Stripped {body_count} function bodies (aggressive mode)[/dim]")
+        elif strip_inline:
+            # Only strip explicitly inline function bodies
             melee_context, inline_count = _strip_inline_functions(melee_context)
             if inline_count > 0:
                 console.print(f"[dim]Stripped {inline_count} inline function bodies[/dim]")
