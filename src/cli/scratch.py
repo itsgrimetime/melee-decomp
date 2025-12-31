@@ -402,8 +402,11 @@ def scratch_compile(
         Optional[Path], typer.Option("--source", "-s", help="Update source from file before compiling")
     ] = None,
     code: Annotated[
-        Optional[str], typer.Option("--code", "-c", help="Update source from inline code before compiling")
+        Optional[str], typer.Option("--code", "-c", help="Update source from inline code before compiling (WARNING: may have shell escaping issues, prefer --source or --stdin)")
     ] = None,
+    from_stdin: Annotated[
+        bool, typer.Option("--stdin", help="Read source code from stdin (avoids shell escaping issues)")
+    ] = False,
     api_url: Annotated[
         Optional[str], typer.Option("--api-url", help="Decomp.me API URL (auto-detected)")
     ] = None,
@@ -417,24 +420,29 @@ def scratch_compile(
     """Compile a scratch and show the diff.
 
     If --source is provided, updates the scratch source code from a file before compiling.
-    If --code is provided, updates the scratch source code from inline string before compiling.
-    Only one of --source or --code can be specified.
+    If --stdin is provided, reads source code from stdin (recommended for programmatic use).
+    If --code is provided, updates from inline string (may have shell escaping issues).
+    Only one of --source, --stdin, or --code can be specified.
     """
     api_url = api_url or get_local_api_url()
     from src.client import DecompMeAPIClient, ScratchUpdate, DecompMeAPIError
 
     # Validate mutually exclusive options
-    if source_file is not None and code is not None:
-        console.print("[red]Cannot specify both --source and --code[/red]")
+    options_count = sum([source_file is not None, code is not None, from_stdin])
+    if options_count > 1:
+        console.print("[red]Cannot specify multiple source options (--source, --code, --stdin)[/red]")
         raise typer.Exit(1)
 
-    # Get source code from file or inline
+    # Get source code from file, stdin, or inline
     source_code = None
     if source_file is not None:
         if not source_file.exists():
             console.print(f"[red]Source file not found: {source_file}[/red]")
             raise typer.Exit(1)
         source_code = source_file.read_text()
+    elif from_stdin:
+        import sys
+        source_code = sys.stdin.read()
     elif code is not None:
         source_code = code
 

@@ -267,8 +267,8 @@ def extract_get(
     Match percentages are read from the authoritative report.json.
     Use --create-scratch to also create a decomp.me scratch in one step.
     """
-    # Auto-detect agent worktree
-    melee_root = resolve_melee_root(melee_root)
+    # First pass: use default melee root to look up function info
+    initial_root = melee_root or DEFAULT_MELEE_ROOT
 
     # Auto-detect API URL if creating scratch
     if create_scratch and not api_url:
@@ -284,11 +284,18 @@ def extract_get(
 
     from src.extractor import extract_function
 
-    func = asyncio.run(extract_function(melee_root, function_name))
+    func = asyncio.run(extract_function(initial_root, function_name))
 
     if func is None:
         console.print(f"[red]Function '{function_name}' not found[/red]")
         raise typer.Exit(1)
+
+    # Now that we know the source file, resolve to the correct worktree
+    # This ensures context comes from the worktree with the agent's changes
+    if melee_root is None and func.file_path:
+        melee_root = resolve_melee_root(None, target_file=func.file_path)
+    else:
+        melee_root = initial_root
 
     console.print(f"[bold cyan]{func.name}[/bold cyan]")
     console.print(f"File: {func.file_path}")

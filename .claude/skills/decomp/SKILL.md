@@ -93,18 +93,20 @@ Then read the source file in `melee/src/` for context. Look for:
 
 ### Step 3: Compile and Iterate
 
-Write code and run compile command with code inline:
+Use heredoc with `--stdin` to compile (avoids shell escaping issues):
 
 ```bash
-melee-agent scratch compile <slug> --code '
+cat << 'EOF' | melee-agent scratch compile <slug> --stdin --diff
 void func(s32 arg0) {
-    if (arg0 < 1) {
-        arg0 = 1;
+    if (!arg0 || arg0 != expected) {
+        return;
     }
     // ... rest of function
 }
-' --diff
+EOF
 ```
+
+**IMPORTANT:** Always use `cat << 'EOF' | ... --stdin` pattern. The quoted `'EOF'` prevents shell expansion of `!`, `!=`, `$`, etc. Do NOT use `--code` with inline source - it corrupts special characters.
 
 The compile shows **match % history**:
 ```
