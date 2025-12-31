@@ -121,6 +121,7 @@ def state_status(
     - in-progress: Being actively worked on
     - matched: 95%+ match achieved
     - committed: Committed to git
+    - needs_fix: Committed but build is broken (needs /decomp-fixup)
     - merged: PR merged
     - documented: Has documentation (partial or complete)
     - undocumented: No documentation yet
@@ -215,6 +216,8 @@ def state_status(
             query += " AND match_percent >= 95 AND is_committed = FALSE"
         elif category == "committed":
             query += " AND is_committed = TRUE AND (pr_state IS NULL OR pr_state != 'MERGED')"
+        elif category == "needs_fix":
+            query += " AND build_status = 'broken' AND is_committed = TRUE"
         elif category == "merged":
             query += " AND pr_state = 'MERGED'"
         elif category == "documented":
@@ -557,7 +560,8 @@ def state_validate(
         # Get all functions for validation
         cursor = conn.execute("""
             SELECT function_name, match_percent, status, local_scratch_slug,
-                   production_scratch_slug, is_committed, pr_url, pr_state, pr_number, branch
+                   production_scratch_slug, is_committed, pr_url, pr_state, pr_number, branch,
+                   build_status, build_diagnosis
             FROM functions
         """)
         all_functions = [dict(row) for row in cursor.fetchall()]
@@ -571,6 +575,7 @@ def state_validate(
         is_committed = func.get('is_committed', False)
         pr_state = func.get('pr_state')
         match_pct = func.get('match_percent', 0)
+        build_status = func.get('build_status')
 
         # Determine what status SHOULD be based on available data
         if pr_state == 'MERGED':
@@ -581,7 +586,11 @@ def state_validate(
             # Closed but not merged - work was rejected/abandoned
             expected_status = 'matched' if match_pct >= 95 else 'in_progress' if match_pct > 0 else 'unclaimed'
         elif is_committed:
-            expected_status = 'committed'
+            # Check if build is broken - use committed_needs_fix status
+            if build_status == 'broken':
+                expected_status = 'committed_needs_fix'
+            else:
+                expected_status = 'committed'
         elif match_pct >= 95:
             expected_status = 'matched'
         elif match_pct > 0:

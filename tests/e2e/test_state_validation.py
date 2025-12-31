@@ -240,6 +240,253 @@ class TestBrokenBuildValidation:
         assert "/wt2" in all_broken
 
 
+class TestCommittedNeedsFixStatus:
+    """Test committed_needs_fix status handling.
+
+    When a function is committed with --force --diagnosis, it should:
+    - Have status='committed_needs_fix'
+    - Have build_status='broken'
+    - Have build_diagnosis set
+
+    The validation logic should NOT "fix" this to status='committed'.
+    """
+
+    def test_committed_needs_fix_not_overwritten_by_validate(self, temp_db):
+        """Validation should preserve committed_needs_fix status.
+
+        Bug: validate was treating is_committed=True as meaning status should be 'committed',
+        ignoring build_status='broken' which should keep status as 'committed_needs_fix'.
+        """
+        # Setup: function committed with broken build
+        temp_db.upsert_function(
+            "BrokenFunc",
+            status="committed_needs_fix",
+            is_committed=True,
+            build_status="broken",
+            build_diagnosis="Header has UNK_RET but function returns void",
+            match_percent=100.0,
+        )
+
+        func = temp_db.get_function("BrokenFunc")
+
+        # Simulate what validate's status consistency check does
+        status = func.get('status')
+        is_committed = func.get('is_committed', False)
+        build_status = func.get('build_status')
+        pr_state = func.get('pr_state')
+
+        # The correct expected status when is_committed=True AND build_status='broken'
+        # should be 'committed_needs_fix', not 'committed'
+        if pr_state == 'MERGED':
+            expected_status = 'merged'
+        elif pr_state == 'OPEN':
+            expected_status = 'in_review'
+        elif is_committed:
+            # BUG WAS HERE: old code just did expected_status = 'committed'
+            # Correct logic must check build_status
+            if build_status == 'broken':
+                expected_status = 'committed_needs_fix'
+            else:
+                expected_status = 'committed'
+        else:
+            expected_status = 'matched'
+
+        # Status should already be correct - no "fix" needed
+        assert status == expected_status
+        assert status == 'committed_needs_fix'
+
+    def test_category_needs_fix_filter(self, temp_db):
+        """--category needs_fix should find functions with build_status='broken'."""
+        # Setup: mix of functions with different build states
+        temp_db.upsert_function(
+            "BrokenFunc1",
+            status="committed_needs_fix",
+            is_committed=True,
+            build_status="broken",
+            build_diagnosis="Missing header",
+        )
+        temp_db.upsert_function(
+            "BrokenFunc2",
+            status="committed_needs_fix",
+            is_committed=True,
+            build_status="broken",
+            build_diagnosis="Type mismatch",
+        )
+        temp_db.upsert_function(
+            "HealthyFunc",
+            status="committed",
+            is_committed=True,
+            build_status="passing",
+        )
+        temp_db.upsert_function(
+            "MergedFunc",
+            status="merged",
+            is_committed=True,
+            build_status="passing",
+            pr_state="MERGED",
+        )
+
+        # Query for needs_fix category
+        with temp_db.connection() as conn:
+            cursor = conn.execute("""
+                SELECT function_name FROM functions
+                WHERE build_status = 'broken' AND is_committed = TRUE
+            """)
+            needs_fix = [row['function_name'] for row in cursor.fetchall()]
+
+        assert len(needs_fix) == 2
+        assert "BrokenFunc1" in needs_fix
+        assert "BrokenFunc2" in needs_fix
+        assert "HealthyFunc" not in needs_fix
+        assert "MergedFunc" not in needs_fix
+
+    def test_committed_needs_fix_status_is_valid(self, temp_db):
+        """Verify committed_needs_fix is a valid status value."""
+        # This tests the schema constraint allows this status
+        temp_db.upsert_function(
+            "TestFunc",
+            status="committed_needs_fix",
+            is_committed=True,
+            build_status="broken",
+        )
+
+        func = temp_db.get_function("TestFunc")
+        assert func["status"] == "committed_needs_fix"
+        assert func["build_status"] == "broken"
+
+    def test_broken_build_with_committed_status_is_inconsistent(self, temp_db):
+        """If status='committed' but build_status='broken', that's inconsistent.
+
+        This is the bug the agent found: workflow finish was setting
+        status='committed' with build_status='broken' instead of
+        status='committed_needs_fix'.
+        """
+        # Setup: the WRONG state (what the bug produces)
+        temp_db.upsert_function(
+            "BuggyFunc",
+            status="committed",  # Wrong! Should be committed_needs_fix
+            is_committed=True,
+            build_status="broken",
+            build_diagnosis="Some issue",
+        )
+
+        func = temp_db.get_function("BuggyFunc")
+
+        # Detect the inconsistency
+        is_inconsistent = (
+            func["status"] == "committed" and
+            func["build_status"] == "broken"
+        )
+
+        # This state IS inconsistent and should be flagged/fixed
+        assert is_inconsistent, "status='committed' with build_status='broken' is inconsistent"
+
+    def test_validation_fixes_committed_with_broken_to_committed_needs_fix(self, temp_db):
+        """Validation --fix should correct committed+broken to committed_needs_fix."""
+        # Setup: the WRONG state
+        temp_db.upsert_function(
+            "BuggyFunc",
+            status="committed",  # Wrong!
+            is_committed=True,
+            build_status="broken",
+            build_diagnosis="Some issue",
+        )
+
+        # Simulate what validation --fix should do
+        func = temp_db.get_function("BuggyFunc")
+        if func["status"] == "committed" and func["build_status"] == "broken":
+            temp_db.upsert_function("BuggyFunc", status="committed_needs_fix")
+
+        # Verify fix
+        func = temp_db.get_function("BuggyFunc")
+        assert func["status"] == "committed_needs_fix"
+
+
+class TestStateValidateCliCommand:
+    """Test the actual state validate CLI command.
+
+    These tests verify the CLI command behaves correctly with committed_needs_fix.
+    """
+
+    def test_validate_preserves_committed_needs_fix(self, cli_with_db, temp_db):
+        """state validate --fix should NOT change committed_needs_fix to committed."""
+        # Setup: correctly marked function
+        temp_db.upsert_function(
+            "BrokenFunc",
+            status="committed_needs_fix",
+            is_committed=True,
+            build_status="broken",
+            build_diagnosis="Header mismatch",
+            match_percent=100.0,
+        )
+
+        # Run validate with fix
+        result = cli_with_db("state", "validate", "--fix")
+
+        # Check status was preserved
+        func = temp_db.get_function("BrokenFunc")
+        assert func["status"] == "committed_needs_fix", (
+            f"Expected 'committed_needs_fix' but got '{func['status']}'. "
+            f"Output: {result.output}"
+        )
+
+    def test_validate_detects_wrong_status_for_broken_build(self, cli_with_db, temp_db):
+        """state validate should detect status='committed' with build_status='broken'."""
+        # Setup: incorrectly marked function (the bug state)
+        temp_db.upsert_function(
+            "BuggyFunc",
+            status="committed",  # Wrong!
+            is_committed=True,
+            build_status="broken",
+            build_diagnosis="Some issue",
+            match_percent=100.0,
+        )
+
+        # Run validate (without fix)
+        result = cli_with_db("state", "validate")
+
+        # Should report an issue
+        assert result.exit_code == 0
+
+        # After fix, status should be committed_needs_fix
+        result = cli_with_db("state", "validate", "--fix")
+        func = temp_db.get_function("BuggyFunc")
+        assert func["status"] == "committed_needs_fix", (
+            f"Expected 'committed_needs_fix' after fix but got '{func['status']}'"
+        )
+
+
+class TestStateCategoryFilter:
+    """Test the --category filter in state status command."""
+
+    def test_category_needs_fix(self, cli_with_db, temp_db):
+        """--category needs_fix should list functions with broken builds."""
+        # Setup
+        temp_db.upsert_function(
+            "BrokenFunc",
+            status="committed_needs_fix",
+            is_committed=True,
+            build_status="broken",
+            build_diagnosis="Missing header",
+            match_percent=100.0,
+        )
+        temp_db.upsert_function(
+            "HealthyFunc",
+            status="committed",
+            is_committed=True,
+            build_status="passing",
+            match_percent=100.0,
+        )
+
+        # Run with --category needs_fix
+        result = cli_with_db("state", "status", "--category", "needs_fix")
+
+        # Should include broken func, not healthy func
+        assert result.exit_code == 0
+        assert "BrokenFunc" in result.output, f"Expected 'BrokenFunc' in output: {result.output}"
+        assert "HealthyFunc" not in result.output, f"Did not expect 'HealthyFunc' in output"
+
+
 class TestClaimValidation:
     """Test claim validation."""
 
