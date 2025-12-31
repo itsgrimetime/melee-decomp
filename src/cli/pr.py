@@ -312,7 +312,7 @@ def _get_extended_pr_info(repo: str, pr_number: int) -> dict | None:
     try:
         result = subprocess.run(
             ["gh", "pr", "view", str(pr_number), "--repo", repo, "--json",
-             "state,isDraft,title,body,mergeable,reviewDecision,baseRefName,headRefName,commits,url"],
+             "state,isDraft,title,body,mergeable,mergeStateStatus,reviewDecision,baseRefName,headRefName,commits,url"],
             capture_output=True, text=True, check=True
         )
         return json.loads(result.stdout)
@@ -446,9 +446,11 @@ def _check_single_pr(repo: str, pr_number: int, pr_ref: str, validate: bool, out
     body = pr_info.get("body", "")
     review = pr_info.get("reviewDecision", "PENDING")
     mergeable = pr_info.get("mergeable", "UNKNOWN")
+    merge_state_status = pr_info.get("mergeStateStatus", "UNKNOWN")
     base_branch = pr_info.get("baseRefName", "?")
     head_branch = pr_info.get("headRefName", "?")
     commits = pr_info.get("commits", [])
+    has_conflicts = mergeable == "CONFLICTING"
 
     # Extract functions from commits
     commit_functions = _extract_functions_from_commits(commits)
@@ -467,6 +469,8 @@ def _check_single_pr(repo: str, pr_number: int, pr_ref: str, validate: bool, out
         "is_draft": is_draft,
         "review": review,
         "mergeable": mergeable,
+        "merge_state_status": merge_state_status,
+        "has_conflicts": has_conflicts,
         "base_branch": base_branch,
         "head_branch": head_branch,
         "commit_count": len(commits),
@@ -492,7 +496,12 @@ def _check_single_pr(repo: str, pr_number: int, pr_ref: str, validate: bool, out
         console.print("[cyan]Status: OPEN[/cyan]")
 
     console.print(f"Review: {review or 'PENDING'}")
-    console.print(f"Mergeable: {mergeable}")
+    if has_conflicts:
+        console.print(f"[bold red]Mergeable: CONFLICTING - needs rebase/merge from {base_branch}[/bold red]")
+    elif mergeable == "MERGEABLE":
+        console.print(f"[green]Mergeable: {mergeable}[/green]")
+    else:
+        console.print(f"Mergeable: {mergeable}")
 
     # Branches
     console.print(f"\n[bold]Branches:[/bold]")
@@ -1320,12 +1329,42 @@ def pr_feedback(
         print(json.dumps(all_results, indent=2, default=str))
 
 
+def _get_pr_merge_status(repo: str, pr_number: int) -> dict:
+    """Get PR merge status including conflict information."""
+    try:
+        result = subprocess.run(
+            ["gh", "pr", "view", str(pr_number), "--repo", repo,
+             "--json", "mergeable,mergeStateStatus,baseRefName"],
+            capture_output=True, text=True, check=True
+        )
+        data = json.loads(result.stdout)
+        mergeable = data.get("mergeable", "UNKNOWN")
+        return {
+            "mergeable": mergeable,
+            "merge_state_status": data.get("mergeStateStatus", "UNKNOWN"),
+            "base_branch": data.get("baseRefName", "master"),
+            "has_conflicts": mergeable == "CONFLICTING",
+        }
+    except (subprocess.CalledProcessError, json.JSONDecodeError):
+        return {
+            "mergeable": "UNKNOWN",
+            "merge_state_status": "UNKNOWN",
+            "base_branch": "master",
+            "has_conflicts": False,
+        }
+
+
 def _feedback_single_pr(repo: str, pr_number: int, include_logs: bool, output_json: bool) -> dict | None:
     """Get feedback for a single PR."""
     pr_url = f"https://github.com/{repo}/pull/{pr_number}"
+
+    # Get merge status first
+    merge_status = _get_pr_merge_status(repo, pr_number)
+
     feedback = {
         "pr_number": pr_number,
         "pr_url": pr_url,
+        "merge_status": merge_status,
         "checks": {
             "passing": [],
             "failing": [],
@@ -1383,6 +1422,11 @@ def _feedback_single_pr(repo: str, pr_number: int, include_logs: bool, output_js
     # 4. Generate action items summary
     action_items = []
 
+    # From merge conflicts (highest priority)
+    if merge_status["has_conflicts"]:
+        base = merge_status["base_branch"]
+        action_items.append(f"Resolve merge conflicts with {base} (rebase or merge required)")
+
     # From CI failures
     if feedback["checks"]["failing"]:
         failing_names = [c["name"] for c in feedback["checks"]["failing"]]
@@ -1422,6 +1466,15 @@ def _feedback_single_pr(repo: str, pr_number: int, include_logs: bool, output_js
 
     # Human-readable output
     console.print(f"[bold]PR #{pr_number} Feedback Summary[/bold]\n")
+
+    # Merge Status (show conflicts prominently at the top)
+    if merge_status["has_conflicts"]:
+        base = merge_status["base_branch"]
+        console.print(f"[bold red]⚠ MERGE CONFLICTS[/bold red] - needs rebase/merge from {base}")
+    elif merge_status["mergeable"] == "MERGEABLE":
+        console.print(f"[green]Mergeable: Yes[/green]")
+    elif merge_status["mergeable"] != "UNKNOWN":
+        console.print(f"Mergeable: {merge_status['mergeable']}")
 
     # CI Status
     passing = len(feedback["checks"]["passing"])
