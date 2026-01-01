@@ -8,7 +8,7 @@ removes inline function bodies while preserving:
 """
 
 import pytest
-from src.cli.extract import _count_braces, _strip_inline_functions, _strip_target_function
+from src.cli.extract import _count_braces, _strip_inline_functions, _strip_target_function, _strip_all_function_bodies
 
 
 class TestCountBraces:
@@ -76,13 +76,15 @@ class TestStripInlineFunctions:
     """Tests for the _strip_inline_functions function."""
 
     def test_simple_inline_stripped(self):
-        """Simple inline function should be stripped to declaration."""
+        """Simple inline function should be stripped to declaration without 'inline' keyword."""
         code = """static inline void foo() {
     return;
 }"""
         result, count = _strip_inline_functions(code)
         assert count == 1
-        assert "static inline void foo();" in result
+        # 'inline' keyword must be removed - inline declarations without bodies are invalid C
+        assert "static void foo();" in result
+        assert "inline" not in result
         assert "// body stripped" in result
         assert "return;" not in result
 
@@ -134,9 +136,11 @@ static inline void baz() {
 #endif"""
         result, count = _strip_inline_functions(code)
         assert count == 3
-        assert "static inline void foo();" in result
-        assert "static inline int bar();" in result
-        assert "static inline void baz();" in result
+        # 'inline' keyword must be removed from all stripped functions
+        assert "static void foo();" in result
+        assert "static int bar();" in result
+        assert "static void baz();" in result
+        assert "inline" not in result
         assert result.rstrip().endswith("#endif")
 
     def test_nested_braces(self):
@@ -205,7 +209,8 @@ after();"""
 next();"""
         result, count = _strip_inline_functions(code)
         assert count == 1
-        assert "static inline int get();" in result
+        assert "static int get();" in result
+        assert "inline" not in result
         assert "next();" in result
 
     def test_real_jobj_addscalex(self):
@@ -537,3 +542,107 @@ void after() {}"""
 
         # Code after the function must be preserved
         assert "void after() {}" in result
+
+
+class TestInlineKeywordRemoval:
+    """Tests verifying that 'inline' keyword is removed when stripping bodies.
+
+    In C (especially MWCC/C89), inline function declarations without bodies are
+    invalid syntax. When we strip an inline function's body, we must also remove
+    the 'inline' keyword to produce valid C.
+    """
+
+    def test_static_inline_becomes_static(self):
+        """'static inline' should become 'static' when body is stripped."""
+        code = """static inline s32 ftGetKind(Fighter* fp) {
+    return fp->kind;
+}"""
+        result, count = _strip_inline_functions(code)
+        assert count == 1
+        assert "static s32 ftGetKind(Fighter* fp);" in result
+        assert "inline" not in result
+
+    def test_inline_only_removed(self):
+        """'inline' without 'static' should be completely removed."""
+        code = """inline void foo() {
+    return;
+}"""
+        result, count = _strip_inline_functions(code)
+        assert count == 1
+        assert "void foo();" in result
+        assert "inline" not in result
+
+    def test_inline_preserved_in_declarations(self):
+        """Existing declarations (no body) should keep 'inline' keyword."""
+        code = "static inline void foo();"
+        result, count = _strip_inline_functions(code)
+        assert count == 0
+        # Declaration is preserved as-is
+        assert "static inline void foo();" in result
+
+    def test_multiline_signature_inline_removed(self):
+        """Multi-line signature should have 'inline' removed."""
+        code = """static inline void long_sig(
+    int a,
+    int b)
+{
+    return;
+}"""
+        result, count = _strip_inline_functions(code)
+        assert count == 1
+        assert "static void long_sig" in result
+        assert "inline" not in result
+
+
+class TestStripAllFunctionBodies:
+    """Tests for _strip_all_function_bodies function."""
+
+    def test_strips_regular_function(self):
+        """Regular functions should be stripped."""
+        code = """void normalFunc(int x) {
+    int y = x + 1;
+    return;
+}"""
+        result, count = _strip_all_function_bodies(code)
+        assert count == 1
+        assert "void normalFunc(int x);" in result
+        assert "/* body stripped: auto-inline prevention */" in result
+        assert "int y" not in result
+
+    def test_strips_inline_without_keyword(self):
+        """Inline functions should have 'inline' keyword removed from signature."""
+        code = """static inline s32 ftGetKind(Fighter* fp) {
+    return fp->kind;
+}"""
+        result, count = _strip_all_function_bodies(code)
+        assert count == 1
+        assert "static s32 ftGetKind(Fighter* fp);" in result
+        # 'inline' keyword should be removed from signature (but may appear in comment)
+        assert "static inline" not in result
+
+    def test_keeps_specified_functions(self):
+        """Functions in keep_functions set should not be stripped."""
+        code = """void foo() { return; }
+void bar() { return; }
+void baz() { return; }"""
+        result, count = _strip_all_function_bodies(code, keep_functions={"bar"})
+        assert count == 2  # foo and baz stripped, bar kept
+        assert "void foo();" in result
+        assert "void bar() { return; }" in result
+        assert "void baz();" in result
+
+    def test_multiline_signature_inline_removed(self):
+        """Multi-line signature with inline should have keyword removed."""
+        code = """static inline void long_func(
+    int a,
+    int b,
+    int c)
+{
+    int sum = a + b + c;
+}"""
+        result, count = _strip_all_function_bodies(code)
+        assert count == 1
+        assert "static void long_func" in result
+        # 'inline' keyword should be removed from signature (but may appear in comment)
+        assert "static inline" not in result
+        assert "int sum" not in result

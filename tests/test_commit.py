@@ -272,8 +272,15 @@ class TestCommitWorkflow:
         """Test executing workflow without creating a PR."""
         workflow = CommitWorkflow(temp_melee_root)
 
-        # Mock the format verification and PR creation
-        with patch('src.commit.workflow.verify_clang_format_available', return_value=False):
+        # Create an async mock for _regenerate_report
+        async def mock_regenerate():
+            return True
+
+        # Mock the format verification, compilation check, and configure.py update
+        with patch('src.commit.workflow.verify_clang_format_available', return_value=False), \
+             patch.object(workflow, '_verify_file_compiles', return_value=(True, "", "")), \
+             patch('src.commit.workflow.update_configure_py', return_value=True), \
+             patch.object(workflow, '_regenerate_report', mock_regenerate):
             result = await workflow.execute(
                 function_name="TestFunction",
                 file_path="melee/lb/lbcommand.c",
@@ -283,20 +290,26 @@ class TestCommitWorkflow:
                 create_pull_request=False
             )
 
-        # Should succeed without PR
+        # Should succeed without PR (returns None when create_pull_request=False)
         assert result is None
         assert len(workflow.files_changed) > 0
 
-        # Verify files were changed
+        # Verify source file was changed
         assert "src/melee/lb/lbcommand.c" in workflow.files_changed
-        assert "configure.py" in workflow.files_changed
 
     @pytest.mark.asyncio
     async def test_execute_with_mocked_pr(self, temp_melee_root):
         """Test executing workflow with mocked PR creation."""
         workflow = CommitWorkflow(temp_melee_root)
 
+        # Create an async mock for _regenerate_report
+        async def mock_regenerate():
+            return True
+
         with patch('src.commit.workflow.verify_clang_format_available', return_value=False), \
+             patch.object(workflow, '_verify_file_compiles', return_value=(True, "", "")), \
+             patch('src.commit.workflow.update_configure_py', return_value=True), \
+             patch.object(workflow, '_regenerate_report', mock_regenerate), \
              patch('src.commit.workflow.create_pr', return_value="https://github.com/test/pr/1"):
 
             result = await workflow.execute(
@@ -392,6 +405,241 @@ class TestIntegration:
 
         # Should still succeed (idempotent)
         assert result2 is None
+
+
+# =============================================================================
+# Unit Tests for Pure Functions
+# =============================================================================
+
+class TestFunctionCodeValidation:
+    """Tests for validate_function_code - ensures code is valid before commit.
+
+    This catches common issues like:
+    - Unbalanced braces (incomplete copy/paste)
+    - Missing target function
+    - Code that starts mid-statement
+    """
+
+    @pytest.fixture
+    def validate(self):
+        from src.commit.update import validate_function_code
+        return validate_function_code
+
+    def test_valid_simple_function(self, validate):
+        """Simple valid function should pass."""
+        code = """void my_func(void) {
+    return;
+}"""
+        is_valid, msg = validate(code, "my_func")
+        assert is_valid is True
+
+    def test_empty_code_fails(self, validate):
+        """Empty code should fail."""
+        is_valid, msg = validate("", "my_func")
+        assert is_valid is False
+        assert "empty" in msg.lower()
+
+    def test_unbalanced_braces_fails(self, validate):
+        """Unbalanced braces should fail."""
+        code = """void my_func(void) {
+    if (x) {
+        return;
+}"""  # Missing closing brace
+        is_valid, msg = validate(code, "my_func")
+        assert is_valid is False
+        assert "brace" in msg.lower()
+
+    def test_missing_function_fails(self, validate):
+        """Code without target function should fail."""
+        code = """void other_func(void) {
+    return;
+}"""
+        is_valid, msg = validate(code, "my_func")
+        assert is_valid is False
+        assert "not found" in msg.lower()
+
+    def test_multiple_functions_warns(self, validate):
+        """Multiple function definitions should warn but pass."""
+        code = """static void helper(void) {
+    return;
+}
+
+void my_func(void) {
+    helper();
+    return;
+}"""
+        is_valid, msg = validate(code, "my_func")
+        assert is_valid is True
+        assert "warning" in msg.lower() or "2" in msg
+
+    def test_function_with_params(self, validate):
+        """Function with parameters should be found."""
+        code = """void my_func(int x, float y) {
+    return;
+}"""
+        is_valid, msg = validate(code, "my_func")
+        assert is_valid is True
+
+    def test_static_function(self, validate):
+        """Static functions should be found."""
+        code = """static void my_func(void) {
+    return;
+}"""
+        is_valid, msg = validate(code, "my_func")
+        assert is_valid is True
+
+
+class TestMWCCErrorParsing:
+    """Tests for parse_mwcc_errors - extracts structured errors from compiler output."""
+
+    @pytest.fixture
+    def parse_errors(self):
+        from src.commit.diagnostics import parse_mwcc_errors
+        return parse_mwcc_errors
+
+    def test_parses_clang_style_error(self, parse_errors):
+        """Should parse clang/gcc style errors as fallback."""
+        error_output = """src/melee/lb/lbcollision.c:42:10: error: use of undeclared identifier 'foo'
+    int x = foo();
+            ^
+"""
+        errors = parse_errors(error_output)
+
+        assert len(errors) >= 1
+        error = errors[0]
+        assert error.line_number == 42
+        assert "foo" in error.message
+
+    def test_empty_output_returns_empty(self, parse_errors):
+        """Empty output should return empty list."""
+        errors = parse_errors("")
+        assert errors == []
+
+    def test_no_errors_returns_empty(self, parse_errors):
+        """Output without errors should return empty list."""
+        errors = parse_errors("Build successful!")
+        assert errors == []
+
+
+class TestLinkerErrorExtraction:
+    """Tests for extract_linker_errors - finds undefined symbols."""
+
+    @pytest.fixture
+    def extract_errors(self):
+        from src.commit.diagnostics import extract_linker_errors
+        return extract_linker_errors
+
+    def test_returns_list(self, extract_errors):
+        """Should return a list."""
+        result = extract_errors("")
+        assert isinstance(result, list)
+
+
+class TestSignatureNormalization:
+    """Tests for normalize_signature - canonicalizes function signatures."""
+
+    @pytest.fixture
+    def normalize(self):
+        from src.commit.diagnostics import normalize_signature
+        return normalize_signature
+
+    def test_removes_extra_whitespace(self, normalize):
+        """Should collapse multiple spaces."""
+        sig = "void    foo   (  int   x  )"
+        result = normalize(sig)
+        assert "    " not in result  # No quadruple spaces
+
+    def test_removes_newlines(self, normalize):
+        """Should handle multi-line signatures."""
+        sig = """void foo(
+    int x,
+    int y
+)"""
+        result = normalize(sig)
+        assert "\n" not in result
+
+
+class TestSignatureComparison:
+    """Tests for compare_signatures - detects mismatches between header and source."""
+
+    @pytest.fixture
+    def compare(self):
+        from src.commit.diagnostics import compare_signatures
+        return compare_signatures
+
+    def test_identical_signatures_match(self, compare):
+        """Identical signatures should match."""
+        sig = "void foo(int x)"
+        result = compare(sig, sig)
+
+        # Should indicate a match (no differences or match=True)
+        assert result.get("match", True) or not result.get("differences")
+
+
+class TestFunctionExtraction:
+    """Tests for _extract_function_from_code - pulls just the target function."""
+
+    @pytest.fixture
+    def extract_function(self):
+        from src.commit.update import _extract_function_from_code
+        return _extract_function_from_code
+
+    def test_extracts_single_function(self, extract_function):
+        """Should extract the target function from clean code."""
+        code = """void my_func(void) {
+    return;
+}"""
+        result = extract_function(code, "my_func")
+
+        assert result is not None
+        assert "my_func" in result
+        assert "return" in result
+
+    def test_returns_none_for_missing_function(self, extract_function):
+        """Should return None if function not found."""
+        code = """void other_func(void) {
+    return;
+}"""
+        result = extract_function(code, "nonexistent")
+
+        assert result is None
+
+
+class TestUndefinedIdentifierExtraction:
+    """Tests for extract_undefined_identifiers - finds undefined symbols in errors."""
+
+    @pytest.fixture
+    def extract_undefined(self):
+        from src.commit.diagnostics import extract_undefined_identifiers
+        return extract_undefined_identifiers
+
+    def test_extracts_undefined_identifier(self, extract_undefined):
+        """Should extract undefined identifier names."""
+        # Matches MWCC-style error format: error: 'foo' undeclared
+        error = "error: 'foo' undeclared"
+        result = extract_undefined(error)
+
+        assert "foo" in result
+
+    def test_extracts_unknown_type(self, extract_undefined):
+        """Should extract unknown type names."""
+        error = "error: unknown type name 'MyStruct'"
+        result = extract_undefined(error)
+
+        assert "MyStruct" in result
+
+    def test_extracts_use_of_undeclared(self, extract_undefined):
+        """Should extract 'use of undeclared identifier' format."""
+        error = "error: use of undeclared identifier 'gp_data'"
+        result = extract_undefined(error)
+
+        assert "gp_data" in result
+
+    def test_handles_no_errors(self, extract_undefined):
+        """Should return empty list for no errors."""
+        result = extract_undefined("Build successful!")
+
+        assert result == []
 
 
 if __name__ == "__main__":
