@@ -189,11 +189,19 @@ def get_context_file(source_file: str | None = None, melee_root: Path | None = N
     if ctx_path.exists():
         return ctx_path
 
-    # Try main melee if using a worktree
+    # Try main melee legacy ctx.c if using a worktree
     if root != DEFAULT_MELEE_ROOT:
         main_ctx = DEFAULT_MELEE_ROOT / "build" / "ctx.c"
         if main_ctx.exists():
             return main_ctx
 
-    # Return expected path (may not exist)
-    return root / "build" / "ctx.c"
+    # If source_file was provided but nothing exists, return the expected .ctx path
+    # so error message is helpful
+    if source_file:
+        ctx_relative = source_file.replace(".c", ".ctx").replace(".cpp", ".ctx")
+        if not ctx_relative.startswith("src/"):
+            ctx_relative = f"src/{ctx_relative}"
+        return root / "build" / "GALE01" / ctx_relative
+
+    # Return expected legacy path (may not exist)
+    return ctx_path
