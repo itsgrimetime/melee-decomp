@@ -118,6 +118,8 @@ def _strip_inline_functions(context: str) -> tuple[str, int]:
                 if open_braces > 0:
                     # Extract signature up to the brace
                     sig = stripped[:stripped.find('{')].rstrip()
+                    # Remove 'inline' keyword - inline declarations without bodies are invalid C
+                    sig = re.sub(r'\binline\s+', '', sig)
                     filtered.append(sig + ';  // body stripped')
                     signature_lines = []
 
@@ -135,6 +137,8 @@ def _strip_inline_functions(context: str) -> tuple[str, int]:
                     # Found the opening brace - emit declaration
                     full_sig = ' '.join(signature_lines)
                     sig = full_sig[:full_sig.find('{')].rstrip()
+                    # Remove 'inline' keyword - inline declarations without bodies are invalid C
+                    sig = re.sub(r'\binline\s+', '', sig)
                     filtered.append(sig + ';  // body stripped')
                     signature_lines = []
                     depth = open_braces - close_braces
@@ -225,6 +229,8 @@ def _strip_all_function_bodies(context: str, keep_functions: set[str] | None = N
                 if open_braces > 0:
                     # Found the opening brace - emit declaration and enter body
                     sig = stripped[:stripped.find('{')].rstrip()
+                    # Remove 'inline' keyword - inline declarations without bodies are invalid C
+                    sig = re.sub(r'\binline\s+', '', sig)
                     filtered.append(sig + ';  /* body stripped: auto-inline prevention */')
                     in_signature = False
                     in_func = True
@@ -247,6 +253,8 @@ def _strip_all_function_bodies(context: str, keep_functions: set[str] | None = N
                     sig = full_sig[:sig_end].rstrip()
                 else:
                     sig = full_sig.rstrip()
+                # Remove 'inline' keyword - inline declarations without bodies are invalid C
+                sig = re.sub(r'\binline\s+', '', sig)
                 filtered.append(sig + ';  /* body stripped: auto-inline prevention */')
                 in_signature = False
                 in_func = True
