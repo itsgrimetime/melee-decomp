@@ -1,17 +1,14 @@
 """Common utilities and constants for CLI commands."""
 
-import fcntl
 import json
 import os
 import re
 import subprocess
 import time
 from pathlib import Path
-from typing import Annotated, Optional
 
 import typer
 from rich.console import Console
-from rich.table import Table
 
 from src.client.api import _get_agent_id
 
