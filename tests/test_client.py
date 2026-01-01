@@ -1,6 +1,7 @@
 """Tests for the decomp.me API client.
 
-These tests require a running decomp.me backend at localhost:8000.
+These tests require a running decomp.me backend.
+The URL is auto-detected from LOCAL_DECOMP_CANDIDATES.
 Run with: pytest tests/test_client.py -v
 """
 
@@ -15,6 +16,7 @@ from src.client import (
     ScratchManager,
     ScratchUpdate,
 )
+from src.cli._common import detect_local_api_url
 
 
 # Simple test assembly for a function that returns 0
@@ -28,7 +30,10 @@ glabel test_func
 @pytest.fixture
 async def client():
     """Create an API client for testing."""
-    async with DecompMeAPIClient("http://localhost:8000") as c:
+    api_url = detect_local_api_url()
+    if not api_url:
+        pytest.skip("No decomp.me server available")
+    async with DecompMeAPIClient(api_url) as c:
         yield c
 
 
@@ -89,6 +94,10 @@ class TestDecompMeAPIClient:
                 source_code="int test_func(void) { return 0; }",
             )
         )
+
+        # Claim ownership before updating (required for anonymous scratches)
+        if scratch.claim_token:
+            await client.claim_scratch(scratch.slug, scratch.claim_token)
 
         # Update source code
         updated = await client.update_scratch(
@@ -264,6 +273,10 @@ class TestScratchManager:
             source_code="int test_func(void) { return 0; }",
         )
 
+        # Claim ownership before saving (required for anonymous scratches)
+        if scratch.claim_token:
+            await manager.client.claim_scratch(scratch.slug, scratch.claim_token)
+
         # Save new source
         await manager.iterate(
             scratch,
@@ -374,7 +387,10 @@ class TestModels:
 @pytest.mark.asyncio
 async def test_context_manager():
     """Test using client as async context manager."""
-    async with DecompMeAPIClient("http://localhost:8000") as client:
+    api_url = detect_local_api_url()
+    if not api_url:
+        pytest.skip("No decomp.me server available")
+    async with DecompMeAPIClient(api_url) as client:
         compilers = await client.list_compilers()
         assert len(compilers) > 0
     # Client should be closed after context exit

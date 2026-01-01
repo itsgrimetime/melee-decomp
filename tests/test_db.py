@@ -17,11 +17,14 @@ from pathlib import Path
 @pytest.fixture
 def db(tmp_path):
     """Create a fresh database for each test."""
-    from src.db import StateDB
+    from src.db import StateDB, reset_db
+    # Reset any global DB instance that may have been initialized by other tests
+    reset_db()
     db_path = tmp_path / "test_state.db"
     db = StateDB(db_path)
     yield db
     db.close()
+    reset_db()  # Clean up after test
 
 
 class TestClaims:

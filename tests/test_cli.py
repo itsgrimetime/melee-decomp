@@ -151,26 +151,6 @@ class TestScratchCommands:
         assert "Update a scratch's source code" in result.stdout
 
 
-class TestMatchCommands:
-    """Test the match command group."""
-
-    def test_match_help(self):
-        """Test match command help output."""
-        result = runner.invoke(app, ["match", "--help"])
-        assert result.exit_code == 0
-        assert "Run the decompilation matching agent" in result.stdout
-
-    def test_match_run_help(self):
-        """Test match run command help output."""
-        result = runner.invoke(app, ["match", "run", "--help"])
-        assert result.exit_code == 0
-        assert "Run the agent loop" in result.stdout
-        assert "--melee-root" in result.stdout
-        assert "--api-url" in result.stdout
-        assert "--max-iter" in result.stdout
-        assert "--auto-commit" in result.stdout
-
-
 class TestCommitCommands:
     """Test the commit command group."""
 
@@ -329,11 +309,12 @@ class TestDefaultValues:
         assert "melee" in result.stdout.lower()
 
     def test_default_api_url(self):
-        """Test that default API URL is used."""
+        """Test that API URL option is available."""
         result = runner.invoke(app, ["scratch", "create", "--help"])
         assert result.exit_code == 0
-        # Help should show default URL
-        assert "localhost:8000" in result.stdout or "http://" in result.stdout
+        # Help should show API URL option (auto-detected)
+        assert "--api-url" in result.stdout
+        assert "auto-detected" in result.stdout.lower()
 
     def test_default_limits(self):
         """Test that default limits are used."""

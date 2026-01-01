@@ -554,8 +554,18 @@ class DecompMeAPIClient:
         logger.debug("Fetching compiler list")
         response = await self._client.get("/api/compiler")
         data = self._handle_response(response)
-        adapter = TypeAdapter(list[CompilerInfo])
-        return adapter.validate_python(data)
+        # API returns {"compilers": {id: {...}, ...}, "platforms": ...}
+        compilers_dict = data.get("compilers", {}) if isinstance(data, dict) else {}
+        compilers = []
+        for compiler_id, info in compilers_dict.items():
+            compilers.append(CompilerInfo(
+                id=compiler_id,
+                name=info.get("name", compiler_id),
+                platform=info.get("platform", "unknown"),
+                language=info.get("language", "c"),
+                **{k: v for k, v in info.items() if k not in ("name", "platform", "language")}
+            ))
+        return compilers
 
     async def list_presets(self) -> list[PresetInfo]:
         """List all available presets.
@@ -569,8 +579,10 @@ class DecompMeAPIClient:
         logger.debug("Fetching preset list")
         response = await self._client.get("/api/preset")
         data = self._handle_response(response)
+        # API returns paginated response {"next": ..., "previous": ..., "results": [...]}
+        results = data.get("results", []) if isinstance(data, dict) else data
         adapter = TypeAdapter(list[PresetInfo])
-        return adapter.validate_python(data)
+        return adapter.validate_python(results)
 
     async def export_scratch(self, slug: str, target_only: bool = False) -> bytes:
         """Export a scratch as a ZIP file.
