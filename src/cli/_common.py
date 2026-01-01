@@ -139,8 +139,6 @@ from .tracking import (
     record_match_score,
     get_match_history,
     format_match_history,
-    check_duplicate_operation,
-    clear_operation_cache,
 )
 
 
@@ -297,35 +295,6 @@ def get_state_db():
         return None
 
 
-def db_log_audit(
-    entity_type: str,
-    entity_id: str,
-    action: str,
-    agent_id: str | None = None,
-    old_value: dict | None = None,
-    new_value: dict | None = None,
-    metadata: dict | None = None,
-) -> bool:
-    """Log an audit entry to the state database (non-blocking)."""
-    db = get_state_db()
-    if db is None:
-        return False
-
-    try:
-        db.log_audit(
-            entity_type=entity_type,
-            entity_id=entity_id,
-            action=action,
-            agent_id=agent_id or AGENT_ID,
-            old_value=old_value,
-            new_value=new_value,
-            metadata=metadata,
-        )
-        return True
-    except Exception:
-        return False
-
-
 def db_upsert_function(function_name: str, **fields) -> bool:
     """Update function in state database (non-blocking)."""
     db = get_state_db()
@@ -397,19 +366,6 @@ def db_record_sync(local_slug: str, production_slug: str, function_name: str | N
 
     try:
         db.record_sync(local_slug, production_slug, function_name)
-        return True
-    except Exception:
-        return False
-
-
-def db_upsert_agent(agent_id: str, worktree_path: str | None = None, branch_name: str | None = None) -> bool:
-    """Update agent in state database (non-blocking)."""
-    db = get_state_db()
-    if db is None:
-        return False
-
-    try:
-        db.upsert_agent(agent_id, worktree_path, branch_name)
         return True
     except Exception:
         return False

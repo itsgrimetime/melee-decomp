@@ -13,7 +13,6 @@ from ._common import (
     console,
     DEFAULT_MELEE_ROOT,
     get_context_file,
-    check_duplicate_operation,
     resolve_melee_root,
     load_completed_functions,
     detect_local_api_url,

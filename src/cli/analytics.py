@@ -12,7 +12,7 @@ from rich.panel import Panel
 from rich import box
 
 from ._common import console
-from src.analytics import DecompAnalyzer, DecompSession, FunctionAttempt
+from src.analytics import DecompAnalyzer
 
 analytics_app = typer.Typer(help="Analyze decomp agent performance from session logs")
 

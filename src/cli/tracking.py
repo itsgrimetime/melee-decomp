@@ -1,15 +1,11 @@
-"""Match history and operation tracking utilities.
+"""Match history tracking utilities.
 
-Provides utilities for:
-- Tracking match score progression over time
-- Detecting duplicate operations to avoid redundant API calls
+Provides utilities for tracking match score progression over time.
 """
 
 import json
 import time
 from pathlib import Path
-
-from rich.console import Console
 
 from src.client.api import _get_agent_id
 
@@ -24,11 +20,6 @@ AGENT_ID = _get_agent_id()
 _history_suffix = f"_{AGENT_ID}" if AGENT_ID else ""
 MATCH_HISTORY_FILE = DECOMP_CONFIG_DIR / f"match_history{_history_suffix}.json"
 
-# Operation tracking file
-_RECENT_OPS_FILE = DECOMP_CONFIG_DIR / "recent_operations.json"
-_OP_CACHE_TTL = 60  # Seconds before an operation "expires"
-
-console = Console()
 
 
 # =============================================================================
@@ -128,78 +119,3 @@ def format_match_history(slug: str, max_entries: int = 10) -> str:
         return ""
 
     return " → ".join(f"{p}%" for p in pcts)
-
-
-# =============================================================================
-# Operation Tracking (Duplicate Detection)
-# =============================================================================
-
-
-def _load_recent_ops() -> dict:
-    """Load recent operations cache."""
-    if not _RECENT_OPS_FILE.exists():
-        return {"operations": []}
-    try:
-        with open(_RECENT_OPS_FILE, "r") as f:
-            return json.load(f)
-    except (json.JSONDecodeError, IOError):
-        return {"operations": []}
-
-
-def _save_recent_ops(data: dict) -> None:
-    """Save recent operations cache."""
-    _RECENT_OPS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(_RECENT_OPS_FILE, "w") as f:
-        json.dump(data, f, indent=2)
-
-
-def check_duplicate_operation(op_type: str, key: str, warn: bool = True) -> bool:
-    """Check if an operation was recently performed, warn if duplicate.
-
-    Args:
-        op_type: Operation type (e.g., "extract_get", "scratch_create")
-        key: Unique key for the operation (e.g., function name, slug)
-        warn: If True, print a warning for duplicates
-
-    Returns:
-        True if this is a duplicate (operation was recently performed)
-    """
-    data = _load_recent_ops()
-    now = time.time()
-
-    # Clean expired entries
-    data["operations"] = [
-        op for op in data["operations"]
-        if now - op.get("timestamp", 0) < _OP_CACHE_TTL
-    ]
-
-    # Check for duplicate
-    op_key = f"{op_type}:{key}"
-    for op in data["operations"]:
-        if op.get("key") == op_key:
-            age = int(now - op.get("timestamp", 0))
-            if warn:
-                console.print(
-                    f"[yellow]Note:[/yellow] This operation was already run {age}s ago. "
-                    f"Skipping redundant API call."
-                )
-            return True
-
-    # Record this operation
-    data["operations"].append({
-        "key": op_key,
-        "timestamp": now,
-    })
-
-    # Keep only last 100 operations
-    if len(data["operations"]) > 100:
-        data["operations"] = data["operations"][-100:]
-
-    _save_recent_ops(data)
-    return False
-
-
-def clear_operation_cache() -> None:
-    """Clear the operation cache (useful for testing)."""
-    if _RECENT_OPS_FILE.exists():
-        _RECENT_OPS_FILE.unlink()

@@ -8,7 +8,6 @@ from typing import Annotated, Optional
 import typer
 from rich.table import Table
 from rich.panel import Panel
-from rich.text import Text
 
 from ._common import console, get_agent_melee_root, get_local_api_url
 
