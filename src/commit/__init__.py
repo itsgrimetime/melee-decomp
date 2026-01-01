@@ -4,7 +4,7 @@ Handles updating source files and creating PRs when functions are matched.
 """
 
 from .update import update_source_file
-from .configure import update_configure_py, get_file_path_from_function
+from .configure import update_configure_py, get_file_path_from_function, should_mark_as_matching
 from .format import format_files, verify_clang_format_available
 from .pr import (
     create_pr,
@@ -43,6 +43,7 @@ __all__ = [
     # Configure functions
     "update_configure_py",
     "get_file_path_from_function",
+    "should_mark_as_matching",
     # Format functions
     "format_files",
     "verify_clang_format_available",

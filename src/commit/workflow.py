@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Optional
 
 from .update import update_source_file
-from .configure import update_configure_py, get_file_path_from_function
+from .configure import update_configure_py, get_file_path_from_function, should_mark_as_matching
 from .format import format_files, verify_clang_format_available
 from .pr import create_pr, switch_to_branch
 from .diagnostics import analyze_commit_error
@@ -97,13 +97,17 @@ class CommitWorkflow:
             return None
         print("✓ File compiles successfully\n")
 
-        # Step 3: Update configure.py
-        print("[3/6] Updating configure.py...")
-        if not await update_configure_py(file_path, self.melee_root):
-            print("❌ Failed to update configure.py")
-            return None
-        self.files_changed.append("configure.py")
-        print("✓ configure.py updated\n")
+        # Step 3: Update configure.py (only if ALL functions in file are matched)
+        print("[3/6] Checking if file should be marked as Matching...")
+        should_mark, reason = await should_mark_as_matching(file_path, self.melee_root)
+        if should_mark:
+            if not await update_configure_py(file_path, self.melee_root):
+                print("❌ Failed to update configure.py")
+                return None
+            self.files_changed.append("configure.py")
+            print("✓ configure.py updated (all functions matched)\n")
+        else:
+            print(f"✓ Keeping as NonMatching: {reason}\n")
 
         # Step 4: Format files
         print("[4/6] Formatting changed files...")

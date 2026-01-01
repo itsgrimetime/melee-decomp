@@ -64,6 +64,76 @@ async def update_configure_py(
         return False
 
 
+async def should_mark_as_matching(
+    file_path: str,
+    melee_root: Path
+) -> tuple[bool, str]:
+    """Check if a file should be marked as Matching in configure.py.
+
+    A file should only transition from NonMatching to Matching when ALL
+    functions in the file are 100% matched. This prevents breaking the build
+    by switching a file to Matching mode when it still has unimplemented functions.
+
+    Args:
+        file_path: Relative path to the C file (e.g., "melee/lb/lbcommand.c")
+        melee_root: Path to the melee project root
+
+    Returns:
+        Tuple of (should_mark, reason):
+        - (True, "") if all functions are 100% matched
+        - (False, reason) if not all functions are matched, with explanation
+    """
+    try:
+        from .splits import SplitsParser
+        from .symbols import SymbolParser
+        from .report import ReportParser
+    except ImportError:
+        # Fall back to extractor module
+        from src.extractor.splits import SplitsParser
+        from src.extractor.symbols import SymbolParser
+        from src.extractor.report import ReportParser
+
+    try:
+        # Get all symbols
+        symbol_parser = SymbolParser(melee_root)
+        symbols = symbol_parser.parse_symbols()
+
+        # Get all functions in this file
+        splits_parser = SplitsParser(melee_root)
+        functions_in_file = splits_parser.get_functions_in_file(file_path, symbols)
+
+        if not functions_in_file:
+            return False, f"No functions found in {file_path}"
+
+        # Get match percentages for all functions
+        report_parser = ReportParser(melee_root)
+        function_matches = report_parser.get_function_matches()
+
+        # Check each function
+        unmatched = []
+        for func_name in functions_in_file:
+            match_data = function_matches.get(func_name)
+            if match_data is None:
+                unmatched.append(f"{func_name} (no match data)")
+            elif match_data.fuzzy_match_percent < 100.0:
+                unmatched.append(f"{func_name} ({match_data.fuzzy_match_percent:.1f}%)")
+
+        if unmatched:
+            if len(unmatched) <= 3:
+                reason = f"Not all functions matched: {', '.join(unmatched)}"
+            else:
+                reason = f"{len(unmatched)} functions not fully matched (e.g., {', '.join(unmatched[:3])}...)"
+            return False, reason
+
+        return True, ""
+
+    except FileNotFoundError as e:
+        # If we can't check, be conservative and don't mark as Matching
+        return False, f"Could not verify: {e}"
+    except Exception as e:
+        return False, f"Error checking file status: {e}"
+
+
 async def get_file_path_from_function(
     function_name: str,
     melee_root: Path
