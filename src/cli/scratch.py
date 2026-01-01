@@ -4,7 +4,6 @@ This module handles all scratch operations: create, compile, update, get, search
 """
 
 import asyncio
-import fcntl
 import json
 import os
 import re
@@ -30,6 +29,7 @@ from ._common import (
     AGENT_ID,
 )
 from .complete import _get_current_branch
+from .utils import file_lock, load_json_safe
 
 # Shared scratch tokens file - all agents use the same file
 # Tokens are keyed by scratch slug, so no conflicts between agents
@@ -59,22 +59,9 @@ scratch_app = typer.Typer(help="Manage decomp.me scratches")
 
 
 def _load_scratch_tokens() -> dict[str, str]:
-    """Load scratch claim tokens from file with locking."""
+    """Load scratch claim tokens from file."""
     tokens_path = Path(DECOMP_SCRATCH_TOKENS_FILE)
-    tokens_path.parent.mkdir(parents=True, exist_ok=True)
-
-    if not tokens_path.exists():
-        return {}
-
-    try:
-        with open(tokens_path, 'r') as f:
-            fcntl.flock(f.fileno(), fcntl.LOCK_SH)  # Shared lock for reading
-            try:
-                return json.load(f)
-            finally:
-                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-    except (json.JSONDecodeError, IOError):
-        return {}
+    return load_json_safe(tokens_path)
 
 
 def _save_scratch_token(slug: str, token: str) -> None:
@@ -86,30 +73,11 @@ def _save_scratch_token(slug: str, token: str) -> None:
     tokens_path = Path(DECOMP_SCRATCH_TOKENS_FILE)
     tokens_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Use lock file for atomic updates
-    lock_path = _TOKENS_LOCK_FILE
-    lock_path.touch(exist_ok=True)
-
-    with open(lock_path, 'r') as lock_f:
-        fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)  # Exclusive lock
-        try:
-            # Load existing tokens
-            tokens = {}
-            if tokens_path.exists():
-                try:
-                    with open(tokens_path, 'r') as f:
-                        tokens = json.load(f)
-                except (json.JSONDecodeError, IOError):
-                    pass
-
-            # Add/update the token for this slug
-            tokens[slug] = token
-
-            # Write atomically
-            with open(tokens_path, 'w') as f:
-                json.dump(tokens, f, indent=2)
-        finally:
-            fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
+    with file_lock(_TOKENS_LOCK_FILE, exclusive=True):
+        tokens = load_json_safe(tokens_path)
+        tokens[slug] = token
+        with open(tokens_path, "w") as f:
+            json.dump(tokens, f, indent=2)
 
 
 async def _handle_403_error(client, slug: str, error: Exception, operation: str = "update") -> bool:

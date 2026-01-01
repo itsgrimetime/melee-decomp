@@ -1,6 +1,5 @@
 """Complete commands - track completed/attempted functions."""
 
-import fcntl
 import json
 import os
 import subprocess
@@ -12,6 +11,7 @@ import typer
 from rich.table import Table
 
 from ._common import console, db_upsert_function, db_release_claim
+from .utils import file_lock, load_json_with_expiry, save_json_atomic
 
 # File paths
 DECOMP_CLAIMS_FILE = os.environ.get("DECOMP_CLAIMS_FILE", "/tmp/decomp_claims.json")
@@ -22,29 +22,16 @@ complete_app = typer.Typer(help="Track completed/attempted functions")
 
 def _load_claims() -> dict[str, Any]:
     """Load claims from file, removing stale entries."""
-    claims_path = Path(DECOMP_CLAIMS_FILE)
-    if not claims_path.exists():
-        return {}
-
-    try:
-        with open(claims_path, 'r') as f:
-            claims = json.load(f)
-    except (json.JSONDecodeError, IOError):
-        return {}
-
-    now = time.time()
-    return {
-        name: info for name, info in claims.items()
-        if now - info.get("timestamp", 0) < DECOMP_CLAIM_TIMEOUT
-    }
+    return load_json_with_expiry(
+        Path(DECOMP_CLAIMS_FILE),
+        timeout_seconds=DECOMP_CLAIM_TIMEOUT,
+        timestamp_field="timestamp",
+    )
 
 
 def _save_claims(claims: dict[str, Any]) -> None:
     """Save claims to file."""
-    claims_path = Path(DECOMP_CLAIMS_FILE)
-    claims_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(claims_path, 'w') as f:
-        json.dump(claims, f, indent=2)
+    save_json_atomic(Path(DECOMP_CLAIMS_FILE), claims)
 
 
 def _load_completed() -> dict[str, Any]:
@@ -126,17 +113,12 @@ def complete_mark(
     # Also release any claim
     claims_path = Path(DECOMP_CLAIMS_FILE)
     if claims_path.exists():
-        lock_path = Path(str(claims_path) + ".lock")
-        lock_path.touch(exist_ok=True)
-        with open(lock_path, 'r') as lock_file:
-            try:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-                claims = _load_claims()
-                if function_name in claims:
-                    del claims[function_name]
-                    _save_claims(claims)
-            finally:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        lock_path = claims_path.with_suffix(".json.lock")
+        with file_lock(lock_path, exclusive=True):
+            claims = _load_claims()
+            if function_name in claims:
+                del claims[function_name]
+                _save_claims(claims)
 
     # Also release from state database (non-blocking)
     db_release_claim(function_name)

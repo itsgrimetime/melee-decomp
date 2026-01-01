@@ -1,6 +1,5 @@
 """Claim commands - manage function claims for parallel agents."""
 
-import fcntl
 import json
 import os
 import time
@@ -23,6 +22,7 @@ from ._common import (
     get_subdirectory_worktree_path,
     DEFAULT_MELEE_ROOT,
 )
+from .utils import file_lock, load_json_with_expiry, save_json_atomic
 
 # Maximum broken builds per worktree before blocking claims
 MAX_BROKEN_BUILDS_PER_WORKTREE = 3
@@ -60,30 +60,16 @@ claim_app = typer.Typer(help="Manage function claims for parallel agents")
 
 def _load_claims() -> dict[str, Any]:
     """Load claims from file, removing stale entries."""
-    claims_path = Path(DECOMP_CLAIMS_FILE)
-    if not claims_path.exists():
-        return {}
-
-    try:
-        with open(claims_path, 'r') as f:
-            claims = json.load(f)
-    except (json.JSONDecodeError, IOError):
-        return {}
-
-    # Remove stale claims
-    now = time.time()
-    return {
-        name: info for name, info in claims.items()
-        if now - info.get("timestamp", 0) < DECOMP_CLAIM_TIMEOUT
-    }
+    return load_json_with_expiry(
+        Path(DECOMP_CLAIMS_FILE),
+        timeout_seconds=DECOMP_CLAIM_TIMEOUT,
+        timestamp_field="timestamp",
+    )
 
 
 def _save_claims(claims: dict[str, Any]) -> None:
     """Save claims to file."""
-    claims_path = Path(DECOMP_CLAIMS_FILE)
-    claims_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(claims_path, 'w') as f:
-        json.dump(claims, f, indent=2)
+    save_json_atomic(Path(DECOMP_CLAIMS_FILE), claims)
 
 
 def _check_subdirectory_availability(source_file: str, agent_id: str) -> tuple[bool, str | None, str | None]:
@@ -195,63 +181,57 @@ def claim_add(
             raise typer.Exit(1)
 
     claims_path = Path(DECOMP_CLAIMS_FILE)
-    claims_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = Path(str(claims_path) + ".lock")
-    lock_path.touch(exist_ok=True)
+    lock_path = claims_path.with_suffix(".json.lock")
 
-    with open(lock_path, 'r') as lock_file:
-        try:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-            claims = _load_claims()
+    with file_lock(lock_path, exclusive=True):
+        claims = _load_claims()
 
-            if function_name in claims:
-                existing = claims[function_name]
-                existing_agent = existing.get("agent_id", "unknown")
-                age_mins = (time.time() - existing["timestamp"]) / 60
-                is_self = existing_agent == agent_id
-                if output_json:
-                    print(json.dumps({"success": False, "error": "already_claimed", "by": existing_agent, "age_mins": age_mins, "is_self": is_self}))
-                else:
-                    if is_self:
-                        console.print(f"[yellow]Already claimed by you ({agent_id}) {age_mins:.0f}m ago - claim still active[/yellow]")
-                    else:
-                        console.print(f"[red]CLAIMED BY ANOTHER AGENT: {existing_agent} ({age_mins:.0f}m ago)[/red]")
-                        console.print(f"[red]DO NOT WORK ON THIS FUNCTION - pick a different one[/red]")
-                raise typer.Exit(1)
-
-            claims[function_name] = {
-                "agent_id": agent_id,
-                "timestamp": time.time(),
-                "source_file": source_file,
-                "subdirectory": subdir_key,
-            }
-            _save_claims(claims)
-
-            # Also write to state database (non-blocking)
-            db_add_claim(function_name, agent_id)
-
-            # Lock subdirectory if source file provided
-            worktree_path = None
-            if source_file and subdir_key:
-                db_lock_subdirectory(subdir_key, agent_id)
-                # Get or create the worktree (don't create yet, just get path)
-                from ._common import get_subdirectory_worktree_path
-                worktree_path = str(get_subdirectory_worktree_path(subdir_key))
-
+        if function_name in claims:
+            existing = claims[function_name]
+            existing_agent = existing.get("agent_id", "unknown")
+            age_mins = (time.time() - existing["timestamp"]) / 60
+            is_self = existing_agent == agent_id
             if output_json:
-                result = {"success": True, "function": function_name}
-                if subdir_key:
-                    result["subdirectory"] = subdir_key
-                if worktree_path:
-                    result["worktree"] = worktree_path
-                print(json.dumps(result))
+                print(json.dumps({"success": False, "error": "already_claimed", "by": existing_agent, "age_mins": age_mins, "is_self": is_self}))
             else:
-                console.print(f"[green]Claimed:[/green] {function_name}")
-                if subdir_key:
-                    console.print(f"[dim]Subdirectory:[/dim] {subdir_key}")
-                    console.print(f"[dim]Worktree will be at:[/dim] melee-worktrees/dir-{subdir_key}/")
-        finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                if is_self:
+                    console.print(f"[yellow]Already claimed by you ({agent_id}) {age_mins:.0f}m ago - claim still active[/yellow]")
+                else:
+                    console.print(f"[red]CLAIMED BY ANOTHER AGENT: {existing_agent} ({age_mins:.0f}m ago)[/red]")
+                    console.print(f"[red]DO NOT WORK ON THIS FUNCTION - pick a different one[/red]")
+            raise typer.Exit(1)
+
+        claims[function_name] = {
+            "agent_id": agent_id,
+            "timestamp": time.time(),
+            "source_file": source_file,
+            "subdirectory": subdir_key,
+        }
+        _save_claims(claims)
+
+        # Also write to state database (non-blocking)
+        db_add_claim(function_name, agent_id)
+
+        # Lock subdirectory if source file provided
+        worktree_path = None
+        if source_file and subdir_key:
+            db_lock_subdirectory(subdir_key, agent_id)
+            # Get or create the worktree (don't create yet, just get path)
+            from ._common import get_subdirectory_worktree_path
+            worktree_path = str(get_subdirectory_worktree_path(subdir_key))
+
+        if output_json:
+            result = {"success": True, "function": function_name}
+            if subdir_key:
+                result["subdirectory"] = subdir_key
+            if worktree_path:
+                result["worktree"] = worktree_path
+            print(json.dumps(result))
+        else:
+            console.print(f"[green]Claimed:[/green] {function_name}")
+            if subdir_key:
+                console.print(f"[dim]Subdirectory:[/dim] {subdir_key}")
+                console.print(f"[dim]Worktree will be at:[/dim] melee-worktrees/dir-{subdir_key}/")
 
 
 def _release_claim(function_name: str, release_subdirectory: bool = False) -> tuple[bool, str | None]:
@@ -270,36 +250,31 @@ def _release_claim(function_name: str, release_subdirectory: bool = False) -> tu
         db_release_claim(function_name)
         return False, None
 
-    lock_path = Path(str(claims_path) + ".lock")
-    lock_path.touch(exist_ok=True)
+    lock_path = claims_path.with_suffix(".json.lock")
 
-    with open(lock_path, 'r') as lock_file:
-        try:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-            claims = _load_claims()
+    with file_lock(lock_path, exclusive=True):
+        claims = _load_claims()
 
-            if function_name not in claims:
-                # Also release from DB even if not in JSON
-                db_release_claim(function_name)
-                return False, None
-
-            # Get subdirectory info before deleting
-            claim_info = claims[function_name]
-            subdir_key = claim_info.get("subdirectory")
-
-            del claims[function_name]
-            _save_claims(claims)
-
-            # Also release from state database (non-blocking)
+        if function_name not in claims:
+            # Also release from DB even if not in JSON
             db_release_claim(function_name)
+            return False, None
 
-            # Release subdirectory lock if requested
-            if release_subdirectory and subdir_key:
-                db_unlock_subdirectory(subdir_key)
+        # Get subdirectory info before deleting
+        claim_info = claims[function_name]
+        subdir_key = claim_info.get("subdirectory")
 
-            return True, subdir_key
-        finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        del claims[function_name]
+        _save_claims(claims)
+
+        # Also release from state database (non-blocking)
+        db_release_claim(function_name)
+
+        # Release subdirectory lock if requested
+        if release_subdirectory and subdir_key:
+            db_unlock_subdirectory(subdir_key)
+
+        return True, subdir_key
 
 
 @claim_app.command("release")
