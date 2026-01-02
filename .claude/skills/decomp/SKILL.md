@@ -369,6 +369,18 @@ melee-agent scratch get <slug> --diff              # Show instruction diff
 melee-agent scratch decompile <slug>               # Re-run m2c decompiler
 ```
 
+**Refresh context when headers change:**
+```bash
+melee-agent scratch update-context <slug>          # Rebuild context from repo
+melee-agent scratch update-context <slug> --compile  # Rebuild + compile in one step
+melee-agent scratch compile <slug> -r              # Compile with refreshed context
+```
+
+Use these when:
+- You've fixed a header signature in your worktree
+- You've updated struct definitions
+- Context is stale after pulling upstream changes
+
 **Search context (supports multiple patterns):**
 ```bash
 melee-agent scratch search-context <slug> "HSD_GObj" "FtCmd2" "ColorOverlay"
@@ -556,13 +568,14 @@ melee-agent state urls <func_name>        # Show all URLs (scratch, PR)
 | Build fails after matching | Use `/decomp-fixup` skill to fix header/caller issues, or `--force --diagnosis` |
 | Header has UNK_RET/UNK_PARAMS | Use `/decomp-fixup` skill to update signatures |
 | Can't claim function | Worktree may have 3+ broken builds - run `/decomp-fixup` first |
+| Context outdated after header fix | `melee-agent scratch update-context <slug>` to rebuild from repo |
 
 **NonMatching files:** You CAN work on functions in NonMatching files. The build uses original .dol for linking, so builds always pass. Match % is tracked per-function.
 
 **Header signature bugs:** If assembly shows parameter usage (e.g., `cmpwi r3, 1`) but header declares `void func(void)`:
 1. Use `/decomp-fixup` skill for guidance on fixing headers
 2. Fix the header in your worktree
-3. Re-create scratch: `melee-agent extract get <func> --create-scratch` (context auto-rebuilds)
+3. Update the scratch context: `melee-agent scratch update-context <slug>` (rebuilds from repo)
 
 ## Server Unreachable
 
