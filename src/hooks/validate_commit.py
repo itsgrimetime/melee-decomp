@@ -137,6 +137,80 @@ class CommitValidator:
         self.errors: list[ValidationError] = []
         self.warnings: list[ValidationError] = []
 
+    def validate_worktree_directory(self) -> None:
+        """Check that cwd matches the expected worktree for staged files.
+
+        Prevents committing to the wrong branch when agents lose track of
+        their working directory during complex multi-directory operations.
+        """
+        staged_files = self._get_staged_files()
+
+        # Find C files in melee/src/melee/
+        c_files = [f for f in staged_files if f.startswith("melee/src/melee/") and f.endswith(".c")]
+        if not c_files:
+            return
+
+        # Get the expected subdirectory from the first C file
+        try:
+            from src.cli.worktree_utils import (
+                get_subdirectory_key,
+                get_subdirectory_worktree_path,
+                MELEE_WORKTREES_DIR,
+            )
+        except ImportError:
+            # worktree_utils not available, skip check
+            return
+
+        # Get the subdirectory key for the first staged C file
+        first_c_file = c_files[0]
+        subdir_key = get_subdirectory_key(first_c_file)
+        expected_worktree = get_subdirectory_worktree_path(subdir_key)
+
+        # Check current working directory
+        cwd = Path.cwd()
+
+        # Case 1: We're in a worktree
+        try:
+            cwd.relative_to(MELEE_WORKTREES_DIR)
+            # Check if it's the RIGHT worktree
+            if not cwd.is_relative_to(expected_worktree):
+                # Wrong worktree!
+                current_worktree = cwd
+                # Find the worktree root
+                for parent in [cwd] + list(cwd.parents):
+                    if parent.is_relative_to(MELEE_WORKTREES_DIR) and (parent / ".git").exists():
+                        current_worktree = parent
+                        break
+
+                self.errors.append(ValidationError(
+                    f"Wrong worktree! You're in {current_worktree.name} but staging files for {expected_worktree.name}. "
+                    f"Run 'cd {expected_worktree}' first.",
+                ))
+            return
+        except ValueError:
+            pass  # Not in worktrees dir
+
+        # Case 2: We're in the main melee submodule - warn if worktree exists
+        if expected_worktree.exists():
+            # Get current branch
+            try:
+                result = subprocess.run(
+                    ["git", "branch", "--show-current"],
+                    capture_output=True, text=True, check=True,
+                    cwd=self.melee_root
+                )
+                current_branch = result.stdout.strip()
+            except subprocess.CalledProcessError:
+                current_branch = "unknown"
+
+            expected_branch = f"subdirs/{subdir_key}"
+
+            if current_branch != expected_branch:
+                self.warnings.append(ValidationError(
+                    f"Committing in main repo (branch: {current_branch}) but worktree exists at {expected_worktree}. "
+                    f"Consider using the worktree to keep changes isolated."
+                ))
+
     def _get_staged_files(self) -> list[str]:
         """Get list of staged files."""
         try:
@@ -920,6 +994,8 @@ class CommitValidator:
                 check_results.append(CheckResult(name, "passed"))
 
         # Run checks with appropriate conditions
+        run_check("Worktree directory", self.validate_worktree_directory,
+                  bool(c_files), "no C files")
         run_check("Forbidden files", self.validate_forbidden_files)
         run_check("Conflict markers", self.validate_conflict_markers,
                   bool(c_files or any(f.endswith(".h") for f in staged_files)),

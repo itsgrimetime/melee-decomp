@@ -162,6 +162,14 @@ History: 45% → 71.5% → 85%  # Shows your progress over iterations
 
 **Threshold:** Any improvement over the starting match %. Progress is progress.
 
+**BEFORE committing, verify your location:**
+```bash
+pwd                        # Must be melee-worktrees/dir-<module>/
+git branch --show-current  # Must be subdirs/<module>
+```
+
+If you're in the wrong directory, `cd` to the correct worktree first. The pre-commit hook will catch this, but it's better to verify upfront.
+
 **Use the workflow command:**
 ```bash
 melee-agent workflow finish <function_name> <slug>
