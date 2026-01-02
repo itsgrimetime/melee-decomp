@@ -126,6 +126,45 @@ cd melee && python configure.py && ninja  # Build melee
 docker compose -f docker/docker-compose.yml up -d  # Local decomp.me
 ```
 
+## Context Summarization (Critical for Long Sessions)
+
+When a session runs out of context and gets summarized, **CRITICAL state must be preserved**:
+
+### Must Preserve in Summary
+
+1. **Current worktree path** - e.g., `melee-worktrees/dir-ty/`
+2. **Current branch** - e.g., `subdirs/ty`
+3. **Active function being worked on** - e.g., `un_803083D8`
+4. **Active scratch slug** - e.g., `xYz12`
+5. **Module/subdirectory** - e.g., `ty`
+
+### After Context Reset
+
+Immediately after resuming from a summary, verify your location:
+
+```bash
+# Check which worktree you're in
+pwd
+git branch --show-current
+
+# If not in the expected worktree, navigate there
+cd /Users/mike/code/melee-decomp/melee-worktrees/dir-<module>/
+```
+
+**Common mistake**: After context reset, agents check `git branch` from the project root (`melee-decomp/`) instead of their worktree, see the wrong branch, and start working in the wrong location.
+
+### Worktree State Recovery
+
+If you've lost track of your worktree:
+
+```bash
+# List all worktrees and their branches
+melee-agent worktree list
+
+# Check what functions were recently committed where
+melee-agent state status --category committed
+```
+
 ## Notes
 
 - Compiler: `mwcc_247_92` with `-O4,p -inline auto -nodefaults`

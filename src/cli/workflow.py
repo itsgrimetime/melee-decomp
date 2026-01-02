@@ -81,12 +81,41 @@ def workflow_finish(
 
     # Look up source file from claim to use the correct subdirectory worktree
     source_file = get_source_file_from_claim(function_name)
+    claim_source = "claim"
+
+    # If claim is missing/expired, try to infer source file from function name
+    if not source_file:
+        try:
+            from src.extractor import FunctionExtractor
+            extractor = FunctionExtractor(DEFAULT_MELEE_ROOT)
+            func_info = extractor.extract_function(function_name)
+            if func_info and func_info.file_path:
+                source_file = func_info.file_path
+                claim_source = "auto-detected"
+                console.print(f"[yellow]Note: Claim expired or missing, auto-detected source file[/yellow]")
+                console.print(f"[dim]Source: {source_file}[/dim]")
+        except Exception:
+            pass  # Fall through to melee_root resolution
+
     melee_root = resolve_melee_root(melee_root, target_file=source_file)
 
-    # Warn if not using worktree
-    if AGENT_ID and source_file and "melee-worktrees" not in str(melee_root):
-        console.print(f"[yellow]Warning: Working in main repo, not subdirectory worktree[/yellow]")
-        console.print(f"[dim]Expected worktree for: {source_file}[/dim]")
+    # Show worktree state for clarity (helps after context resets)
+    if source_file:
+        from .worktree_utils import get_subdirectory_key, get_subdirectory_worktree_path
+        subdir_key = get_subdirectory_key(source_file)
+        expected_worktree = get_subdirectory_worktree_path(subdir_key)
+        console.print(f"[dim]Worktree: {melee_root}[/dim]")
+        console.print(f"[dim]Source file: {source_file} ({claim_source})[/dim]")
+
+        # Warn if not using the expected worktree
+        if str(melee_root) != str(expected_worktree) and "melee-worktrees" not in str(melee_root):
+            console.print(f"[yellow]Warning: Working in main repo, not subdirectory worktree[/yellow]")
+            console.print(f"[yellow]Expected: {expected_worktree}[/yellow]")
+            console.print(f"[dim]Tip: Run 'cd {expected_worktree}' to work in the correct worktree[/dim]")
+    elif not source_file:
+        console.print(f"[yellow]Warning: Could not determine source file for {function_name}[/yellow]")
+        console.print(f"[dim]Using: {melee_root}[/dim]")
+        console.print(f"[dim]Tip: Re-claim the function to ensure correct worktree routing[/dim]")
 
     # Check worktree health when using --force
     if force:

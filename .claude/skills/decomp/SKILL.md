@@ -38,6 +38,30 @@ melee-agent claim add lbColl_80008440
 - Manually specify `--melee-root` - if you think you need to, stop and ask the user for confirmation, stating your justification
 - Work on functions in locked subdirectories owned by other agents
 
+## Worktree State Tracking (CRITICAL)
+
+**Track your worktree state throughout the session.** After every context reset or when resuming work:
+
+```bash
+# Verify you're in the correct worktree
+pwd                        # Should be melee-worktrees/dir-<module>/
+git branch --show-current  # Should be subdirs/<module>
+```
+
+**Current session state to remember:**
+- **Worktree path**: `melee-worktrees/dir-{module}/`
+- **Branch**: `subdirs/{module}`
+- **Active function**: (the one you claimed)
+- **Active scratch**: (the slug you're iterating on)
+
+**If you're unsure of your location:**
+```bash
+melee-agent worktree list          # Shows all worktrees
+melee-agent claim list             # Shows your active claims
+```
+
+**Common mistake after context reset:** Running `git branch` from the project root instead of the worktree, seeing the wrong branch, then committing to the wrong location. Always `cd` to your worktree first.
+
 ## Workflow
 
 ### Step 0: Automatic Build Validation
