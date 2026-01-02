@@ -57,7 +57,7 @@ def hook_validate(
     from src.hooks.validate_commit import CommitValidator
 
     validator = CommitValidator(melee_root=DEFAULT_MELEE_ROOT)
-    errors, warnings = validator.run(skip_regressions=skip_regressions)
+    errors, warnings, _check_results = validator.run(skip_regressions=skip_regressions)
 
     if warnings and verbose:
         console.print("\n[yellow]Warnings:[/yellow]")
@@ -154,10 +154,14 @@ exit 0
 # Installed by: melee-agent hook install
 # All worktrees share this hook automatically.
 
+# Capture the worktree root before changing directories
+# This is needed because worktrees have different staged files
+WORKTREE_ROOT="$(git rev-parse --show-toplevel)"
+
 cd "{project_root}"
 
-# Run validation
-python -m src.hooks.validate_commit
+# Run validation, passing the worktree root so it can check staged files correctly
+python -m src.hooks.validate_commit --worktree "$WORKTREE_ROOT"
 
 # Exit with validation result
 exit $?

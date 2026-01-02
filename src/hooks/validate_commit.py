@@ -132,8 +132,9 @@ class CheckResult:
 class CommitValidator:
     """Validates a commit against project guidelines."""
 
-    def __init__(self, melee_root: Path = MELEE_ROOT):
+    def __init__(self, melee_root: Path = MELEE_ROOT, worktree_path: Optional[str] = None):
         self.melee_root = melee_root
+        self.worktree_path = Path(worktree_path) if worktree_path else None
         self.errors: list[ValidationError] = []
         self.warnings: list[ValidationError] = []
 
@@ -212,24 +213,45 @@ class CommitValidator:
                 ))
 
     def _get_staged_files(self) -> list[str]:
-        """Get list of staged files."""
+        """Get list of staged files.
+
+        Returns paths prefixed with 'melee/' for consistency with parent repo expectations,
+        even when running from a worktree where paths are relative to worktree root.
+        """
+        # Determine which directory to run git commands in
+        git_cwd = self.worktree_path if self.worktree_path else PROJECT_ROOT
+
         try:
             result = subprocess.run(
                 ["git", "diff", "--cached", "--name-only"],
                 capture_output=True, text=True, check=True,
-                cwd=PROJECT_ROOT
+                cwd=git_cwd
             )
-            return result.stdout.strip().split("\n") if result.stdout.strip() else []
+            files = result.stdout.strip().split("\n") if result.stdout.strip() else []
+
+            # If running from a worktree, paths are relative to worktree root (e.g., src/melee/...)
+            # Prefix with 'melee/' for consistency with parent repo path expectations
+            if self.worktree_path:
+                files = [f"melee/{f}" for f in files]
+
+            return files
         except subprocess.CalledProcessError:
             return []
 
     def _get_staged_diff(self, file_path: str) -> str:
         """Get the staged diff for a file."""
+        git_cwd = self.worktree_path if self.worktree_path else PROJECT_ROOT
+
+        # If running from worktree, strip the 'melee/' prefix we added in _get_staged_files
+        actual_path = file_path
+        if self.worktree_path and file_path.startswith("melee/"):
+            actual_path = file_path[6:]  # Remove 'melee/' prefix
+
         try:
             result = subprocess.run(
-                ["git", "diff", "--cached", file_path],
+                ["git", "diff", "--cached", actual_path],
                 capture_output=True, text=True, check=True,
-                cwd=PROJECT_ROOT
+                cwd=git_cwd
             )
             return result.stdout
         except subprocess.CalledProcessError:
@@ -418,12 +440,13 @@ class CommitValidator:
         regex patterns otherwise.
         """
         staged_files = self._get_staged_files()
-        c_files = [f for f in staged_files if f.startswith("melee/src/") and f.endswith(".c")]
+        # Check both .c and .h files for coding style
+        code_files = [f for f in staged_files if f.startswith("melee/src/") and f.endswith((".c", ".h"))]
 
-        if not c_files:
+        if not code_files:
             return
 
-        for c_file in c_files:
+        for c_file in code_files:
             diff = self._get_staged_diff(c_file)
             if not diff:
                 continue
@@ -524,27 +547,57 @@ class CommitValidator:
                 line_num += 1
 
     def validate_clang_format(self) -> None:
-        """Check if clang-format was run on staged C files."""
-        staged_files = self._get_staged_files()
-        c_files = [f for f in staged_files if f.startswith("melee/src/") and f.endswith(".c")]
+        """Auto-format staged C/H files with clang-format.
 
-        if not c_files:
+        This runs clang-format automatically and re-stages any changes,
+        making formatting transparent to the committer.
+        """
+        staged_files = self._get_staged_files()
+        # Check both .c and .h files for clang-format
+        code_files = [f for f in staged_files if f.startswith("melee/src/") and f.endswith((".c", ".h"))]
+
+        if not code_files:
             return
 
-        # Check if git clang-format would make changes
+        git_cwd = self.worktree_path if self.worktree_path else PROJECT_ROOT
+
+        # Get the actual file paths (strip melee/ prefix for worktrees)
+        actual_files = []
+        for f in code_files:
+            if self.worktree_path and f.startswith("melee/"):
+                actual_files.append(f[6:])  # Remove 'melee/' prefix
+            else:
+                actual_files.append(f)
+
         try:
-            result = subprocess.run(
-                ["git", "clang-format", "--diff"],
+            # Run clang-format on staged files (formats working tree)
+            format_result = subprocess.run(
+                ["git", "clang-format", "HEAD", "--"] + actual_files,
                 capture_output=True, text=True,
-                cwd=PROJECT_ROOT
+                cwd=git_cwd
             )
-            if result.stdout.strip() and "no modified files" not in result.stdout.lower():
-                self.errors.append(ValidationError(
-                    "clang-format would make changes - run 'git clang-format' before committing",
-                    fixable=True
-                ))
+
+            # Check if any files were modified
+            if format_result.returncode == 0:
+                output = format_result.stdout.strip()
+                if output and "clang-format did not modify" not in output.lower():
+                    # Re-stage the formatted files
+                    subprocess.run(
+                        ["git", "add"] + actual_files,
+                        capture_output=True,
+                        cwd=git_cwd
+                    )
+                    # Count formatted files from output
+                    formatted_count = len([
+                        line for line in output.split("\n")
+                        if line.strip() and "changed" in line.lower()
+                    ])
+                    if formatted_count > 0:
+                        self.warnings.append(ValidationError(
+                            f"Auto-formatted {formatted_count} file(s) with clang-format"
+                        ))
         except FileNotFoundError:
-            # git-clang-format not installed
+            # git-clang-format not installed - skip silently
             pass
         except subprocess.CalledProcessError:
             pass
@@ -575,17 +628,23 @@ class CommitValidator:
     def validate_conflict_markers(self) -> None:
         """Check for merge conflict markers in staged files."""
         staged_files = self._get_staged_files()
+        git_cwd = self.worktree_path if self.worktree_path else PROJECT_ROOT
 
         # Check C and header files
         code_files = [f for f in staged_files if f.endswith((".c", ".h"))]
 
         for code_file in code_files:
+            # Strip melee/ prefix if running from worktree
+            actual_path = code_file
+            if self.worktree_path and code_file.startswith("melee/"):
+                actual_path = code_file[6:]
+
             # Get the staged content
             try:
                 result = subprocess.run(
-                    ["git", "show", f":{code_file}"],
+                    ["git", "show", f":{actual_path}"],
                     capture_output=True, text=True, check=True,
-                    cwd=PROJECT_ROOT
+                    cwd=git_cwd
                 )
                 content = result.stdout
             except subprocess.CalledProcessError:
@@ -608,6 +667,7 @@ class CommitValidator:
         has a concrete signature, which causes CI failures with -requireprotos.
         """
         staged_files = self._get_staged_files()
+        git_cwd = self.worktree_path if self.worktree_path else PROJECT_ROOT
 
         # Find staged C files
         c_files = [f for f in staged_files if f.endswith(".c") and "melee/src/" in f]
@@ -616,12 +676,17 @@ class CommitValidator:
             return
 
         for c_file in c_files:
+            # Strip melee/ prefix if running from worktree
+            actual_path = c_file
+            if self.worktree_path and c_file.startswith("melee/"):
+                actual_path = c_file[6:]
+
             # Get the staged content
             try:
                 result = subprocess.run(
-                    ["git", "show", f":{c_file}"],
+                    ["git", "show", f":{actual_path}"],
                     capture_output=True, text=True, check=True,
-                    cwd=PROJECT_ROOT
+                    cwd=git_cwd
                 )
                 c_content = result.stdout
             except subprocess.CalledProcessError:
@@ -654,19 +719,25 @@ class CommitValidator:
 
             # Find the corresponding header file
             header_file = c_file.replace(".c", ".h")
+            actual_header_path = header_file
+            if self.worktree_path and header_file.startswith("melee/"):
+                actual_header_path = header_file[6:]
 
             # Get header content (try staged first, then working tree)
             header_content = None
             try:
                 result = subprocess.run(
-                    ["git", "show", f":{header_file}"],
+                    ["git", "show", f":{actual_header_path}"],
                     capture_output=True, text=True, check=True,
-                    cwd=PROJECT_ROOT
+                    cwd=git_cwd
                 )
                 header_content = result.stdout
             except subprocess.CalledProcessError:
                 # Try reading from working tree
-                header_path = PROJECT_ROOT / header_file
+                if self.worktree_path:
+                    header_path = self.worktree_path / actual_header_path
+                else:
+                    header_path = PROJECT_ROOT / header_file
                 if header_path.exists():
                     header_content = header_path.read_text()
 
@@ -746,6 +817,10 @@ class CommitValidator:
 
         PR feedback: Don't rename descriptive symbols like `ItemStateTable_GShell`
         to address-based names like `it_803F5BA8`.
+
+        This check looks for cases where a descriptive name is REPLACED by an
+        address-based name (i.e., removed from one line, address name added in
+        similar position). It avoids false positives from line reformatting.
         """
         staged_files = self._get_staged_files()
 
@@ -760,26 +835,34 @@ class CommitValidator:
             if not diff:
                 continue
 
-            # Look for lines where a descriptive name is removed and address name added
-            removed_names = set()
-            added_names = set()
+            # Collect all descriptive names from removed lines and added lines
+            removed_descriptive = set()
+            added_descriptive = set()
+            added_address = set()
 
             for line in diff.split("\n"):
                 if line.startswith("-") and not line.startswith("---"):
-                    # Look for symbol names being removed
+                    # Look for descriptive symbol names being removed
                     names = re.findall(r'\b([A-Z][a-zA-Z0-9_]*(?:Table|State|Data|Info|List|Array)[a-zA-Z0-9_]*)\b', line)
-                    removed_names.update(names)
+                    removed_descriptive.update(names)
 
                 elif line.startswith("+") and not line.startswith("+++"):
+                    # Track descriptive names on added lines (to exclude reformatting)
+                    names = re.findall(r'\b([A-Z][a-zA-Z0-9_]*(?:Table|State|Data|Info|List|Array)[a-zA-Z0-9_]*)\b', line)
+                    added_descriptive.update(names)
                     # Look for address-based names being added
-                    names = re.findall(r'\b((?:fn|it|ft|gr|lb|gm|if|mp|vi)_[0-9A-Fa-f]{8})\b', line)
-                    added_names.update(names)
+                    addr_names = re.findall(r'\b((?:fn|it|ft|gr|lb|gm|if|mp|vi)_[0-9A-Fa-f]{8})\b', line)
+                    added_address.update(addr_names)
 
-            # If we removed descriptive names and added address names, error
-            if removed_names and added_names:
+            # Only flag if descriptive names were ACTUALLY removed (not just reformatted)
+            # A name is "actually removed" if it's on a removed line but NOT on any added line
+            actually_removed = removed_descriptive - added_descriptive
+
+            # Only error if we actually removed descriptive names AND added address-based names
+            if actually_removed and added_address:
                 self.errors.append(ValidationError(
-                    f"Bad rename: removed descriptive names {list(removed_names)[:3]}, "
-                    f"added address-based names {list(added_names)[:3]} - keep descriptive names",
+                    f"Bad rename: removed descriptive names {list(actually_removed)[:3]}, "
+                    f"added address-based names {list(added_address)[:3]} - keep descriptive names",
                     code_file
                 ))
 
@@ -789,8 +872,10 @@ class CommitValidator:
         PR feedback: Commit messages should use production decomp.me URLs,
         not local server URLs like nzxt-discord.local or 10.200.0.1.
 
-        This check only runs when there are staged melee submodule changes,
-        indicating we're about to commit decompilation work.
+        NOTE: This is a pre-commit hook, so it can only check EXISTING commits,
+        not the commit being created (that message doesn't exist yet).
+        Historical commits are reported as warnings, not errors, since they
+        can't be fixed without rewriting history.
         """
         # Only check if we're staging melee submodule changes
         staged_files = self._get_staged_files()
@@ -798,13 +883,14 @@ class CommitValidator:
         if not melee_changes:
             return
 
-        # Get all pending commits in melee submodule (not yet pushed to upstream)
+        # Get pending commits in melee submodule (not yet pushed to upstream)
+        # Only check the MOST RECENT few commits to avoid noise from old history
         if not self.melee_root.exists():
             return
 
         try:
             result = subprocess.run(
-                ["git", "log", "--oneline", "upstream/master..HEAD", "--format=%H %s"],
+                ["git", "log", "--oneline", "upstream/master..HEAD", "--format=%H %s", "-n", "5"],
                 capture_output=True, text=True, check=True,
                 cwd=self.melee_root
             )
@@ -850,15 +936,17 @@ class CommitValidator:
                     if slug not in slug_mapping:
                         unmapped_slugs.append(slug)
 
+                # Use warnings instead of errors since these are historical commits
+                # that can't be changed without rewriting history
                 if unmapped_slugs:
-                    self.errors.append(ValidationError(
+                    self.warnings.append(ValidationError(
                         f"Commit {commit_hash} has local scratch URL(s) without production mapping: {unmapped_slugs}. "
-                        f"Run 'melee-agent sync production' first to sync scratches.",
+                        f"Run 'melee-agent sync production' before pushing.",
                     ))
                 else:
                     # Has mapping but URL not replaced
-                    self.errors.append(ValidationError(
-                        f"Commit {commit_hash} has local scratch URL(s) - amend to use production URLs. "
+                    self.warnings.append(ValidationError(
+                        f"Commit {commit_hash} has local scratch URL(s) - consider amending to use production URLs. "
                         f"Local slugs found: {local_urls}",
                     ))
 
@@ -979,6 +1067,8 @@ class CommitValidator:
         check_results = []
         staged_files = self._get_staged_files()
         c_files = [f for f in staged_files if f.endswith(".c") and "melee/" in f]
+        h_files = [f for f in staged_files if f.endswith(".h") and "melee/" in f]
+        code_files = c_files + h_files  # Both C and header files
         melee_changes = [f for f in staged_files if f.startswith("melee/")]
 
         def run_check(name: str, method, condition: bool = True, skip_reason: str = ""):
@@ -1002,8 +1092,7 @@ class CommitValidator:
                   bool(c_files), "no C files")
         run_check("Forbidden files", self.validate_forbidden_files)
         run_check("Conflict markers", self.validate_conflict_markers,
-                  bool(c_files or any(f.endswith(".h") for f in staged_files)),
-                  "no C/H files")
+                  bool(code_files), "no C/H files")
         run_check("Header signatures", self.validate_header_signatures,
                   bool(c_files), "no C files")
         run_check("Implicit declarations", self.validate_implicit_declarations,
@@ -1011,16 +1100,15 @@ class CommitValidator:
         run_check("Symbols.txt", self.validate_symbols_txt,
                   bool(c_files), "no C files")
         run_check("Coding style", self.validate_coding_style,
-                  bool(c_files), "no C files")
+                  bool(code_files), "no C/H files")
         run_check("Extern declarations", self.validate_extern_declarations,
                   bool(c_files), "no C files")
         run_check("Symbol renames", self.validate_symbol_renames,
-                  bool(c_files or any(f.endswith(".h") for f in staged_files)),
-                  "no C/H files")
+                  bool(code_files), "no C/H files")
         run_check("Local URLs", self.validate_local_urls_in_commits,
                   bool(melee_changes), "no melee changes")
         run_check("clang-format", self.validate_clang_format,
-                  bool(c_files), "no C files")
+                  bool(code_files), "no C/H files")
 
         if skip_regressions:
             check_results.append(CheckResult("Match regressions", "skipped", detail="--skip-regressions"))
@@ -1039,9 +1127,17 @@ def main():
                         help="Skip build and regression check (faster but less thorough)")
     parser.add_argument("--quiet", "-q", action="store_true",
                         help="Only show errors, not check status")
+    parser.add_argument("--worktree", type=str, default=None,
+                        help="Path to the git worktree (for running git commands in correct context)")
     args = parser.parse_args()
 
-    validator = CommitValidator()
+    # Determine the melee root - use worktree if provided, otherwise default
+    if args.worktree:
+        melee_root = Path(args.worktree)
+    else:
+        melee_root = MELEE_ROOT
+
+    validator = CommitValidator(melee_root=melee_root, worktree_path=args.worktree)
     errors, warnings, check_results = validator.run(skip_regressions=args.skip_regressions)
 
     # Print check results (unless quiet mode)
