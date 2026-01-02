@@ -111,7 +111,22 @@ melee-agent claim add <function_name>  # Claims expire after 1 hour
 melee-agent extract get <function_name> --create-scratch
 ```
 
-This automatically rebuilds context files to pick up any header changes you've made. If forking an existing scratch, the context is updated with your local version.
+This automatically:
+- Rebuilds context files to pick up any header changes
+- **Preprocesses context** (via `gcc -E`) for m2c decompilation only
+- Runs the **m2c decompiler** to generate initial C code with proper type information
+- **Restores original context** for MWCC compilation (preprocessed context has GCC-isms)
+- If forking an existing scratch, updates context with your local version
+
+**m2c auto-decompilation** provides a rough approximation of the C code with proper types (e.g., `HSD_GObj*` instead of `void*`). Use it as a starting point, then refine.
+
+**To re-run decompilation** on an existing scratch (e.g., after updating context):
+```bash
+melee-agent scratch decompile <slug>              # Show decompiled code (preprocesses context)
+melee-agent scratch decompile <slug> --apply      # Apply to scratch source
+melee-agent scratch decompile <slug> -o /tmp/f.c  # Save to file
+melee-agent scratch decompile <slug> --no-context # Skip context (faster but less accurate)
+```
 
 Then read the source file in `melee/src/` for context. Look for:
 - Function signature and local struct definitions (must include these!)
@@ -132,7 +147,7 @@ void func(s32 arg0) {
 EOF
 ```
 
-**IMPORTANT:** Always use `cat << 'EOF' | ... --stdin` pattern. The quoted `'EOF'` prevents shell expansion of `!`, `!=`, `$`, etc. Do NOT use `--code` with inline source - it corrupts special characters.
+**IMPORTANT:** Always use `cat << 'EOF' | ... --stdin` pattern. The quoted `'EOF'` prevents shell expansion of !, !=, $, etc. Do NOT use `--code` with inline source - it corrupts special characters.
 
 The compile shows **match % history**:
 ```
@@ -351,6 +366,7 @@ melee-agent struct callback                   # List all known callback types
 melee-agent scratch get <slug> --context           # Show context (truncated)
 melee-agent scratch get <slug> --grep "StructName" # Search context for pattern
 melee-agent scratch get <slug> --diff              # Show instruction diff
+melee-agent scratch decompile <slug>               # Re-run m2c decompiler
 ```
 
 **Search context (supports multiple patterns):**

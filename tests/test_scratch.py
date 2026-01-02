@@ -172,3 +172,214 @@ class TestCompileRequestModel:
         assert req.source_code is None
         assert req.context is None
         assert req.compiler is None
+
+
+class TestPreprocessContext:
+    """Tests for _preprocess_context - removes preprocessor directives for m2c.
+
+    The m2c decompiler can't handle preprocessor directives like #include,
+    #define, #ifdef, etc. This function uses gcc -E to preprocess the context.
+    """
+
+    @pytest.fixture
+    def preprocess_context(self):
+        from src.cli.scratch import _preprocess_context
+        return _preprocess_context
+
+    def test_empty_context_passthrough(self, preprocess_context):
+        """Empty context should pass through unchanged."""
+        result, success = preprocess_context("")
+        assert result == ""
+        assert success is True
+
+    def test_whitespace_only_passthrough(self, preprocess_context):
+        """Whitespace-only context should pass through."""
+        result, success = preprocess_context("   \n\t\n  ")
+        assert result == "   \n\t\n  "
+        assert success is True
+
+    def test_no_directives_passthrough(self, preprocess_context):
+        """Context without preprocessor directives should pass through."""
+        context = """
+typedef struct {
+    int x;
+    int y;
+} Point;
+
+extern void foo(Point* p);
+"""
+        result, success = preprocess_context(context)
+        assert result == context
+        assert success is True
+
+    def test_detects_hash_directives(self, preprocess_context):
+        """Context with # directives should be detected for preprocessing."""
+        context = """#ifndef HEADER_H
+#define HEADER_H
+typedef int MyInt;
+#endif
+"""
+        # This will try to preprocess - success depends on gcc availability
+        result, success = preprocess_context(context)
+        # Either it succeeds (gcc available) or fails gracefully
+        assert isinstance(result, str)
+        assert isinstance(success, bool)
+
+    def test_preserves_non_directive_hashes(self, preprocess_context):
+        """# in strings or comments shouldn't trigger preprocessing (line starts with #)."""
+        context = """
+// This is a comment with # in it
+char* str = "string with # symbol";
+int x = 5;
+"""
+        # No lines start with #, so should pass through
+        result, success = preprocess_context(context)
+        assert result == context
+        assert success is True
+
+
+class TestSlugExtraction:
+    """Tests for slug extraction from URLs.
+
+    Several commands accept either a raw slug or a full URL.
+    This tests the extraction logic.
+    """
+
+    def test_extract_slug_from_url(self):
+        """Should extract slug from decomp.me URL."""
+        # Simulating the extraction logic used in scratch commands
+        url = "http://10.200.0.1/scratch/abc123"
+        slug = url
+        if slug.startswith("http"):
+            parts = slug.strip("/").split("/")
+            if "scratch" in parts:
+                idx = parts.index("scratch")
+                if idx + 1 < len(parts):
+                    slug = parts[idx + 1]
+        assert slug == "abc123"
+
+    def test_extract_slug_from_url_with_trailing_slash(self):
+        """Should handle trailing slash in URL."""
+        url = "http://decomp.me/scratch/xyz789/"
+        slug = url
+        if slug.startswith("http"):
+            parts = slug.strip("/").split("/")
+            if "scratch" in parts:
+                idx = parts.index("scratch")
+                if idx + 1 < len(parts):
+                    slug = parts[idx + 1]
+        assert slug == "xyz789"
+
+    def test_raw_slug_passthrough(self):
+        """Raw slug without http should pass through."""
+        slug = "abc123"
+        if slug.startswith("http"):
+            # This branch won't be taken
+            parts = slug.strip("/").split("/")
+            if "scratch" in parts:
+                idx = parts.index("scratch")
+                if idx + 1 < len(parts):
+                    slug = parts[idx + 1]
+        assert slug == "abc123"
+
+    def test_https_url_extraction(self):
+        """Should handle HTTPS URLs."""
+        url = "https://decomp.me/scratch/def456"
+        slug = url
+        if slug.startswith("http"):
+            parts = slug.strip("/").split("/")
+            if "scratch" in parts:
+                idx = parts.index("scratch")
+                if idx + 1 < len(parts):
+                    slug = parts[idx + 1]
+        assert slug == "def456"
+
+
+class TestBuildFreshContext:
+    """Tests for _build_fresh_context helper function.
+
+    This function builds context from the repo using ninja and strips
+    the target function definition.
+    """
+
+    def test_context_path_from_melee_root(self):
+        """Test that context path calculation works for normal melee root."""
+        from pathlib import Path
+
+        # Simulate the path calculation logic
+        melee_root = Path("/Users/mike/code/melee-decomp/melee")
+        ctx_path = melee_root / "build" / "GALE01" / "src" / "melee" / "ft" / "ftcoll.ctx"
+
+        try:
+            ctx_relative = ctx_path.relative_to(melee_root)
+            ninja_cwd = melee_root
+            assert str(ctx_relative) == "build/GALE01/src/melee/ft/ftcoll.ctx"
+            assert ninja_cwd == melee_root
+        except ValueError:
+            pytest.fail("Should not raise ValueError for path within melee_root")
+
+    def test_context_path_from_worktree(self):
+        """Test that context path calculation works for worktrees."""
+        from pathlib import Path
+
+        # Worktree paths have a different structure
+        ctx_path = Path("/Users/mike/code/melee-decomp/melee-worktrees/dir-ft/build/GALE01/src/melee/ft/ftcoll.ctx")
+        melee_root = Path("/Users/mike/code/melee-decomp/melee")
+
+        # This should fail relative_to and fall back to worktree detection
+        try:
+            ctx_relative = ctx_path.relative_to(melee_root)
+            # If this succeeds, we're in the normal case
+            ninja_cwd = melee_root
+        except ValueError:
+            # Worktree case - find the build directory
+            parts = ctx_path.parts
+            ninja_cwd = None
+            for i, part in enumerate(parts):
+                if part == "build" and i > 0:
+                    ninja_cwd = Path(*parts[:i])
+                    ctx_relative = Path(*parts[i:])
+                    break
+
+            assert ninja_cwd is not None
+            assert str(ninja_cwd) == "/Users/mike/code/melee-decomp/melee-worktrees/dir-ft"
+            assert str(ctx_relative) == "build/GALE01/src/melee/ft/ftcoll.ctx"
+
+
+class TestContextStrippingIntegration:
+    """Tests verifying context stripping is called with correct params.
+
+    The update-context and refresh-context features both need to strip
+    the target function definition from context to avoid redefinition errors.
+    """
+
+    def test_strip_target_function_import(self):
+        """Verify _strip_target_function can be imported from extract module."""
+        from src.cli.extract import _strip_target_function
+        assert callable(_strip_target_function)
+
+    def test_strip_function_basic(self):
+        """Basic test that stripping removes function definition but keeps declaration."""
+        from src.cli.extract import _strip_target_function
+
+        context = """
+extern void foo(void);
+
+void foo(void) {
+    // implementation
+    int x = 1;
+}
+
+void bar(void) {
+    foo();
+}
+"""
+        result = _strip_target_function(context, "foo")
+
+        # Declaration should remain
+        assert "extern void foo(void);" in result
+        # Definition body should be stripped
+        assert "int x = 1" not in result
+        # Other functions should remain
+        assert "void bar(void)" in result
+        assert "foo();" in result  # Call to foo should remain

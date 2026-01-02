@@ -34,10 +34,13 @@ All operations via `python -m src.cli` or `melee-agent`:
 
 ```bash
 # Scratch operations
-melee-agent scratch create <func>     # Create scratch from melee repo
+melee-agent scratch create <func>     # Create scratch from melee repo (auto-decompiles)
 melee-agent scratch get <slug>        # Fetch scratch details
 melee-agent scratch compile <slug> -s <file>  # Update + compile in one step
 melee-agent scratch compile <slug>    # Compile and diff
+melee-agent scratch compile <slug> -r # Compile with refreshed context from repo
+melee-agent scratch decompile <slug>  # Re-run m2c decompiler on scratch
+melee-agent scratch update-context <slug>  # Rebuild context from repo headers
 
 # Function discovery
 melee-agent extract list --max-match 0.50  # Find unmatched functions
@@ -171,3 +174,4 @@ melee-agent state status --category committed
 - Platform: `gc_wii` (GameCube/Wii PowerPC)
 - Match threshold: 95%+ with only register/offset diffs is commit-ready
 - Always include file-local structs in scratch source (not in headers)
+- **Use CLI tools, not curl** - All API operations should go through `melee-agent` commands, not raw curl/HTTP calls

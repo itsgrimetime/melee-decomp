@@ -161,8 +161,15 @@ def scratch_create(
     context_file: Annotated[
         Optional[Path], typer.Option("--context", "-c", help="Path to context file")
     ] = None,
+    auto_decompile: Annotated[
+        bool, typer.Option("--decompile", "-d", help="Run m2c decompiler for initial code (recommended)")
+    ] = True,
 ):
-    """Create a new scratch for a function on decomp.me."""
+    """Create a new scratch for a function on decomp.me.
+
+    By default, runs the m2c decompiler to generate initial C code.
+    Use --no-decompile to skip auto-decompilation and start with an empty stub.
+    """
     api_url = api_url or get_local_api_url()
     from src.client import DecompMeAPIClient
     from src.extractor import extract_function
@@ -269,18 +276,34 @@ def scratch_create(
 
         async with DecompMeAPIClient(base_url=api_url) as client:
             from src.client import ScratchCreate
-            scratch = await client.create_scratch(
-                ScratchCreate(
-                    name=func.name,
-                    target_asm=func.asm,
-                    context=melee_context,
-                    compiler=compiler,
-                    compiler_flags="-O4,p -nodefaults -fp hard -Cpp_exceptions off -enum int -fp_contract on -inline auto",
-                    source_code="// TODO: Decompile this function\n",
-                    diff_label=func.name,
-                )
+
+            # If auto-decompiling, preprocess context to remove preprocessor directives
+            # that m2c can't handle. Use preprocessed for decompilation, but store
+            # original context in scratch for compilation (compiler handles directives fine)
+            decompile_context = melee_context
+            if auto_decompile and melee_context:
+                preprocessed, success = _preprocess_context(melee_context)
+                if success and preprocessed != melee_context:
+                    decompile_context = preprocessed
+                    console.print(f"[dim]Preprocessed context for m2c ({len(melee_context):,} → {len(preprocessed):,} bytes)[/dim]")
+
+            # Build scratch params - omit source_code to trigger auto-decompilation
+            scratch_params = ScratchCreate(
+                name=func.name,
+                target_asm=func.asm,
+                context=decompile_context if auto_decompile else melee_context,
+                compiler=compiler,
+                compiler_flags="-O4,p -nodefaults -fp hard -Cpp_exceptions off -enum int -fp_contract on -inline auto",
+                diff_label=func.name,
             )
 
+            # Only set source_code if NOT auto-decompiling
+            if not auto_decompile:
+                scratch_params.source_code = "// TODO: Decompile this function\n"
+
+            scratch = await client.create_scratch(scratch_params)
+
+            # Claim ownership first (needed for subsequent updates)
             if scratch.claim_token:
                 _save_scratch_token(scratch.slug, scratch.claim_token)
                 try:
@@ -288,6 +311,20 @@ def scratch_create(
                     console.print(f"[dim]Claimed ownership of scratch[/dim]")
                 except Exception as e:
                     console.print(f"[yellow]Warning: Could not claim scratch: {e}[/yellow]")
+
+            # Restore original context (with preprocessor directives) for MWCC compilation.
+            # The preprocessed context was only needed for m2c decompilation.
+            # MWCC needs the original because gcc -E introduces incompatible features:
+            # - __attribute__((noreturn)) not supported by MWCC
+            # - _Static_assert is C11, not supported by MWCC
+            # - Assert macro expansions cause type mismatches
+            if auto_decompile and decompile_context != melee_context:
+                from src.client import ScratchUpdate
+                try:
+                    await client.update_scratch(scratch.slug, ScratchUpdate(context=melee_context))
+                    console.print(f"[dim]Restored original context for MWCC[/dim]")
+                except Exception as e:
+                    console.print(f"[yellow]Warning: Could not restore context: {e}[/yellow]")
 
         return scratch
 
@@ -377,6 +414,12 @@ def scratch_compile(
     from_stdin: Annotated[
         bool, typer.Option("--stdin", help="Read source code from stdin (avoids shell escaping issues)")
     ] = False,
+    refresh_context: Annotated[
+        bool, typer.Option("--refresh-context", "-r", help="Rebuild context from repo before compiling")
+    ] = False,
+    melee_root: Annotated[
+        Path, typer.Option("--melee-root", "-m", help="Path to melee submodule (for --refresh-context)")
+    ] = DEFAULT_MELEE_ROOT,
     api_url: Annotated[
         Optional[str], typer.Option("--api-url", help="Decomp.me API URL (auto-detected)")
     ] = None,
@@ -393,6 +436,8 @@ def scratch_compile(
     If --stdin is provided, reads source code from stdin (recommended for programmatic use).
     If --code is provided, updates from inline string (may have shell escaping issues).
     Only one of --source, --stdin, or --code can be specified.
+
+    If --refresh-context is provided, rebuilds the context file from the repo before compiling.
     """
     api_url = api_url or get_local_api_url()
     from src.client import DecompMeAPIClient, ScratchUpdate, DecompMeAPIError
@@ -419,13 +464,58 @@ def scratch_compile(
     async def compile_scratch():
         async with DecompMeAPIClient(base_url=api_url) as client:
             # Early ownership verification if we're going to update
-            if source_code is not None:
+            if source_code is not None or refresh_context:
                 can_update, reason = await _verify_scratch_ownership(client, slug)
                 if not can_update:
                     console.print(f"[yellow]Warning:[/yellow] {reason}")
                     console.print("[dim]Update may fail - consider creating a new scratch if it does[/dim]")
 
-            # Update source first if provided
+            # Refresh context if requested
+            if refresh_context:
+                # Get scratch to find function name
+                scratch = await client.get_scratch(slug)
+                func_name = scratch.name
+                console.print(f"[dim]Refreshing context for {func_name}...[/dim]")
+
+                # Try to find source file from database
+                src_file = None
+                from src.db import get_db
+                try:
+                    db = get_db()
+                    func_info = db.get_function(func_name)
+                    if func_info and func_info.get('source_file'):
+                        src_file = func_info['source_file']
+                except Exception:
+                    pass
+
+                # If not in DB, try extractor
+                if not src_file:
+                    from src.extractor import extract_function
+                    try:
+                        func = await extract_function(melee_root, func_name)
+                        if func and func.file_path:
+                            src_file = func.file_path
+                    except Exception:
+                        pass
+
+                # Build fresh context
+                context, ctx_path = await _build_fresh_context(func_name, src_file, melee_root)
+                if context:
+                    try:
+                        await client.update_scratch(slug, ScratchUpdate(context=context))
+                        console.print(f"[dim]Updated context ({len(context):,} bytes)[/dim]")
+                    except DecompMeAPIError as e:
+                        if "403" in str(e):
+                            if await _handle_403_error(client, slug, e, "update context"):
+                                await client.update_scratch(slug, ScratchUpdate(context=context))
+                            else:
+                                raise typer.Exit(1)
+                        else:
+                            raise
+                else:
+                    console.print("[yellow]Warning: Could not refresh context[/yellow]")
+
+            # Update source if provided
             if source_code is not None:
                 try:
                     await client.update_scratch(slug, ScratchUpdate(source_code=source_code))
@@ -535,6 +625,9 @@ def scratch_get(
     api_url: Annotated[
         Optional[str], typer.Option("--api-url", help="Decomp.me API URL (auto-detected)")
     ] = None,
+    output_file: Annotated[
+        Optional[Path], typer.Option("--output", "-o", help="Write source code to file (full, not truncated)")
+    ] = None,
     output_json: Annotated[
         bool, typer.Option("--json", help="Output as JSON")
     ] = False,
@@ -554,7 +647,10 @@ def scratch_get(
         int, typer.Option("-C", help="Context lines around grep matches")
     ] = 3,
 ):
-    """Get full scratch information."""
+    """Get full scratch information.
+
+    Use --output to save the full source code to a file (avoids terminal truncation).
+    """
     api_url = api_url or get_local_api_url()
     from src.client import DecompMeAPIClient
 
@@ -639,10 +735,18 @@ def scratch_get(
                 if len(scratch.context) > 5000:
                     console.print(f"\n[dim]... truncated ({len(scratch.context) - 5000:,} more bytes, use --grep to search)[/dim]")
         else:
-            console.print(f"\n[bold]Source Code:[/bold]")
-            # Use markup=False to prevent Rich from interpreting brackets like [t0] as tags
-            source_display = scratch.source_code[:2000] if len(scratch.source_code) > 2000 else scratch.source_code
-            console.print(source_display, markup=False)
+            # Write to file if requested
+            if output_file:
+                output_file.write_text(scratch.source_code)
+                console.print(f"\n[green]Wrote source code to:[/green] {output_file}")
+                console.print(f"[dim]{len(scratch.source_code):,} bytes[/dim]")
+            else:
+                console.print(f"\n[bold]Source Code:[/bold]")
+                # Use markup=False to prevent Rich from interpreting brackets like [t0] as tags
+                source_display = scratch.source_code[:2000] if len(scratch.source_code) > 2000 else scratch.source_code
+                console.print(source_display, markup=False)
+                if len(scratch.source_code) > 2000:
+                    console.print(f"\n[dim]... truncated ({len(scratch.source_code) - 2000:,} more bytes, use -o to save full file)[/dim]")
 
     if show_diff and diff_output:
         _format_diff_output(diff_output, max_lines)
@@ -687,6 +791,170 @@ def scratch_search(
             table.add_row(s.slug, s.name, s.platform)
 
         console.print(table)
+
+
+def _preprocess_context(context: str) -> tuple[str, bool]:
+    """Preprocess C context to remove preprocessor directives.
+
+    m2c doesn't support preprocessor directives, so we run gcc -E
+    to expand macros and remove #include/#define/#ifdef etc.
+
+    Args:
+        context: Raw C context with preprocessor directives
+
+    Returns:
+        Tuple of (preprocessed context, success)
+    """
+    import subprocess
+    import tempfile
+
+    if not context or not context.strip():
+        return context, True
+
+    # Check if context has preprocessor directives
+    if not any(line.strip().startswith('#') for line in context.split('\n')):
+        return context, True  # No preprocessing needed
+
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.c', delete=False) as f:
+            f.write(context)
+            temp_path = f.name
+
+        # Run gcc -E to preprocess (expand macros, remove directives)
+        # -P removes line markers, -nostdinc avoids system headers
+        result = subprocess.run(
+            ['gcc', '-E', '-P', '-nostdinc', '-x', 'c', temp_path],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+        # Clean up temp file
+        import os
+        os.unlink(temp_path)
+
+        if result.returncode == 0:
+            return result.stdout, True
+        else:
+            # Preprocessing failed, return original
+            return context, False
+
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return context, False
+
+
+@scratch_app.command("decompile")
+def scratch_decompile(
+    slug: Annotated[str, typer.Argument(help="Scratch slug/ID or URL")],
+    api_url: Annotated[
+        Optional[str], typer.Option("--api-url", help="Decomp.me API URL (auto-detected)")
+    ] = None,
+    output_file: Annotated[
+        Optional[Path], typer.Option("--output", "-o", help="Write decompiled code to file")
+    ] = None,
+    apply: Annotated[
+        bool, typer.Option("--apply", "-a", help="Apply decompiled code to scratch source")
+    ] = False,
+    show_source: Annotated[
+        bool, typer.Option("--show", "-s", help="Show the decompiled code (default if no -o or -a)")
+    ] = False,
+    no_context: Annotated[
+        bool, typer.Option("--no-context", help="Decompile without context (faster, less accurate)")
+    ] = False,
+):
+    """Get m2c automatic decompilation for a scratch.
+
+    This runs the m2c decompiler on the target assembly to generate
+    an initial C code approximation. Useful for:
+    - Getting a starting point when creating a new scratch
+    - Re-decompiling after updating context
+    - Comparing m2c output with manual decompilation
+
+    By default, preprocesses the context (via gcc -E) to remove #include/#define
+    directives that m2c doesn't support. Use --no-context to skip context entirely.
+
+    Examples:
+        # Show decompiled code
+        melee-agent scratch decompile abc123
+
+        # Save to file
+        melee-agent scratch decompile abc123 -o /tmp/decomp_abc123.c
+
+        # Apply to scratch (updates source code)
+        melee-agent scratch decompile abc123 --apply
+
+        # Decompile without context (faster)
+        melee-agent scratch decompile abc123 --no-context
+    """
+    api_url = api_url or get_local_api_url()
+    from src.client import DecompMeAPIClient, ScratchUpdate, DecompMeAPIError
+
+    # Extract slug from URL if needed
+    if slug.startswith("http"):
+        parts = slug.strip("/").split("/")
+        if "scratch" in parts:
+            idx = parts.index("scratch")
+            if idx + 1 < len(parts):
+                slug = parts[idx + 1]
+
+    # Default to showing if no output action specified
+    if not output_file and not apply:
+        show_source = True
+
+    async def decompile():
+        async with DecompMeAPIClient(base_url=api_url) as client:
+            # First get the scratch to show metadata and get context
+            scratch = await client.get_scratch(slug)
+
+            # Determine context to use for decompilation
+            decompile_context = None
+            if no_context:
+                decompile_context = ""
+                console.print(f"[dim]Decompiling without context[/dim]")
+            elif scratch.context:
+                # Preprocess context to remove preprocessor directives
+                preprocessed, success = _preprocess_context(scratch.context)
+                if success and preprocessed != scratch.context:
+                    decompile_context = preprocessed
+                    console.print(f"[dim]Preprocessed context ({len(scratch.context):,} → {len(preprocessed):,} bytes)[/dim]")
+                elif not success:
+                    console.print(f"[yellow]Warning: Context preprocessing failed, using raw context[/yellow]")
+
+            # Run decompilation with preprocessed context
+            result = await client.decompile_scratch(slug, context=decompile_context)
+
+            # Optionally apply to scratch
+            if apply:
+                try:
+                    await client.update_scratch(slug, ScratchUpdate(source_code=result.decompilation))
+                except DecompMeAPIError as e:
+                    if "403" in str(e):
+                        if await _handle_403_error(client, slug, e, "update"):
+                            await client.update_scratch(slug, ScratchUpdate(source_code=result.decompilation))
+                        else:
+                            raise typer.Exit(1)
+                    else:
+                        raise
+
+            return scratch, result.decompilation
+
+    scratch, decompiled = asyncio.run(decompile())
+
+    # Report what happened
+    console.print(f"[bold cyan]{scratch.name}[/bold cyan] ({slug})")
+    console.print(f"[dim]Decompiled {len(decompiled):,} bytes of C code[/dim]")
+
+    if output_file:
+        output_file.write_text(decompiled)
+        console.print(f"[green]Wrote to:[/green] {output_file}")
+
+    if apply:
+        console.print(f"[green]Applied to scratch source code[/green]")
+        console.print(f"[dim]Compile to see match: melee-agent scratch compile {slug}[/dim]")
+
+    if show_source:
+        console.print(f"\n[bold]Decompiled Code:[/bold]")
+        console.print(decompiled, markup=False)
 
 
 @scratch_app.command("search-context")
@@ -748,6 +1016,219 @@ def scratch_search_context(
 
         if len(matches) > 5:
             console.print(f"[dim]... and {len(matches) - 5} more matches[/dim]")
+
+
+async def _build_fresh_context(
+    func_name: str,
+    source_file: str | None = None,
+    melee_root: Path = DEFAULT_MELEE_ROOT,
+) -> tuple[str | None, Path | None]:
+    """Build fresh context for a function from the repo.
+
+    Args:
+        func_name: Name of the function (used for stripping definition)
+        source_file: Optional source file path (e.g., "melee/ft/ftcoll.c")
+        melee_root: Path to melee submodule
+
+    Returns:
+        Tuple of (context_content, context_path) or (None, None) if failed
+    """
+    import subprocess
+    from src.cli.extract import _strip_target_function
+
+    # Determine context file path
+    ctx_path = get_context_file(source_file=source_file, melee_root=melee_root)
+
+    # Build the context file with ninja
+    try:
+        ctx_relative = ctx_path.relative_to(melee_root)
+        ninja_cwd = melee_root
+    except ValueError:
+        # ctx_path might be in a worktree, find the melee root for that worktree
+        parts = ctx_path.parts
+        ninja_cwd = None
+        for i, part in enumerate(parts):
+            if part == "build" and i > 0:
+                ninja_cwd = Path(*parts[:i])
+                ctx_relative = Path(*parts[i:])
+                break
+        if ninja_cwd is None:
+            console.print(f"[red]Cannot determine ninja target for: {ctx_path}[/red]")
+            return None, None
+
+    try:
+        result = subprocess.run(
+            ["ninja", str(ctx_relative)],
+            cwd=ninja_cwd,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if result.returncode != 0:
+            console.print(f"[red]Failed to build context file:[/red]")
+            console.print(result.stderr or result.stdout)
+            return None, None
+        # Only show message if ninja actually did something
+        if "no work to do" not in result.stdout.lower():
+            console.print(f"[dim]Built context file[/dim]")
+    except subprocess.TimeoutExpired:
+        console.print(f"[red]Timeout building context file[/red]")
+        return None, None
+    except FileNotFoundError:
+        console.print(f"[red]ninja not found - please install it[/red]")
+        return None, None
+
+    if not ctx_path.exists():
+        console.print(f"[red]Context file not found after build: {ctx_path}[/red]")
+        return None, None
+
+    # Read and process context
+    context = ctx_path.read_text()
+    console.print(f"[dim]Loaded {len(context):,} bytes of context from {ctx_path.name}[/dim]")
+
+    # Strip target function definition to avoid redefinition errors
+    if func_name in context:
+        context = _strip_target_function(context, func_name)
+        console.print(f"[dim]Stripped {func_name} definition from context[/dim]")
+
+    return context, ctx_path
+
+
+@scratch_app.command("update-context")
+def scratch_update_context(
+    slug: Annotated[str, typer.Argument(help="Scratch slug/ID or URL")],
+    source_file: Annotated[
+        Optional[Path], typer.Option("--source", "-s", help="Source file path (e.g., melee/ft/ftcoll.c)")
+    ] = None,
+    context_file: Annotated[
+        Optional[Path], typer.Option("--context-file", "-f", help="Use context from this file instead of building")
+    ] = None,
+    melee_root: Annotated[
+        Path, typer.Option("--melee-root", "-m", help="Path to melee submodule")
+    ] = DEFAULT_MELEE_ROOT,
+    api_url: Annotated[
+        Optional[str], typer.Option("--api-url", help="Decomp.me API URL (auto-detected)")
+    ] = None,
+    compile_after: Annotated[
+        bool, typer.Option("--compile", "-c", help="Compile after updating context")
+    ] = False,
+):
+    """Update a scratch's context from the repo.
+
+    Rebuilds the context file with ninja and updates the scratch.
+    Useful when headers or dependencies have changed.
+
+    Examples:
+        # Update context (auto-detect source file from scratch name)
+        melee-agent scratch update-context abc123
+
+        # Specify source file explicitly
+        melee-agent scratch update-context abc123 -s melee/ft/ftcoll.c
+
+        # Use pre-built context file
+        melee-agent scratch update-context abc123 -f /path/to/context.ctx
+
+        # Update and compile in one step
+        melee-agent scratch update-context abc123 --compile
+    """
+    api_url = api_url or get_local_api_url()
+    from src.client import DecompMeAPIClient, ScratchUpdate, DecompMeAPIError
+
+    # Extract slug from URL if needed
+    if slug.startswith("http"):
+        parts = slug.strip("/").split("/")
+        if "scratch" in parts:
+            idx = parts.index("scratch")
+            if idx + 1 < len(parts):
+                slug = parts[idx + 1]
+
+    async def update():
+        async with DecompMeAPIClient(base_url=api_url) as client:
+            # Get scratch to find function name
+            scratch = await client.get_scratch(slug)
+            func_name = scratch.name
+
+            console.print(f"[bold]Updating context for {func_name}[/bold] ({slug})")
+
+            # Determine source file path
+            src_file = str(source_file) if source_file else None
+
+            # If not specified, try to find from database
+            if not src_file:
+                from src.db import get_db
+                try:
+                    db = get_db()
+                    func_info = db.get_function(func_name)
+                    if func_info and func_info.get('source_file'):
+                        src_file = func_info['source_file']
+                        console.print(f"[dim]Found source file in DB: {src_file}[/dim]")
+                except Exception:
+                    pass  # DB lookup failed, will try without source file
+
+            # If still not found, try to find from extractor
+            if not src_file:
+                from src.extractor import extract_function
+                try:
+                    func = await extract_function(melee_root, func_name)
+                    if func and func.file_path:
+                        src_file = func.file_path
+                        console.print(f"[dim]Found source file from extractor: {src_file}[/dim]")
+                except Exception:
+                    pass  # Extractor failed
+
+            # Get fresh context
+            if context_file:
+                if not context_file.exists():
+                    console.print(f"[red]Context file not found: {context_file}[/red]")
+                    raise typer.Exit(1)
+                from src.cli.extract import _strip_target_function
+                context = context_file.read_text()
+                console.print(f"[dim]Loaded {len(context):,} bytes from {context_file.name}[/dim]")
+                if func_name in context:
+                    context = _strip_target_function(context, func_name)
+                    console.print(f"[dim]Stripped {func_name} definition[/dim]")
+            else:
+                context, ctx_path = await _build_fresh_context(func_name, src_file, melee_root)
+                if context is None:
+                    console.print("[red]Failed to build context[/red]")
+                    raise typer.Exit(1)
+
+            # Verify ownership
+            can_update, reason = await _verify_scratch_ownership(client, slug)
+            if not can_update:
+                console.print(f"[yellow]Warning:[/yellow] {reason}")
+
+            # Update scratch
+            try:
+                await client.update_scratch(slug, ScratchUpdate(context=context))
+            except DecompMeAPIError as e:
+                if "403" in str(e):
+                    if await _handle_403_error(client, slug, e, "update context"):
+                        await client.update_scratch(slug, ScratchUpdate(context=context))
+                    else:
+                        raise typer.Exit(1)
+                else:
+                    raise
+
+            console.print(f"[green]Updated context![/green] ({len(context):,} bytes)")
+
+            # Optionally compile
+            if compile_after:
+                result = await client.compile_scratch(slug)
+                if result.success and result.diff_output:
+                    match_pct = (
+                        100.0 if result.diff_output.current_score == 0
+                        else (1.0 - result.diff_output.current_score / result.diff_output.max_score) * 100
+                    )
+                    console.print(f"Match: {match_pct:.1f}%")
+                    record_match_score(slug, result.diff_output.current_score, result.diff_output.max_score)
+                elif not result.success:
+                    console.print(f"[red]Compilation failed[/red]")
+                    console.print(result.compiler_output)
+
+            return scratch
+
+    asyncio.run(update())
 
 
 @scratch_app.command("sync-from-repo")

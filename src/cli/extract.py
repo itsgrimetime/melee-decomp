@@ -639,11 +639,16 @@ def extract_get(
     strip_all_bodies: Annotated[
         bool, typer.Option("--strip-all-bodies/--no-strip-all-bodies", help="Strip ALL function bodies from context (prevents -inline auto issues)")
     ] = False,
+    auto_decompile: Annotated[
+        bool, typer.Option("--decompile", "-d", help="Run m2c decompiler for initial code when creating scratch")
+    ] = True,
 ):
     """Extract a specific function's ASM and context.
 
     Match percentages are read from the authoritative report.json.
     Use --create-scratch to also create a decomp.me scratch in one step.
+    By default, runs the m2c decompiler to generate initial C code.
+    Use --no-decompile to skip auto-decompilation and start with an empty stub.
     """
     # First pass: use default melee root to look up function info
     initial_root = melee_root or DEFAULT_MELEE_ROOT
@@ -831,18 +836,37 @@ def extract_get(
 
                 # No existing scratch found - create new
                 console.print(f"[dim]No existing scratches found, creating new...[/dim]")
-                scratch = await client.create_scratch(
-                    ScratchCreate(
-                        name=func.name,
-                        target_asm=func.asm,
-                        context=melee_context,
-                        compiler=compiler,
-                        compiler_flags="-O4,p -nodefaults -fp hard -Cpp_exceptions off -enum int -fp_contract on -inline auto",
-                        source_code="// TODO: Decompile this function\n",
-                        diff_label=func.name,
-                    )
+
+                # If auto-decompiling, preprocess context to remove preprocessor directives
+                # that m2c can't handle. Use preprocessed for decompilation, but restore
+                # original context afterward for compilation (compiler handles directives fine)
+                decompile_context = melee_context
+                if auto_decompile and melee_context:
+                    from src.cli.scratch import _preprocess_context
+                    preprocessed, success = _preprocess_context(melee_context)
+                    if success and preprocessed != melee_context:
+                        decompile_context = preprocessed
+                        console.print(f"[dim]Preprocessed context for m2c ({len(melee_context):,} → {len(preprocessed):,} bytes)[/dim]")
+
+                # Build scratch params - omit source_code to trigger auto-decompilation
+                scratch_params = ScratchCreate(
+                    name=func.name,
+                    target_asm=func.asm,
+                    context=decompile_context if auto_decompile else melee_context,
+                    compiler=compiler,
+                    compiler_flags="-O4,p -nodefaults -fp hard -Cpp_exceptions off -enum int -fp_contract on -inline auto",
+                    diff_label=func.name,
                 )
 
+                # Only set source_code if NOT auto-decompiling
+                if not auto_decompile:
+                    scratch_params.source_code = "// TODO: Decompile this function\n"
+                else:
+                    console.print(f"[dim]Running m2c decompiler for initial code...[/dim]")
+
+                scratch = await client.create_scratch(scratch_params)
+
+                # Claim ownership first (needed for subsequent updates)
                 if scratch.claim_token:
                     from src.cli.scratch import _save_scratch_token
                     _save_scratch_token(scratch.slug, scratch.claim_token)
@@ -851,6 +875,19 @@ def extract_get(
                         console.print(f"[dim]Claimed ownership of scratch[/dim]")
                     except Exception as e:
                         console.print(f"[yellow]Warning: Could not claim scratch: {e}[/yellow]")
+
+                # Restore original context (with preprocessor directives) for MWCC compilation.
+                # The preprocessed context was only needed for m2c decompilation.
+                # MWCC needs the original because gcc -E introduces incompatible features:
+                # - __attribute__((noreturn)) not supported by MWCC
+                # - _Static_assert is C11, not supported by MWCC
+                # - Assert macro expansions cause type mismatches
+                if auto_decompile and decompile_context != melee_context:
+                    try:
+                        await client.update_scratch(scratch.slug, ScratchUpdate(context=melee_context))
+                        console.print(f"[dim]Restored original context for MWCC[/dim]")
+                    except Exception as e:
+                        console.print(f"[yellow]Warning: Could not restore context: {e}[/yellow]")
 
                 return scratch, 0.0
 
