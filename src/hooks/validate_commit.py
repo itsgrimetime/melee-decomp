@@ -326,8 +326,12 @@ class CommitValidator:
                 continue
 
             # Build clang command for syntax check only
-            # Filter to just include paths and defines, add our warning flag
-            clang_args = ["clang", "-fsyntax-only", "-Werror=implicit-function-declaration"]
+            # Filter to just include paths and defines, add our warning flags
+            clang_args = [
+                "clang", "-fsyntax-only",
+                "-Werror=implicit-function-declaration",
+                "-Werror=typedef-redefinition",
+            ]
 
             for arg in args[1:]:  # Skip the compiler name
                 if arg.startswith("-I") or arg.startswith("-D") or arg.startswith("-nostdinc"):
