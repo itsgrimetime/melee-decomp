@@ -22,6 +22,18 @@ from ._common import (
     get_compiler_for_source,
 )
 
+# Try to import tree-sitter based functions for better accuracy
+try:
+    from src.hooks.c_analyzer import (
+        strip_function_bodies as _ts_strip_function_bodies,
+        strip_target_function as _ts_strip_target_function,
+        TREE_SITTER_AVAILABLE,
+    )
+except ImportError:
+    TREE_SITTER_AVAILABLE = False
+    _ts_strip_function_bodies = None
+    _ts_strip_target_function = None
+
 # Context file override from environment
 _context_env = os.environ.get("DECOMP_CONTEXT_FILE", "")
 
@@ -162,12 +174,30 @@ def _strip_all_function_bodies(context: str, keep_functions: set[str] | None = N
     function definition, not just those marked inline. This prevents the
     compiler from auto-inlining functions with -inline auto.
 
+    Uses tree-sitter for accurate parsing when available, falling back to
+    regex-based heuristics otherwise. Tree-sitter properly distinguishes
+    function bodies from struct/union bodies and typedefs.
+
     Args:
         context: The context string to process
         keep_functions: Optional set of function names to NOT strip (keep their bodies)
 
     Returns:
         Tuple of (filtered context, number of functions stripped)
+    """
+    # Use tree-sitter when available for accurate parsing
+    if TREE_SITTER_AVAILABLE and _ts_strip_function_bodies is not None:
+        return _ts_strip_function_bodies(context, keep_functions)
+
+    # Fallback to regex-based approach
+    return _strip_all_function_bodies_regex(context, keep_functions)
+
+
+def _strip_all_function_bodies_regex(context: str, keep_functions: set[str] | None = None) -> tuple[str, int]:
+    """Regex-based function body stripping (fallback when tree-sitter unavailable).
+
+    WARNING: This can incorrectly strip struct/union bodies in some edge cases.
+    Prefer tree-sitter based stripping when possible.
     """
     import re
 
@@ -287,6 +317,8 @@ def _strip_target_function(context: str, func_name: str) -> str:
     - Function calls (func_name appears without return type before it)
     - Comments mentioning the function
 
+    Uses tree-sitter for accurate parsing when available.
+
     Args:
         context: The full context string
         func_name: Name of the function to strip
@@ -296,6 +328,10 @@ def _strip_target_function(context: str, func_name: str) -> str:
     """
     if func_name not in context:
         return context
+
+    # Use tree-sitter when available for accurate parsing
+    if TREE_SITTER_AVAILABLE and _ts_strip_target_function is not None:
+        return _ts_strip_target_function(context, func_name)
 
     lines = context.split('\n')
     filtered = []
@@ -671,50 +707,51 @@ def extract_get(
             raise typer.Exit(1)
 
         ctx_path = _get_context_file(source_file=func.file_path, melee_root=melee_root)
-        if not ctx_path.exists():
-            console.print(f"[yellow]Context file not found, building...[/yellow]")
-            import subprocess
-            # Build the context file - need relative path from melee_root
-            try:
-                ctx_relative = ctx_path.relative_to(melee_root)
-            except ValueError:
-                # ctx_path might be in a worktree, find the melee root for that worktree
-                # The ctx_path looks like: .../melee-worktrees/<name>/build/GALE01/src/...
-                # We need to run ninja from the worktree root
-                parts = ctx_path.parts
-                for i, part in enumerate(parts):
-                    if part == "build" and i > 0:
-                        ninja_cwd = Path(*parts[:i])
-                        ctx_relative = Path(*parts[i:])
-                        break
-                else:
-                    console.print(f"[red]Cannot determine ninja target for: {ctx_path}[/red]")
-                    raise typer.Exit(1)
+
+        # Always rebuild context to pick up header changes
+        import subprocess
+        # Build the context file - need relative path from melee_root
+        try:
+            ctx_relative = ctx_path.relative_to(melee_root)
+            ninja_cwd = melee_root
+        except ValueError:
+            # ctx_path might be in a worktree, find the melee root for that worktree
+            # The ctx_path looks like: .../melee-worktrees/<name>/build/GALE01/src/...
+            # We need to run ninja from the worktree root
+            parts = ctx_path.parts
+            for i, part in enumerate(parts):
+                if part == "build" and i > 0:
+                    ninja_cwd = Path(*parts[:i])
+                    ctx_relative = Path(*parts[i:])
+                    break
             else:
-                ninja_cwd = melee_root
+                console.print(f"[red]Cannot determine ninja target for: {ctx_path}[/red]")
+                raise typer.Exit(1)
 
-            try:
-                result = subprocess.run(
-                    ["ninja", str(ctx_relative)],
-                    cwd=ninja_cwd,
-                    capture_output=True,
-                    text=True,
-                    timeout=120,
-                )
-                if result.returncode != 0:
-                    console.print(f"[red]Failed to build context file:[/red]")
-                    console.print(result.stderr or result.stdout)
-                    raise typer.Exit(1)
+        try:
+            result = subprocess.run(
+                ["ninja", str(ctx_relative)],
+                cwd=ninja_cwd,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            if result.returncode != 0:
+                console.print(f"[red]Failed to build context file:[/red]")
+                console.print(result.stderr or result.stdout)
+                raise typer.Exit(1)
+            # Only show message if ninja actually did something
+            if "no work to do" not in result.stdout.lower():
                 console.print(f"[green]Built context file[/green]")
-            except subprocess.TimeoutExpired:
-                console.print(f"[red]Timeout building context file[/red]")
-                raise typer.Exit(1)
-            except FileNotFoundError:
-                console.print(f"[red]ninja not found - please install it[/red]")
-                raise typer.Exit(1)
+        except subprocess.TimeoutExpired:
+            console.print(f"[red]Timeout building context file[/red]")
+            raise typer.Exit(1)
+        except FileNotFoundError:
+            console.print(f"[red]ninja not found - please install it[/red]")
+            raise typer.Exit(1)
 
         if not ctx_path.exists():
-            console.print(f"[red]Context file still not found after build: {ctx_path}[/red]")
+            console.print(f"[red]Context file not found after build: {ctx_path}[/red]")
             raise typer.Exit(1)
 
         melee_context = ctx_path.read_text()
@@ -742,7 +779,7 @@ def extract_get(
         console.print(f"[dim]Using compiler: {compiler}[/dim]")
 
         async def find_or_create():
-            from src.client import DecompMeAPIClient, ScratchCreate
+            from src.client import DecompMeAPIClient, ScratchCreate, ScratchUpdate
             async with DecompMeAPIClient(base_url=api_url) as client:
                 # First, search for existing scratches with this function name
                 console.print(f"[dim]Searching for existing scratches...[/dim]")
@@ -784,6 +821,12 @@ def extract_get(
                             await client.claim_scratch(scratch.slug, scratch.claim_token)
                         except Exception:
                             pass
+                    # Update forked scratch with fresh context from local build
+                    try:
+                        await client.update_scratch(scratch.slug, ScratchUpdate(context=melee_context))
+                        console.print(f"[dim]Updated forked scratch with fresh context[/dim]")
+                    except Exception as e:
+                        console.print(f"[yellow]Warning: Could not update context: {e}[/yellow]")
                     return scratch, best_match_pct
 
                 # No existing scratch found - create new

@@ -646,3 +646,183 @@ void baz() { return; }"""
         # 'inline' keyword should be removed from signature (but may appear in comment)
         assert "static inline" not in result
         assert "int sum" not in result
+
+
+class TestStructBodyPreservation:
+    """Tests for preserving struct/union bodies while stripping function bodies.
+
+    Regression tests for the bug where the regex-based stripper couldn't
+    distinguish between struct bodies { ... } and function bodies { ... },
+    leading to struct definitions being mangled.
+    """
+
+    def test_struct_body_preserved(self):
+        """Struct body should NOT be stripped."""
+        code = """struct Foo {
+    int x;
+    int y;
+};
+
+void func() {
+    return;
+}"""
+        result, count = _strip_all_function_bodies(code)
+        assert count == 1
+        assert "struct Foo {" in result
+        assert "int x;" in result
+        assert "int y;" in result
+        assert "};" in result
+        assert "return;" not in result
+
+    def test_typedef_struct_preserved(self):
+        """Typedef struct with body should be preserved."""
+        code = """typedef struct {
+    void (*handler)(int, int);
+    int flags;
+} EventHandler;
+
+void process() {
+    do_work();
+}"""
+        result, count = _strip_all_function_bodies(code)
+        assert count == 1
+        assert "typedef struct {" in result
+        assert "void (*handler)(int, int);" in result
+        assert "int flags;" in result
+        assert "} EventHandler;" in result
+        assert "do_work();" not in result
+
+    def test_function_pointer_typedef_preserved(self):
+        """Function pointer typedef should be preserved."""
+        code = """typedef void (*Callback)(int);
+
+void caller() {
+    cb(42);
+}"""
+        result, count = _strip_all_function_bodies(code)
+        assert count == 1
+        assert "typedef void (*Callback)(int);" in result
+        assert "cb(42);" not in result
+
+    def test_union_body_preserved(self):
+        """Union body should NOT be stripped."""
+        code = """union Data {
+    int i;
+    float f;
+    char c;
+};
+
+void use_union() {
+    union Data d;
+    d.i = 5;
+}"""
+        result, count = _strip_all_function_bodies(code)
+        assert count == 1
+        assert "union Data {" in result
+        assert "int i;" in result
+        assert "float f;" in result
+        assert "char c;" in result
+        assert "d.i = 5;" not in result
+
+    def test_enum_body_preserved(self):
+        """Enum body should NOT be stripped."""
+        code = """enum Status {
+    OK = 0,
+    ERROR = 1,
+    PENDING = 2
+};
+
+void check_status() {
+    if (status == OK) return;
+}"""
+        result, count = _strip_all_function_bodies(code)
+        assert count == 1
+        assert "enum Status {" in result
+        assert "OK = 0," in result
+        assert "ERROR = 1," in result
+        assert "if (status == OK)" not in result
+
+    def test_mixed_structs_and_functions(self):
+        """Complex mix of structs, typedefs, and functions.
+
+        This is the exact bug scenario reported by an agent where context
+        processing was breaking struct definitions.
+        """
+        code = """/* Struct definition with body */
+struct Foo {
+    int x;
+    int y;
+};
+
+/* Typedef */
+typedef void (*Callback)(int);
+
+/* Function prototype - should stay */
+void grIceMt_801F929C(HSD_GObj* arg0);
+
+/* Function definition - body should be stripped */
+void grIceMt_801F929C(HSD_GObj* arg0) {
+    mpLib_80057BC0(2);
+    some_call();
+}
+
+/* Struct with function pointer field */
+typedef struct {
+    void (*handler)(int, int);
+    int flags;
+} EventHandler;
+
+/* Another function */
+static inline s32 ftGetKind(Fighter* fp) {
+    return fp->kind;
+}"""
+        result, count = _strip_all_function_bodies(code)
+
+        # Should strip 2 functions: grIceMt_801F929C and ftGetKind
+        assert count == 2
+
+        # Struct Foo body must be preserved
+        assert "struct Foo {" in result
+        assert "int x;" in result
+        assert "int y;" in result
+
+        # Typedef must be preserved
+        assert "typedef void (*Callback)(int);" in result
+
+        # Function prototype must be preserved
+        assert "void grIceMt_801F929C(HSD_GObj* arg0);" in result
+
+        # Function body must be stripped
+        assert "mpLib_80057BC0" not in result
+        assert "some_call();" not in result
+
+        # EventHandler struct must be preserved
+        assert "void (*handler)(int, int);" in result
+        assert "int flags;" in result
+        assert "} EventHandler;" in result
+
+        # Inline function body stripped, keyword removed
+        assert "return fp->kind" not in result
+        assert "static s32 ftGetKind" in result
+
+    def test_nested_struct_in_struct(self):
+        """Nested struct definitions should be preserved."""
+        code = """struct Outer {
+    struct Inner {
+        int value;
+    } inner;
+    int count;
+};
+
+void process() {
+    struct Outer o;
+    o.count = 5;
+}"""
+        result, count = _strip_all_function_bodies(code)
+        assert count == 1
+        assert "struct Outer {" in result
+        assert "struct Inner {" in result
+        assert "int value;" in result
+        assert "} inner;" in result
+        assert "int count;" in result
+        assert "o.count = 5;" not in result

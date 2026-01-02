@@ -22,6 +22,16 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+# Try to import tree-sitter based analyzer for better detection
+try:
+    from src.hooks.c_analyzer import (
+        analyze_diff_additions,
+        TREE_SITTER_AVAILABLE,
+    )
+except ImportError:
+    TREE_SITTER_AVAILABLE = False
+    analyze_diff_additions = None
+
 # Local decomp.me server URL patterns (private subnets, loopback, .local domains)
 LOCAL_URL_PATTERNS = [
     r'https?://[^/]*\.local[:/]',                              # .local domains
@@ -85,6 +95,38 @@ class ValidationError:
             parts.append(": ")
         parts.append(self.message)
         return "".join(parts)
+
+
+class CheckResult:
+    """Result of a single validation check."""
+
+    def __init__(self, name: str, status: str, errors: int = 0, detail: str = ""):
+        """
+        Args:
+            name: Human-readable check name
+            status: One of "passed", "failed", "skipped", "n/a"
+            errors: Number of errors found (for failed checks)
+            detail: Optional detail message (e.g., why skipped)
+        """
+        self.name = name
+        self.status = status
+        self.errors = errors
+        self.detail = detail
+
+    def __str__(self):
+        if self.status == "passed":
+            symbol = "\033[32m✓\033[0m"
+        elif self.status == "failed":
+            symbol = "\033[31m✗\033[0m"
+        elif self.status == "skipped":
+            symbol = "\033[33m⊘\033[0m"
+        else:  # n/a
+            symbol = "\033[90m-\033[0m"
+
+        line = f"  {symbol} {self.name}"
+        if self.detail:
+            line += f" \033[90m({self.detail})\033[0m"
+        return line
 
 
 class CommitValidator:
@@ -292,7 +334,11 @@ class CommitValidator:
                     ))
 
     def validate_coding_style(self) -> None:
-        """Check CONTRIBUTING.md coding guidelines and doldecomp/melee PR review standards."""
+        """Check CONTRIBUTING.md coding guidelines and doldecomp/melee PR review standards.
+
+        Uses tree-sitter for AST-based detection when available, falling back to
+        regex patterns otherwise.
+        """
         staged_files = self._get_staged_files()
         c_files = [f for f in staged_files if f.startswith("melee/src/") and f.endswith(".c")]
 
@@ -304,84 +350,100 @@ class CommitValidator:
             if not diff:
                 continue
 
-            line_num = 0
-            for line in diff.split("\n"):
-                # Track line numbers in the new file
-                if line.startswith("@@"):
-                    match = re.search(r'\+(\d+)', line)
-                    if match:
-                        line_num = int(match.group(1)) - 1
+            # Use tree-sitter based analysis when available
+            if TREE_SITTER_AVAILABLE and analyze_diff_additions is not None:
+                issues = analyze_diff_additions(diff)
+                for issue in issues:
+                    self.errors.append(ValidationError(
+                        f"{issue.message}: {issue.snippet}" +
+                        (f" ({issue.suggestion})" if issue.suggestion else ""),
+                        c_file,
+                        issue.line
+                    ))
+            else:
+                # Fallback to regex-based detection
+                self._validate_coding_style_regex(c_file, diff)
+
+    def _validate_coding_style_regex(self, c_file: str, diff: str) -> None:
+        """Regex-based coding style validation (fallback when tree-sitter unavailable)."""
+        line_num = 0
+        for line in diff.split("\n"):
+            # Track line numbers in the new file
+            if line.startswith("@@"):
+                match = re.search(r'\+(\d+)', line)
+                if match:
+                    line_num = int(match.group(1)) - 1
+                continue
+
+            if line.startswith("+") and not line.startswith("+++"):
+                line_num += 1
+                content = line[1:]  # Remove + prefix
+
+                # Skip if line is a comment
+                stripped = content.strip()
+                if stripped.startswith("//") or stripped.startswith("/*") or stripped.startswith("*"):
                     continue
 
-                if line.startswith("+") and not line.startswith("+++"):
-                    line_num += 1
-                    content = line[1:]  # Remove + prefix
+                # Check for TRUE/FALSE instead of true/false
+                # PR feedback: "Use `true` and `false`, not `TRUE` and `FALSE`"
+                if re.search(r'\bTRUE\b', content):
+                    self.errors.append(ValidationError(
+                        "Use 'true' not 'TRUE' (lowercase boolean literals required)",
+                        c_file, line_num
+                    ))
+                if re.search(r'\bFALSE\b', content):
+                    self.errors.append(ValidationError(
+                        "Use 'false' not 'FALSE' (lowercase boolean literals required)",
+                        c_file, line_num
+                    ))
 
-                    # Skip if line is a comment
-                    stripped = content.strip()
-                    if stripped.startswith("//") or stripped.startswith("/*") or stripped.startswith("*"):
-                        continue
+                # Check for floating point literals without F suffix
+                # Pattern: number with decimal but no F/L suffix
+                float_matches = re.findall(r'\b\d+\.\d+(?![FLfl\w])\b', content)
+                for fm in float_matches:
+                    # Skip if in a comment
+                    if "//" in content:
+                        comment_start = content.index("//")
+                        if content.index(fm) > comment_start:
+                            continue
+                    self.errors.append(ValidationError(
+                        f"Float literal '{fm}' missing F suffix (use {fm}F for f32)",
+                        c_file, line_num
+                    ))
 
-                    # Check for TRUE/FALSE instead of true/false
-                    # PR feedback: "Use `true` and `false`, not `TRUE` and `FALSE`"
-                    if re.search(r'\bTRUE\b', content):
+                # Check for lowercase hex (0xabc instead of 0xABC)
+                hex_matches = re.findall(r'0x[0-9a-fA-F]+', content)
+                for hm in hex_matches:
+                    # Only flag if there are lowercase letters in hex digits
+                    hex_part = hm[2:]  # Remove 0x prefix
+                    if any(c.islower() and c.isalpha() for c in hex_part):
                         self.errors.append(ValidationError(
-                            "Use 'true' not 'TRUE' (lowercase boolean literals required)",
+                            f"Hex literal '{hm}' should use uppercase (e.g., 0x{hex_part.upper()})",
                             c_file, line_num
                         ))
-                    if re.search(r'\bFALSE\b', content):
-                        self.errors.append(ValidationError(
-                            "Use 'false' not 'FALSE' (lowercase boolean literals required)",
-                            c_file, line_num
-                        ))
+                        break  # Only report once per line
 
-                    # Check for floating point literals without F suffix
-                    # Pattern: number with decimal but no F/L suffix
-                    float_matches = re.findall(r'\b\d+\.\d+(?![FLfl\w])\b', content)
-                    for fm in float_matches:
-                        # Skip if in a comment
-                        if "//" in content:
-                            comment_start = content.index("//")
-                            if content.index(fm) > comment_start:
-                                continue
-                        self.errors.append(ValidationError(
-                            f"Float literal '{fm}' missing F suffix (use {fm}F for f32)",
-                            c_file, line_num
-                        ))
+                # Check for raw struct pointer arithmetic (PR feedback)
+                # Patterns to catch:
+                #   *(f32*)((u8*)fp + 0x844)
+                #   *(s32*)((char*)ptr + 0x28)
+                #   *(u32*)((u8*)cmd->u + 8)
+                #   *((type*)(ptr + offset))
+                ptr_arith_match = re.search(
+                    r'\*\s*\(([^)]+\*)\)\s*\(\s*\(([^)]+\*)\)\s*([^+]+)\s*\+\s*([^)]+)\)',
+                    content
+                )
+                if ptr_arith_match:
+                    cast_type = ptr_arith_match.group(1).strip()
+                    ptr_expr = ptr_arith_match.group(3).strip()
+                    offset = ptr_arith_match.group(4).strip()
+                    self.errors.append(ValidationError(
+                        f"Raw pointer arithmetic for struct access - use M2C_FIELD({ptr_expr}, {offset}, {cast_type}) instead",
+                        c_file, line_num
+                    ))
 
-                    # Check for lowercase hex (0xabc instead of 0xABC)
-                    hex_matches = re.findall(r'0x[0-9a-fA-F]+', content)
-                    for hm in hex_matches:
-                        # Only flag if there are lowercase letters in hex digits
-                        hex_part = hm[2:]  # Remove 0x prefix
-                        if any(c.islower() and c.isalpha() for c in hex_part):
-                            self.errors.append(ValidationError(
-                                f"Hex literal '{hm}' should use uppercase (e.g., 0x{hex_part.upper()})",
-                                c_file, line_num
-                            ))
-                            break  # Only report once per line
-
-                    # Check for raw struct pointer arithmetic (PR feedback)
-                    # Patterns to catch:
-                    #   *(f32*)((u8*)fp + 0x844)
-                    #   *(s32*)((char*)ptr + 0x28)
-                    #   *(u32*)((u8*)cmd->u + 8)
-                    #   *((type*)(ptr + offset))
-                    ptr_arith_match = re.search(
-                        r'\*\s*\(([^)]+\*)\)\s*\(\s*\(([^)]+\*)\)\s*([^+]+)\s*\+\s*([^)]+)\)',
-                        content
-                    )
-                    if ptr_arith_match:
-                        cast_type = ptr_arith_match.group(1).strip()
-                        ptr_expr = ptr_arith_match.group(3).strip()
-                        offset = ptr_arith_match.group(4).strip()
-                        self.errors.append(ValidationError(
-                            f"Raw pointer arithmetic for struct access - use M2C_FIELD({ptr_expr}, {offset}, {cast_type}) instead",
-                            c_file, line_num
-                        ))
-
-                elif not line.startswith("-"):
-                    line_num += 1
+            elif not line.startswith("-"):
+                line_num += 1
 
     def validate_clang_format(self) -> None:
         """Check if clang-format was run on staged C files."""
@@ -722,36 +784,199 @@ class CommitValidator:
                         f"Local slugs found: {local_urls}",
                     ))
 
-    def run(self) -> tuple[list[ValidationError], list[ValidationError]]:
-        """Run all validations."""
-        self.validate_forbidden_files()
-        self.validate_conflict_markers()
-        self.validate_header_signatures()
-        self.validate_implicit_declarations()
-        self.validate_symbols_txt()
-        self.validate_coding_style()
-        self.validate_extern_declarations()
-        self.validate_symbol_renames()
-        self.validate_local_urls_in_commits()
-        self.validate_clang_format()
-        return self.errors, self.warnings
+    def validate_match_regressions(self) -> None:
+        """Check for match percentage regressions after building.
+
+        Compares the current report.json against a rebuild with staged changes
+        to detect any functions that regressed in match percentage.
+        """
+        staged_files = self._get_staged_files()
+
+        # Only run if there are staged changes to melee source or symbols
+        melee_changes = [f for f in staged_files
+                         if f.startswith("melee/src/") or f == "melee/config/GALE01/symbols.txt"]
+        if not melee_changes:
+            return
+
+        report_file = self.melee_root / "build" / "GALE01" / "report.json"
+
+        # Load current report (pre-build state)
+        if not report_file.exists():
+            self.warnings.append(ValidationError(
+                "No report.json found - run 'ninja' first to enable regression detection"
+            ))
+            return
+
+        try:
+            with open(report_file) as f:
+                old_report = json.load(f)
+        except (json.JSONDecodeError, IOError) as e:
+            self.warnings.append(ValidationError(
+                f"Failed to load report.json: {e}"
+            ))
+            return
+
+        # Build mapping of function -> match percentage
+        old_matches: dict[str, float] = {}
+        for unit in old_report.get("units", []):
+            for func in unit.get("functions", []):
+                name = func.get("name")
+                match_pct = func.get("fuzzy_match_percent")
+                if name and match_pct is not None:
+                    old_matches[name] = match_pct
+
+        # Run ninja to rebuild with staged changes
+        try:
+            result = subprocess.run(
+                ["ninja"],
+                capture_output=True,
+                text=True,
+                cwd=self.melee_root,
+                timeout=300  # 5 minute timeout
+            )
+            if result.returncode != 0:
+                self.warnings.append(ValidationError(
+                    "Build failed - cannot check for regressions"
+                ))
+                return
+        except subprocess.TimeoutExpired:
+            self.warnings.append(ValidationError(
+                "Build timed out - cannot check for regressions"
+            ))
+            return
+        except FileNotFoundError:
+            self.warnings.append(ValidationError(
+                "ninja not found - cannot check for regressions"
+            ))
+            return
+
+        # Load new report
+        try:
+            with open(report_file) as f:
+                new_report = json.load(f)
+        except (json.JSONDecodeError, IOError):
+            self.warnings.append(ValidationError(
+                "Failed to load report.json after build"
+            ))
+            return
+
+        # Compare and find regressions
+        regressions = []
+        for unit in new_report.get("units", []):
+            for func in unit.get("functions", []):
+                name = func.get("name")
+                new_pct = func.get("fuzzy_match_percent")
+
+                if name and name in old_matches:
+                    old_pct = old_matches[name]
+                    # Regression: went from some match to lower match
+                    # or went from matched to unmatched (None)
+                    if old_pct is not None and old_pct > 0:
+                        if new_pct is None or new_pct < old_pct:
+                            new_display = f"{new_pct:.1f}%" if new_pct else "0%"
+                            regressions.append(
+                                f"{name}: {old_pct:.1f}% → {new_display}"
+                            )
+
+        if regressions:
+            for reg in regressions[:5]:  # Limit to first 5
+                self.errors.append(ValidationError(
+                    f"Match regression: {reg}"
+                ))
+            if len(regressions) > 5:
+                self.errors.append(ValidationError(
+                    f"... and {len(regressions) - 5} more regressions"
+                ))
+
+    def run(self, skip_regressions: bool = False) -> tuple[list[ValidationError], list[ValidationError], list[CheckResult]]:
+        """Run all validations.
+
+        Args:
+            skip_regressions: If True, skip the build and regression check.
+                             By default, runs ninja and checks for match regressions.
+
+        Returns:
+            Tuple of (errors, warnings, check_results)
+        """
+        check_results = []
+        staged_files = self._get_staged_files()
+        c_files = [f for f in staged_files if f.endswith(".c") and "melee/" in f]
+        melee_changes = [f for f in staged_files if f.startswith("melee/")]
+
+        def run_check(name: str, method, condition: bool = True, skip_reason: str = ""):
+            """Run a check and record its result."""
+            if not condition:
+                check_results.append(CheckResult(name, "n/a", detail=skip_reason))
+                return
+
+            errors_before = len(self.errors)
+            method()
+            errors_after = len(self.errors)
+            new_errors = errors_after - errors_before
+
+            if new_errors > 0:
+                check_results.append(CheckResult(name, "failed", errors=new_errors))
+            else:
+                check_results.append(CheckResult(name, "passed"))
+
+        # Run checks with appropriate conditions
+        run_check("Forbidden files", self.validate_forbidden_files)
+        run_check("Conflict markers", self.validate_conflict_markers,
+                  bool(c_files or any(f.endswith(".h") for f in staged_files)),
+                  "no C/H files")
+        run_check("Header signatures", self.validate_header_signatures,
+                  bool(c_files), "no C files")
+        run_check("Implicit declarations", self.validate_implicit_declarations,
+                  bool(c_files), "no C files")
+        run_check("Symbols.txt", self.validate_symbols_txt,
+                  bool(c_files), "no C files")
+        run_check("Coding style", self.validate_coding_style,
+                  bool(c_files), "no C files")
+        run_check("Extern declarations", self.validate_extern_declarations,
+                  bool(c_files), "no C files")
+        run_check("Symbol renames", self.validate_symbol_renames,
+                  bool(c_files or any(f.endswith(".h") for f in staged_files)),
+                  "no C/H files")
+        run_check("Local URLs", self.validate_local_urls_in_commits,
+                  bool(melee_changes), "no melee changes")
+        run_check("clang-format", self.validate_clang_format,
+                  bool(c_files), "no C files")
+
+        if skip_regressions:
+            check_results.append(CheckResult("Match regressions", "skipped", detail="--skip-regressions"))
+        else:
+            run_check("Match regressions", self.validate_match_regressions,
+                      bool(melee_changes), "no melee changes")
+
+        return self.errors, self.warnings, check_results
 
 
 def main():
     parser = argparse.ArgumentParser(description="Validate commit against project guidelines")
     parser.add_argument("--fix", action="store_true", help="Attempt to fix issues")
     parser.add_argument("--verbose", "-v", action="store_true", help="Show all warnings")
+    parser.add_argument("--skip-regressions", action="store_true",
+                        help="Skip build and regression check (faster but less thorough)")
+    parser.add_argument("--quiet", "-q", action="store_true",
+                        help="Only show errors, not check status")
     args = parser.parse_args()
 
     validator = CommitValidator()
-    errors, warnings = validator.run()
+    errors, warnings, check_results = validator.run(skip_regressions=args.skip_regressions)
 
-    # Print results
+    # Print check results (unless quiet mode)
+    if not args.quiet:
+        print("\033[1mPre-commit checks:\033[0m")
+        for result in check_results:
+            print(result)
+
+    # Print warnings if verbose
     if warnings and args.verbose:
         print("\n\033[33mWarnings:\033[0m")
         for w in warnings:
             print(f"  ⚠ {w}")
 
+    # Print errors
     if errors:
         print("\n\033[31mErrors (must fix before commit):\033[0m")
         for e in errors:
@@ -765,12 +990,19 @@ def main():
         print(f"\n\033[31mCommit blocked: {len(errors)} error(s)\033[0m")
         sys.exit(1)
 
+    # Summary
+    passed = sum(1 for r in check_results if r.status == "passed")
+    skipped = sum(1 for r in check_results if r.status in ("skipped", "n/a"))
+
     if warnings:
         print(f"\n\033[33m{len(warnings)} warning(s) - commit allowed\033[0m")
         if not args.verbose:
             print("  Run with --verbose to see details")
 
-    print("\n\033[32m✓ Validation passed\033[0m")
+    if not args.quiet:
+        print(f"\n\033[32m✓ All checks passed ({passed} passed, {skipped} skipped)\033[0m")
+    else:
+        print("\033[32m✓ Validation passed\033[0m")
     sys.exit(0)
 
 
