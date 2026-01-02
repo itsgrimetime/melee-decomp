@@ -19,6 +19,10 @@ def hook_validate(
     verbose: Annotated[
         bool, typer.Option("--verbose", "-v", help="Show all warnings")
     ] = False,
+    skip_regressions: Annotated[
+        bool, typer.Option("--skip-regressions",
+                           help="Skip build and regression check (faster)")
+    ] = False,
 ):
     """Validate staged changes against project guidelines.
 
@@ -42,6 +46,7 @@ def hook_validate(
     - Implicit function declarations (uses clang)
     - Header signatures don't match implementations
     - Merge conflict markers in code
+    - Match regressions (runs ninja by default)
 
     File Issues:
     - Forbidden files modified (.gitkeep files, orig/ placeholders)
@@ -52,7 +57,7 @@ def hook_validate(
     from src.hooks.validate_commit import CommitValidator
 
     validator = CommitValidator(melee_root=DEFAULT_MELEE_ROOT)
-    errors, warnings = validator.run()
+    errors, warnings = validator.run(skip_regressions=skip_regressions)
 
     if warnings and verbose:
         console.print("\n[yellow]Warnings:[/yellow]")
@@ -85,56 +90,111 @@ def hook_install(
         bool, typer.Option("--force", "-f", help="Overwrite existing hooks")
     ] = False,
 ):
-    """Install git pre-commit hook for validation.
+    """Install git pre-commit hooks for validation.
 
-    Creates a pre-commit hook that runs 'melee-agent hook validate' before each commit.
+    Installs two hooks:
+    1. melee-decomp repo: Runs pytest tests, plus melee validation if submodule changes
+    2. melee submodule: Runs melee validation (shared by all worktrees)
     """
-    # Navigate to project root (parent of src/cli)
     project_root = Path(__file__).parent.parent.parent
-    hooks_dir = project_root / ".git" / "hooks"
-    pre_commit_path = hooks_dir / "pre-commit"
 
-    hook_content = '''#!/bin/sh
-# Pre-commit hook for melee-decomp validation
+    # 1. Install hook for melee-decomp repo
+    repo_hooks_dir = project_root / ".git" / "hooks"
+    repo_pre_commit = repo_hooks_dir / "pre-commit"
+
+    repo_hook_content = f'''#!/bin/sh
+# Pre-commit hook for melee-decomp
 # Installed by: melee-agent hook install
 
+cd "{project_root}"
+
+# Run Python tests
+echo "Running tests..."
+python -m pytest tests/ -x -q --tb=short
+TEST_EXIT=$?
+
+if [ $TEST_EXIT -ne 0 ]; then
+    echo ""
+    echo "\\033[31mTests failed - commit blocked\\033[0m"
+    exit 1
+fi
+
+# Only run melee validation if there are melee/ submodule changes staged
+if git diff --cached --name-only | grep -q "^melee/"; then
+    echo "Melee submodule changes detected - running validation..."
+    python -m src.hooks.validate_commit --verbose
+    exit $?
+fi
+
+echo "\\033[32m✓ Tests passed\\033[0m"
+exit 0
+'''
+
+    if repo_pre_commit.exists() and not force:
+        console.print(f"[yellow]Pre-commit hook already exists at {repo_pre_commit}[/yellow]")
+        console.print("[dim]Use --force to overwrite[/dim]")
+        raise typer.Exit(1)
+
+    repo_pre_commit.write_text(repo_hook_content)
+    repo_pre_commit.chmod(repo_pre_commit.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    console.print(f"[green]✓ Installed melee-decomp pre-commit hook[/green]")
+
+    # 2. Install hook for melee submodule
+    submodule_hooks_dir = project_root / ".git" / "modules" / "melee" / "hooks"
+
+    if not submodule_hooks_dir.exists():
+        console.print("[yellow]Melee submodule hooks dir not found - skipping submodule hook[/yellow]")
+        console.print("[dim]Run 'git submodule update --init' to initialize[/dim]")
+        return
+
+    submodule_pre_commit = submodule_hooks_dir / "pre-commit"
+
+    submodule_hook_content = f'''#!/bin/sh
+# Pre-commit hook for melee decompilation
+# Installed by: melee-agent hook install
+# All worktrees share this hook automatically.
+
+cd "{project_root}"
+
 # Run validation
-python -m src.hooks.validate_commit --verbose
+python -m src.hooks.validate_commit
 
 # Exit with validation result
 exit $?
 '''
 
-    if pre_commit_path.exists() and not force:
-        console.print(f"[yellow]Pre-commit hook already exists at {pre_commit_path}[/yellow]")
-        console.print("[dim]Use --force to overwrite[/dim]")
-        raise typer.Exit(1)
-
-    pre_commit_path.write_text(hook_content)
-    # Make executable
-    pre_commit_path.chmod(pre_commit_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-
-    console.print(f"[green]Installed pre-commit hook at {pre_commit_path}[/green]")
-    console.print("\n[dim]The hook will run 'melee-agent hook validate' before each commit.[/dim]")
+    submodule_pre_commit.write_text(submodule_hook_content)
+    submodule_pre_commit.chmod(submodule_pre_commit.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    console.print(f"[green]✓ Installed melee submodule pre-commit hook[/green]")
 
 
 @hook_app.command("uninstall")
 def hook_uninstall():
-    """Remove git pre-commit hook."""
+    """Remove git pre-commit hooks installed by melee-agent."""
     project_root = Path(__file__).parent.parent.parent
-    hooks_dir = project_root / ".git" / "hooks"
-    pre_commit_path = hooks_dir / "pre-commit"
+    removed_any = False
 
-    if not pre_commit_path.exists():
-        console.print("[yellow]No pre-commit hook installed[/yellow]")
-        return
+    # 1. Remove melee-decomp repo hook
+    repo_pre_commit = project_root / ".git" / "hooks" / "pre-commit"
+    if repo_pre_commit.exists():
+        content = repo_pre_commit.read_text()
+        if "melee-agent" in content or "validate_commit" in content:
+            repo_pre_commit.unlink()
+            console.print("[green]✓ Removed melee-decomp pre-commit hook[/green]")
+            removed_any = True
+        else:
+            console.print("[yellow]melee-decomp hook exists but wasn't installed by melee-agent[/yellow]")
 
-    # Check if it's our hook
-    content = pre_commit_path.read_text()
-    if "melee-agent" not in content and "validate_commit" not in content:
-        console.print("[yellow]Pre-commit hook exists but wasn't installed by melee-agent[/yellow]")
-        console.print("[dim]Remove manually if desired[/dim]")
-        raise typer.Exit(1)
+    # 2. Remove melee submodule hook
+    submodule_pre_commit = project_root / ".git" / "modules" / "melee" / "hooks" / "pre-commit"
+    if submodule_pre_commit.exists():
+        content = submodule_pre_commit.read_text()
+        if "melee-agent" in content or "validate_commit" in content:
+            submodule_pre_commit.unlink()
+            console.print("[green]✓ Removed melee submodule pre-commit hook[/green]")
+            removed_any = True
+        else:
+            console.print("[yellow]melee submodule hook exists but wasn't installed by melee-agent[/yellow]")
 
-    pre_commit_path.unlink()
-    console.print(f"[green]Removed pre-commit hook[/green]")
+    if not removed_any:
+        console.print("[yellow]No melee-agent hooks found to remove[/yellow]")
