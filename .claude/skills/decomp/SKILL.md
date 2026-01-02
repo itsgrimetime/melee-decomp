@@ -111,6 +111,8 @@ melee-agent claim add <function_name>  # Claims expire after 1 hour
 melee-agent extract get <function_name> --create-scratch
 ```
 
+This automatically rebuilds context files to pick up any header changes you've made. If forking an existing scratch, the context is updated with your local version.
+
 Then read the source file in `melee/src/` for context. Look for:
 - Function signature and local struct definitions (must include these!)
 - Nearby functions for coding patterns
@@ -336,6 +338,13 @@ melee-agent struct callback FtCmd2            # Look up callback signature
 melee-agent struct callback                   # List all known callback types
 ```
 
+**Inspect scratch context (struct definitions, etc.):**
+```bash
+melee-agent scratch get <slug> --context           # Show context (truncated)
+melee-agent scratch get <slug> --grep "StructName" # Search context for pattern
+melee-agent scratch get <slug> --diff              # Show instruction diff
+```
+
 **Search context (supports multiple patterns):**
 ```bash
 melee-agent scratch search-context <slug> "HSD_GObj" "FtCmd2" "ColorOverlay"
@@ -502,7 +511,7 @@ melee-agent state urls <func_name>        # Show all URLs (scratch, PR)
 4. **Don't keep trying the same changes** - if reordering doesn't help after 3-4 attempts, the issue is likely context-related
 5. **Don't skip `workflow finish`** - just marking complete without committing loses your work!
 6. **Don't continue working if `claim add` fails** - pick a different function
-7. **Don't use raw curl/API calls** - use CLI tools like `scratch search-context` instead
+7. **Don't use raw curl/API calls** - use CLI tools like `scratch get --grep` or `scratch search-context`
 8. **Don't switch functions after claiming** - work on the EXACT function you claimed, not a different one
 
 ## Troubleshooting
@@ -529,8 +538,7 @@ melee-agent state urls <func_name>        # Show all URLs (scratch, PR)
 **Header signature bugs:** If assembly shows parameter usage (e.g., `cmpwi r3, 1`) but header declares `void func(void)`:
 1. Use `/decomp-fixup` skill for guidance on fixing headers
 2. Fix the header in your worktree
-3. Rebuild: `ninja`
-4. Re-create scratch to get updated context
+3. Re-create scratch: `melee-agent extract get <func> --create-scratch` (context auto-rebuilds)
 
 ## Server Unreachable
 

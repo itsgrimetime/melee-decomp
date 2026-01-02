@@ -175,50 +175,52 @@ def scratch_create(
 
     # Get context file using the function's source file path
     ctx_path = context_file or _get_context_file(source_file=func.file_path)
-    if not ctx_path.exists():
-        console.print(f"[yellow]Context file not found, building...[/yellow]")
-        import subprocess
-        # Build the context file - need relative path from melee_root
-        try:
-            ctx_relative = ctx_path.relative_to(melee_root)
-            ninja_cwd = melee_root
-        except ValueError:
-            # ctx_path might be in a worktree, find the melee root for that worktree
-            # The ctx_path looks like: .../melee-worktrees/<name>/build/GALE01/src/...
-            # We need to run ninja from the worktree root
-            parts = ctx_path.parts
-            ninja_cwd = None
-            for i, part in enumerate(parts):
-                if part == "build" and i > 0:
-                    ninja_cwd = Path(*parts[:i])
-                    ctx_relative = Path(*parts[i:])
-                    break
-            if ninja_cwd is None:
-                console.print(f"[red]Cannot determine ninja target for: {ctx_path}[/red]")
-                raise typer.Exit(1)
 
-        try:
-            result = subprocess.run(
-                ["ninja", str(ctx_relative)],
-                cwd=ninja_cwd,
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
-            if result.returncode != 0:
-                console.print(f"[red]Failed to build context file:[/red]")
-                console.print(result.stderr or result.stdout)
-                raise typer.Exit(1)
+    # Always rebuild context to pick up header changes
+    import subprocess
+    # Build the context file - need relative path from melee_root
+    try:
+        ctx_relative = ctx_path.relative_to(melee_root)
+        ninja_cwd = melee_root
+    except ValueError:
+        # ctx_path might be in a worktree, find the melee root for that worktree
+        # The ctx_path looks like: .../melee-worktrees/<name>/build/GALE01/src/...
+        # We need to run ninja from the worktree root
+        parts = ctx_path.parts
+        ninja_cwd = None
+        for i, part in enumerate(parts):
+            if part == "build" and i > 0:
+                ninja_cwd = Path(*parts[:i])
+                ctx_relative = Path(*parts[i:])
+                break
+        if ninja_cwd is None:
+            console.print(f"[red]Cannot determine ninja target for: {ctx_path}[/red]")
+            raise typer.Exit(1)
+
+    try:
+        result = subprocess.run(
+            ["ninja", str(ctx_relative)],
+            cwd=ninja_cwd,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if result.returncode != 0:
+            console.print(f"[red]Failed to build context file:[/red]")
+            console.print(result.stderr or result.stdout)
+            raise typer.Exit(1)
+        # Only show message if ninja actually did something
+        if "no work to do" not in result.stdout.lower():
             console.print(f"[green]Built context file[/green]")
-        except subprocess.TimeoutExpired:
-            console.print(f"[red]Timeout building context file[/red]")
-            raise typer.Exit(1)
-        except FileNotFoundError:
-            console.print(f"[red]ninja not found - please install it[/red]")
-            raise typer.Exit(1)
+    except subprocess.TimeoutExpired:
+        console.print(f"[red]Timeout building context file[/red]")
+        raise typer.Exit(1)
+    except FileNotFoundError:
+        console.print(f"[red]ninja not found - please install it[/red]")
+        raise typer.Exit(1)
 
     if not ctx_path.exists():
-        console.print(f"[red]Context file still not found after build: {ctx_path}[/red]")
+        console.print(f"[red]Context file not found after build: {ctx_path}[/red]")
         raise typer.Exit(1)
 
     melee_context = ctx_path.read_text()
@@ -536,10 +538,29 @@ def scratch_get(
     output_json: Annotated[
         bool, typer.Option("--json", help="Output as JSON")
     ] = False,
+    show_diff: Annotated[
+        bool, typer.Option("--diff", "-d", help="Show instruction diff")
+    ] = False,
+    max_lines: Annotated[
+        int, typer.Option("--max-lines", "-n", help="Max diff lines to show (0=all)")
+    ] = 100,
+    show_context: Annotated[
+        bool, typer.Option("--context", "-c", help="Show context instead of source code")
+    ] = False,
+    grep_context: Annotated[
+        Optional[str], typer.Option("--grep", "-g", help="Search context for pattern (implies --context)")
+    ] = None,
+    context_lines: Annotated[
+        int, typer.Option("-C", help="Context lines around grep matches")
+    ] = 3,
 ):
     """Get full scratch information."""
     api_url = api_url or get_local_api_url()
     from src.client import DecompMeAPIClient
+
+    # --grep implies --context
+    if grep_context:
+        show_context = True
 
     # Extract slug from URL if needed
     if slug.startswith("http"):
@@ -551,9 +572,15 @@ def scratch_get(
 
     async def get():
         async with DecompMeAPIClient(base_url=api_url) as client:
-            return await client.get_scratch(slug)
+            scratch = await client.get_scratch(slug)
+            diff_output = None
+            if show_diff:
+                result = await client.compile_scratch(slug)
+                if result.success:
+                    diff_output = result.diff_output
+            return scratch, diff_output
 
-    scratch = asyncio.run(get())
+    scratch, diff_output = asyncio.run(get())
 
     if output_json:
         data = {
@@ -566,15 +593,59 @@ def scratch_get(
             "match_percent": ((scratch.max_score - scratch.score) / scratch.max_score * 100) if scratch.max_score > 0 else 0,
             "source_code": scratch.source_code,
         }
+        if show_context:
+            data["context"] = scratch.context
         print(json.dumps(data, indent=2))
     else:
         match_pct = ((scratch.max_score - scratch.score) / scratch.max_score * 100) if scratch.max_score > 0 else 0
         console.print(f"[bold cyan]{scratch.name}[/bold cyan] ({scratch.slug})")
         console.print(f"Match: {match_pct:.1f}%")
-        console.print(f"\n[bold]Source Code:[/bold]")
-        # Use markup=False to prevent Rich from interpreting brackets like [t0] as tags
-        source_display = scratch.source_code[:2000] if len(scratch.source_code) > 2000 else scratch.source_code
-        console.print(source_display, markup=False)
+
+        if show_context:
+            if grep_context:
+                # Search context for pattern
+                lines = scratch.context.splitlines()
+                matches = []
+                try:
+                    regex = re.compile(grep_context, re.IGNORECASE)
+                except re.error as e:
+                    console.print(f"[red]Invalid regex: {e}[/red]")
+                    raise typer.Exit(1)
+
+                for i, line in enumerate(lines):
+                    if regex.search(line):
+                        start = max(0, i - context_lines)
+                        end = min(len(lines), i + context_lines + 1)
+                        matches.append({"line_num": i + 1, "context": lines[start:end], "start": start + 1})
+
+                if not matches:
+                    console.print(f"[yellow]No matches for: {grep_context}[/yellow]")
+                else:
+                    console.print(f"\n[bold]Context matches for '{grep_context}':[/bold] ({len(matches)} found)\n")
+                    for idx, match in enumerate(matches[:10], 1):
+                        console.print(f"[cyan]Match {idx}[/cyan] (line {match['line_num']})")
+                        for j, line in enumerate(match["context"]):
+                            ln = match["start"] + j
+                            marker = ">>> " if ln == match["line_num"] else "    "
+                            console.print(f"{marker}{ln:5d}: {line}", markup=False)
+                        console.print()
+                    if len(matches) > 10:
+                        console.print(f"[dim]... and {len(matches) - 10} more matches[/dim]")
+            else:
+                # Show full context (truncated)
+                console.print(f"\n[bold]Context:[/bold] ({len(scratch.context):,} bytes)")
+                ctx_display = scratch.context[:5000] if len(scratch.context) > 5000 else scratch.context
+                console.print(ctx_display, markup=False)
+                if len(scratch.context) > 5000:
+                    console.print(f"\n[dim]... truncated ({len(scratch.context) - 5000:,} more bytes, use --grep to search)[/dim]")
+        else:
+            console.print(f"\n[bold]Source Code:[/bold]")
+            # Use markup=False to prevent Rich from interpreting brackets like [t0] as tags
+            source_display = scratch.source_code[:2000] if len(scratch.source_code) > 2000 else scratch.source_code
+            console.print(source_display, markup=False)
+
+    if show_diff and diff_output:
+        _format_diff_output(diff_output, max_lines)
 
 
 @scratch_app.command("search")
