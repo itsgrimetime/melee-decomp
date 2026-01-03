@@ -83,6 +83,109 @@ class TestExtractCommands:
         # Should run without crashing
         assert result.exit_code == 0 or "not found" in result.stdout.lower()
 
+    def test_extract_list_with_file_filter(self, melee_root_exists):
+        """Test extract list with --file filter option."""
+        result = runner.invoke(app, [
+            "extract", "list",
+            "--melee-root", str(melee_root_exists),
+            "--file", "lb/",
+            "--limit", "5"
+        ])
+
+        # Should run without crashing
+        assert result.exit_code == 0
+        # Should show file filter in output
+        assert "file='lb/'" in result.stdout
+
+    def test_extract_list_file_filter_help(self):
+        """Test that --file option is documented."""
+        result = runner.invoke(app, ["extract", "list", "--help"])
+        assert result.exit_code == 0
+        assert "--file" in result.stdout or "-f" in result.stdout
+        assert "filename" in result.stdout.lower() or "filter" in result.stdout.lower()
+
+    def test_extract_files_help(self):
+        """Test extract files command help output."""
+        result = runner.invoke(app, ["extract", "files", "--help"])
+        assert result.exit_code == 0
+        assert "List all source files" in result.stdout
+        assert "--module" in result.stdout
+        assert "--status" in result.stdout
+        assert "--sort" in result.stdout
+        assert "--limit" in result.stdout
+
+    def test_extract_files_basic(self, melee_root_exists):
+        """Test basic extract files command."""
+        result = runner.invoke(app, [
+            "extract", "files",
+            "--melee-root", str(melee_root_exists),
+            "--limit", "5"
+        ])
+
+        # Should succeed
+        assert result.exit_code == 0
+        # Should show table headers
+        assert "Source Files" in result.stdout
+        assert "File" in result.stdout
+        assert "Status" in result.stdout
+        assert "Match" in result.stdout
+        assert "Matched" in result.stdout
+        assert "Unmatched" in result.stdout
+
+    def test_extract_files_with_module_filter(self, melee_root_exists):
+        """Test extract files with module filter."""
+        result = runner.invoke(app, [
+            "extract", "files",
+            "--melee-root", str(melee_root_exists),
+            "--module", "lb",
+            "--limit", "5"
+        ])
+
+        # Should succeed
+        assert result.exit_code == 0
+        # Should show module filter in summary
+        assert "module=lb" in result.stdout
+
+    def test_extract_files_with_status_filter(self, melee_root_exists):
+        """Test extract files with status filter."""
+        result = runner.invoke(app, [
+            "extract", "files",
+            "--melee-root", str(melee_root_exists),
+            "--status", "NonMatching",
+            "--limit", "5"
+        ])
+
+        # Should succeed
+        assert result.exit_code == 0
+        # Should show status filter in summary
+        assert "status=NonMatching" in result.stdout
+
+    def test_extract_files_sort_by_unmatched(self, melee_root_exists):
+        """Test extract files sorted by unmatched count."""
+        result = runner.invoke(app, [
+            "extract", "files",
+            "--melee-root", str(melee_root_exists),
+            "--sort", "unmatched",
+            "--limit", "5"
+        ])
+
+        # Should succeed
+        assert result.exit_code == 0
+        assert "Source Files" in result.stdout
+
+    def test_extract_files_sort_by_match(self, melee_root_exists):
+        """Test extract files sorted by match percentage."""
+        result = runner.invoke(app, [
+            "extract", "files",
+            "--melee-root", str(melee_root_exists),
+            "--sort", "match",
+            "--limit", "5"
+        ])
+
+        # Should succeed
+        assert result.exit_code == 0
+        assert "Source Files" in result.stdout
+
     def test_extract_get_help(self):
         """Test extract get command help output."""
         result = runner.invoke(app, ["extract", "get", "--help"])

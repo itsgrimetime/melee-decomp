@@ -503,6 +503,9 @@ def extract_list(
     exclude_subdir: Annotated[
         Optional[list[str]], typer.Option("--exclude-subdir", help="Exclude functions in these subdirectories (can be repeated)")
     ] = None,
+    file_filter: Annotated[
+        Optional[str], typer.Option("--file", "-f", help="Filter by filename (partial match, e.g., 'lbfile.c' or 'lb/')")
+    ] = None,
 ):
     """List unmatched functions from the melee project.
 
@@ -554,6 +557,15 @@ def extract_list(
                 return True
         return False
 
+    # Build file filter check
+    def _matches_file_filter(file_path: str) -> bool:
+        if not file_filter:
+            return True
+        path_lower = file_path.lower()
+        filter_lower = file_filter.lower()
+        # Match if filter appears anywhere in path
+        return filter_lower in path_lower
+
     # Filter functions
     functions = [
         f for f in result.functions
@@ -563,6 +575,7 @@ def extract_list(
         and (not matching_only or f.object_status == "Matching")
         and (not module or f"/{module}/" in f.file_path.lower())
         and not _is_excluded_subdir(f.file_path)
+        and _matches_file_filter(f.file_path)
     ]
 
     # Sort functions
@@ -612,7 +625,156 @@ def extract_list(
     matching_msg = ", Matching files only" if matching_only else ""
     module_msg = f", {module}/ only" if module else ""
     subdir_msg = f", excluding {', '.join(exclude_subdir)}" if exclude_subdir else ""
-    console.print(f"\n[dim]Found {len(functions)} functions (from {result.total_functions} total{excluded_msg}{matching_msg}{module_msg}{subdir_msg})[/dim]")
+    file_msg = f", file='{file_filter}'" if file_filter else ""
+    console.print(f"\n[dim]Found {len(functions)} functions (from {result.total_functions} total{excluded_msg}{matching_msg}{module_msg}{subdir_msg}{file_msg})[/dim]")
+
+
+@extract_app.command("files")
+def extract_files(
+    melee_root: Annotated[
+        Optional[Path], typer.Option("--melee-root", "-m", help="Path to melee submodule (auto-detects agent worktree)")
+    ] = None,
+    module: Annotated[
+        Optional[str], typer.Option("--module", help="Filter by module path (e.g., ft, lb, gr, it)")
+    ] = None,
+    status_filter: Annotated[
+        Optional[str], typer.Option("--status", "-s", help="Filter by status: Matching, NonMatching, Equivalent")
+    ] = None,
+    sort_by: Annotated[
+        str, typer.Option("--sort", help="Sort by: name, match, unmatched, total")
+    ] = "name",
+    limit: Annotated[
+        int, typer.Option("--limit", "-n", help="Maximum number of results (0 for all)")
+    ] = 0,
+    show_complete: Annotated[
+        bool, typer.Option("--show-complete", help="Show files that are 100% matched")
+    ] = False,
+):
+    """List all source files with matching statistics.
+
+    Shows per-file breakdown of matched vs unmatched functions.
+    Useful for identifying files that are close to completion or
+    finding files with many unmatched functions to work on.
+
+    Examples:
+        melee-agent extract files --module lb
+        melee-agent extract files --sort unmatched --limit 20
+        melee-agent extract files --status NonMatching
+    """
+    from collections import defaultdict
+
+    # Auto-detect agent worktree
+    melee_root = resolve_melee_root(melee_root)
+
+    from src.extractor import FunctionExtractor
+
+    extractor = FunctionExtractor(melee_root)
+    result = extractor.extract_all_functions(include_asm=False, include_context=False)
+
+    # Group functions by file
+    file_stats: dict[str, dict] = defaultdict(lambda: {
+        "total": 0,
+        "matched": 0,
+        "unmatched": 0,
+        "status": "Unknown",
+        "lib": None,
+        "match_sum": 0.0,
+    })
+
+    for func in result.functions:
+        stats = file_stats[func.file_path]
+        stats["total"] += 1
+        stats["match_sum"] += func.current_match
+        stats["status"] = func.object_status
+        stats["lib"] = func.lib
+        if func.is_matched:
+            stats["matched"] += 1
+        else:
+            stats["unmatched"] += 1
+
+    # Convert to list for filtering/sorting
+    files = []
+    for file_path, stats in file_stats.items():
+        match_pct = (stats["match_sum"] / stats["total"] * 100) if stats["total"] > 0 else 0.0
+        files.append({
+            "file_path": file_path,
+            "status": stats["status"],
+            "lib": stats["lib"],
+            "total": stats["total"],
+            "matched": stats["matched"],
+            "unmatched": stats["unmatched"],
+            "match_pct": match_pct,
+        })
+
+    # Apply filters
+    if module:
+        files = [f for f in files if f"/{module}/" in f["file_path"].lower()]
+
+    if status_filter:
+        files = [f for f in files if f["status"].lower() == status_filter.lower()]
+
+    if not show_complete:
+        files = [f for f in files if f["match_pct"] < 100.0]
+
+    # Sort
+    if sort_by == "match":
+        files = sorted(files, key=lambda f: -f["match_pct"])
+    elif sort_by == "unmatched":
+        files = sorted(files, key=lambda f: -f["unmatched"])
+    elif sort_by == "total":
+        files = sorted(files, key=lambda f: -f["total"])
+    else:  # name
+        files = sorted(files, key=lambda f: f["file_path"])
+
+    # Apply limit
+    if limit > 0:
+        files = files[:limit]
+
+    # Build table
+    table = Table(title="Source Files")
+    table.add_column("File", style="cyan")
+    table.add_column("Status", style="yellow")
+    table.add_column("Match %", justify="right")
+    table.add_column("Matched", justify="right", style="green")
+    table.add_column("Unmatched", justify="right", style="red")
+    table.add_column("Total", justify="right")
+
+    for f in files:
+        # Color match percentage based on progress
+        match_pct = f["match_pct"]
+        if match_pct >= 95:
+            pct_style = "green"
+        elif match_pct >= 50:
+            pct_style = "yellow"
+        else:
+            pct_style = "red"
+
+        table.add_row(
+            f["file_path"],
+            f["status"],
+            f"[{pct_style}]{match_pct:.1f}%[/{pct_style}]",
+            str(f["matched"]),
+            str(f["unmatched"]),
+            str(f["total"]),
+        )
+
+    console.print(table)
+
+    # Summary stats
+    total_files = len(files)
+    total_funcs = sum(f["total"] for f in files)
+    total_matched = sum(f["matched"] for f in files)
+    total_unmatched = sum(f["unmatched"] for f in files)
+    overall_pct = (total_matched / total_funcs * 100) if total_funcs > 0 else 0
+
+    filter_msgs = []
+    if module:
+        filter_msgs.append(f"module={module}")
+    if status_filter:
+        filter_msgs.append(f"status={status_filter}")
+    filter_str = f" ({', '.join(filter_msgs)})" if filter_msgs else ""
+
+    console.print(f"\n[dim]{total_files} files{filter_str}: {total_matched}/{total_funcs} functions matched ({overall_pct:.1f}%), {total_unmatched} remaining[/dim]")
 
 
 @extract_app.command("get")
