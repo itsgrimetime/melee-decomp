@@ -695,7 +695,10 @@ def extract_files(
     # Convert to list for filtering/sorting
     files = []
     for file_path, stats in file_stats.items():
-        match_pct = (stats["match_sum"] / stats["total"] * 100) if stats["total"] > 0 else 0.0
+        # Average match score across all functions (can be 99.9% even with unmatched)
+        avg_score = (stats["match_sum"] / stats["total"] * 100) if stats["total"] > 0 else 0.0
+        # Percentage of functions fully matched (100%)
+        done_pct = (stats["matched"] / stats["total"] * 100) if stats["total"] > 0 else 0.0
         files.append({
             "file_path": file_path,
             "status": stats["status"],
@@ -703,7 +706,8 @@ def extract_files(
             "total": stats["total"],
             "matched": stats["matched"],
             "unmatched": stats["unmatched"],
-            "match_pct": match_pct,
+            "avg_score": avg_score,
+            "done_pct": done_pct,
         })
 
     # Apply filters
@@ -714,11 +718,11 @@ def extract_files(
         files = [f for f in files if f["status"].lower() == status_filter.lower()]
 
     if not show_complete:
-        files = [f for f in files if f["match_pct"] < 100.0]
+        files = [f for f in files if f["done_pct"] < 100.0]
 
     # Sort
     if sort_by == "match":
-        files = sorted(files, key=lambda f: -f["match_pct"])
+        files = sorted(files, key=lambda f: -f["done_pct"])
     elif sort_by == "unmatched":
         files = sorted(files, key=lambda f: -f["unmatched"])
     elif sort_by == "total":
@@ -734,25 +738,34 @@ def extract_files(
     table = Table(title="Source Files")
     table.add_column("File", style="cyan")
     table.add_column("Status", style="yellow")
-    table.add_column("Match %", justify="right")
+    table.add_column("Done", justify="right")  # % of functions fully matched
+    table.add_column("Avg", justify="right")   # Average match score
     table.add_column("Matched", justify="right", style="green")
     table.add_column("Unmatched", justify="right", style="red")
     table.add_column("Total", justify="right")
 
     for f in files:
-        # Color match percentage based on progress
-        match_pct = f["match_pct"]
-        if match_pct >= 95:
-            pct_style = "green"
-        elif match_pct >= 50:
-            pct_style = "yellow"
+        # Color done percentage based on progress
+        done_pct = f["done_pct"]
+        if done_pct >= 95:
+            done_style = "green"
+        elif done_pct >= 50:
+            done_style = "yellow"
         else:
-            pct_style = "red"
+            done_style = "red"
+
+        # Color avg score - dim if same as done (no partial matches)
+        avg_score = f["avg_score"]
+        if abs(avg_score - done_pct) < 0.1:
+            avg_str = "[dim]-[/dim]"  # Same as done, no need to show
+        else:
+            avg_str = f"[dim]{avg_score:.1f}%[/dim]"
 
         table.add_row(
             f["file_path"],
             f["status"],
-            f"[{pct_style}]{match_pct:.1f}%[/{pct_style}]",
+            f"[{done_style}]{done_pct:.1f}%[/{done_style}]",
+            avg_str,
             str(f["matched"]),
             str(f["unmatched"]),
             str(f["total"]),
