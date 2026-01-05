@@ -431,8 +431,11 @@ def strip_function_bodies(
         func_start = node.start_byte
         func_decl = source_bytes[func_start:decl_end].decode("utf-8").rstrip()
 
-        # Remove 'inline' keyword from declaration (invalid without body in C89)
+        # Remove 'inline' and 'static' keywords from declaration
+        # - inline: invalid without body in C89
+        # - static: MWCC expects a body after static declarations
         import re
+        func_decl = re.sub(r'\bstatic\s+', '', func_decl)
         func_decl = re.sub(r'\binline\s+', '', func_decl)
 
         # Add semicolon and comment (match regex version format)

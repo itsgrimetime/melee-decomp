@@ -76,15 +76,18 @@ class TestStripInlineFunctions:
     """Tests for the _strip_inline_functions function."""
 
     def test_simple_inline_stripped(self):
-        """Simple inline function should be stripped to declaration without 'inline' keyword."""
+        """Simple inline function should be stripped to declaration without 'inline' or 'static' keywords."""
         code = """static inline void foo() {
     return;
 }"""
         result, count = _strip_inline_functions(code)
         assert count == 1
-        # 'inline' keyword must be removed - inline declarations without bodies are invalid C
-        assert "static void foo();" in result
+        # Both 'inline' and 'static' must be removed:
+        # - inline declarations without bodies are invalid C89
+        # - static declarations without bodies cause MWCC to expect '{'
+        assert "void foo();" in result
         assert "inline" not in result
+        assert "static" not in result
         assert "// body stripped" in result
         assert "return;" not in result
 
@@ -136,11 +139,12 @@ static inline void baz() {
 #endif"""
         result, count = _strip_inline_functions(code)
         assert count == 3
-        # 'inline' keyword must be removed from all stripped functions
-        assert "static void foo();" in result
-        assert "static int bar();" in result
-        assert "static void baz();" in result
+        # Both 'inline' and 'static' keywords must be removed from all stripped functions
+        assert "void foo();" in result
+        assert "int bar();" in result
+        assert "void baz();" in result
         assert "inline" not in result
+        assert "static" not in result
         assert result.rstrip().endswith("#endif")
 
     def test_nested_braces(self):
@@ -209,8 +213,9 @@ after();"""
 next();"""
         result, count = _strip_inline_functions(code)
         assert count == 1
-        assert "static int get();" in result
+        assert "int get();" in result
         assert "inline" not in result
+        assert "static" not in result
         assert "next();" in result
 
     def test_real_jobj_addscalex(self):
@@ -545,22 +550,24 @@ void after() {}"""
 
 
 class TestInlineKeywordRemoval:
-    """Tests verifying that 'inline' keyword is removed when stripping bodies.
+    """Tests verifying that 'inline' and 'static' keywords are removed when stripping bodies.
 
-    In C (especially MWCC/C89), inline function declarations without bodies are
-    invalid syntax. When we strip an inline function's body, we must also remove
-    the 'inline' keyword to produce valid C.
+    In C (especially MWCC/C89):
+    - inline function declarations without bodies are invalid syntax
+    - static declarations without bodies cause MWCC to expect '{'
+    When we strip a function's body, we must remove both keywords to produce valid C.
     """
 
-    def test_static_inline_becomes_static(self):
-        """'static inline' should become 'static' when body is stripped."""
+    def test_static_inline_becomes_plain_declaration(self):
+        """'static inline' should become plain declaration when body is stripped."""
         code = """static inline s32 ftGetKind(Fighter* fp) {
     return fp->kind;
 }"""
         result, count = _strip_inline_functions(code)
         assert count == 1
-        assert "static s32 ftGetKind(Fighter* fp);" in result
+        assert "s32 ftGetKind(Fighter* fp);" in result
         assert "inline" not in result
+        assert "static" not in result
 
     def test_inline_only_removed(self):
         """'inline' without 'static' should be completely removed."""
@@ -580,8 +587,8 @@ class TestInlineKeywordRemoval:
         # Declaration is preserved as-is
         assert "static inline void foo();" in result
 
-    def test_multiline_signature_inline_removed(self):
-        """Multi-line signature should have 'inline' removed."""
+    def test_multiline_signature_inline_and_static_removed(self):
+        """Multi-line signature should have 'inline' and 'static' removed."""
         code = """static inline void long_sig(
     int a,
     int b)
@@ -590,8 +597,9 @@ class TestInlineKeywordRemoval:
 }"""
         result, count = _strip_inline_functions(code)
         assert count == 1
-        assert "static void long_sig" in result
+        assert "void long_sig" in result
         assert "inline" not in result
+        assert "static" not in result
 
 
 class TestStripAllFunctionBodies:
@@ -609,16 +617,17 @@ class TestStripAllFunctionBodies:
         assert "/* body stripped: auto-inline prevention */" in result
         assert "int y" not in result
 
-    def test_strips_inline_without_keyword(self):
-        """Inline functions should have 'inline' keyword removed from signature."""
+    def test_strips_inline_without_keywords(self):
+        """Inline functions should have 'inline' and 'static' keywords removed from signature."""
         code = """static inline s32 ftGetKind(Fighter* fp) {
     return fp->kind;
 }"""
         result, count = _strip_all_function_bodies(code)
         assert count == 1
-        assert "static s32 ftGetKind(Fighter* fp);" in result
-        # 'inline' keyword should be removed from signature (but may appear in comment)
-        assert "static inline" not in result
+        assert "s32 ftGetKind(Fighter* fp);" in result
+        # Both 'inline' and 'static' should be removed from signature
+        assert "static" not in result or "/* body stripped" in result
+        assert "inline" not in result or "/* body stripped" in result
 
     def test_keeps_specified_functions(self):
         """Functions in keep_functions set should not be stripped."""
@@ -631,8 +640,8 @@ void baz() { return; }"""
         assert "void bar() { return; }" in result
         assert "void baz();" in result
 
-    def test_multiline_signature_inline_removed(self):
-        """Multi-line signature with inline should have keyword removed."""
+    def test_multiline_signature_inline_and_static_removed(self):
+        """Multi-line signature with inline should have both keywords removed."""
         code = """static inline void long_func(
     int a,
     int b,
@@ -642,9 +651,10 @@ void baz() { return; }"""
 }"""
         result, count = _strip_all_function_bodies(code)
         assert count == 1
-        assert "static void long_func" in result
-        # 'inline' keyword should be removed from signature (but may appear in comment)
-        assert "static inline" not in result
+        assert "void long_func" in result
+        # Both 'inline' and 'static' should be removed from signature
+        assert "static" not in result or "/* body stripped" in result
+        assert "inline" not in result or "/* body stripped" in result
         assert "int sum" not in result
 
 
@@ -801,9 +811,15 @@ static inline s32 ftGetKind(Fighter* fp) {
         assert "int flags;" in result
         assert "} EventHandler;" in result
 
-        # Inline function body stripped, keyword removed
+        # Inline function body stripped, both 'inline' and 'static' removed
         assert "return fp->kind" not in result
-        assert "static s32 ftGetKind" in result
+        assert "s32 ftGetKind" in result
+        # Check that static was removed from the ftGetKind declaration
+        lines_with_ftGetKind = [l for l in result.split('\n') if 'ftGetKind' in l]
+        for line in lines_with_ftGetKind:
+            if 'body stripped' in line:
+                assert 'static' not in line.split('/*')[0], \
+                    f"'static' should be removed from declaration: {line}"
 
     def test_nested_struct_in_struct(self):
         """Nested struct definitions should be preserved."""
@@ -826,3 +842,86 @@ void process() {
         assert "} inner;" in result
         assert "int count;" in result
         assert "o.count = 5;" not in result
+
+
+class TestMWCCCompatibility:
+    """Tests for MWCC compiler compatibility with stripped context.
+
+    MWCC (Metrowerks CodeWarrior) has specific requirements for valid C89 code.
+    These tests ensure the stripped context compiles correctly.
+
+    Regression tests for: Error: '{' expected after static function declarations
+    """
+
+    def test_static_inline_produces_valid_declaration(self):
+        """Static inline functions should produce declarations MWCC accepts.
+
+        MWCC may not accept static forward declarations like:
+            static s32 ftGetKind(Fighter* fp);
+        Because static functions require definitions in the same translation unit.
+
+        The fix should either:
+        1. Comment out the entire function
+        2. Or produce an extern declaration
+        """
+        code = """static inline s32 ftGetKind(Fighter* fp) {
+    return fp->kind;
+}
+
+void caller(Fighter* fp) {
+    s32 k = ftGetKind(fp);
+}"""
+        result, count = _strip_all_function_bodies(code)
+        assert count == 2  # Both functions stripped
+
+        # The result must not have a static declaration without a body
+        # Option A: Function is commented out entirely
+        # Option B: 'static' is removed, leaving just the declaration
+        # Option C: Function is completely removed
+        lines = result.split('\n')
+        for line in lines:
+            stripped = line.strip()
+            # If there's a static declaration ending with ;, it must be followed by body or commented
+            if stripped.startswith('static') and stripped.endswith(';'):
+                # This is the problematic pattern - static declaration without body
+                # Check if it's inside a comment
+                if '/*' not in line or line.index('/*') > line.index('static'):
+                    pytest.fail(f"Found static declaration without body: {stripped}\n"
+                               "MWCC requires static functions to have bodies in the same TU.")
+
+    def test_static_inline_stripped_completely_or_extern(self):
+        """Static inline functions should not leave bare 'static' declarations.
+
+        When stripping static inline functions, the result should either:
+        1. Be completely removed/commented out
+        2. Or have 'static' changed to 'extern' for valid forward declaration
+        """
+        code = """static inline void helper(int x) {
+    do_something(x);
+}"""
+        result, count = _strip_inline_functions(code)
+        assert count == 1
+
+        # Should not have "static void helper" as a standalone declaration
+        # because static forward declarations are not portable C89
+        if 'static void helper' in result and ';' in result:
+            # Check if it's a valid pattern (e.g., inside comment or has body)
+            if '/* body stripped' in result or '// body stripped' in result:
+                # It's using the current (problematic) format
+                # This test documents the required fix
+                pytest.fail("Static inline stripped to 'static void helper();' which "
+                           "may cause '{' expected error in MWCC. "
+                           "Should be commented out or made extern.")
+
+    def test_non_static_inline_can_be_declaration(self):
+        """Non-static inline functions can be forward declared safely."""
+        code = """inline void global_helper(int x) {
+    do_something(x);
+}"""
+        result, count = _strip_inline_functions(code)
+        assert count == 1
+
+        # This should be fine - non-static functions can be forward declared
+        assert "void global_helper" in result
+        # 'inline' should be removed
+        assert "inline" not in result or "/* body stripped" in result

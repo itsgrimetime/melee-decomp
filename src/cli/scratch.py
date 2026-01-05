@@ -793,14 +793,95 @@ def scratch_search(
         console.print(table)
 
 
-def _preprocess_context(context: str) -> tuple[str, bool]:
-    """Preprocess C context to remove preprocessor directives.
+def _strip_static_assert(context: str) -> str:
+    """Remove _Static_assert statements from C context.
 
-    m2c doesn't support preprocessor directives, so we run gcc -E
-    to expand macros and remove #include/#define/#ifdef etc.
+    _Static_assert is a C11 feature that m2c decompiler cannot parse.
+    This function removes these statements while preserving the rest of the code.
+
+    Handles both single-line and multi-line _Static_assert statements:
+        _Static_assert(sizeof(Foo) == 8, "message");
+        _Static_assert((sizeof(struct Bar) == 0x96000), "("
+        "continuation" ") failed");
 
     Args:
-        context: Raw C context with preprocessor directives
+        context: C context that may contain _Static_assert statements
+
+    Returns:
+        Context with _Static_assert statements removed
+    """
+    import re
+
+    if '_Static_assert' not in context:
+        return context
+
+    # Match _Static_assert(...); including multi-line variants
+    # This regex handles:
+    # - Nested parentheses in the expression
+    # - String literals that may span lines (with "" continuation)
+    # - Whitespace variations
+    lines = context.split('\n')
+    result_lines = []
+    in_static_assert = False
+    paren_depth = 0
+
+    for line in lines:
+        if not in_static_assert:
+            # Check if this line starts a _Static_assert
+            stripped = line.lstrip()
+            if stripped.startswith('_Static_assert'):
+                in_static_assert = True
+                # Count parentheses to track nesting
+                paren_depth = 0
+                for char in line:
+                    if char == '(':
+                        paren_depth += 1
+                    elif char == ')':
+                        paren_depth -= 1
+
+                # Check if statement ends on this line
+                if paren_depth == 0 and ';' in line[line.find('_Static_assert'):]:
+                    in_static_assert = False
+                    # Skip this line entirely (or add a comment)
+                    result_lines.append(f'/* {stripped.rstrip()} - removed for m2c */')
+                else:
+                    # Multi-line, start skipping
+                    result_lines.append(f'/* _Static_assert removed for m2c:')
+                continue
+            else:
+                result_lines.append(line)
+        else:
+            # Inside a multi-line _Static_assert
+            for char in line:
+                if char == '(':
+                    paren_depth += 1
+                elif char == ')':
+                    paren_depth -= 1
+
+            if paren_depth <= 0 and ';' in line:
+                # End of _Static_assert
+                in_static_assert = False
+                result_lines.append(f'   {line.strip()} */')
+            else:
+                # Still inside, add as comment
+                result_lines.append(f'   {line.strip()}')
+
+    return '\n'.join(result_lines)
+
+
+def _preprocess_context(context: str) -> tuple[str, bool]:
+    """Preprocess C context for m2c decompiler compatibility.
+
+    m2c doesn't support:
+    - Preprocessor directives (#include, #define, #ifdef, etc.)
+    - C11 features like _Static_assert
+
+    This function handles both by:
+    1. Running gcc -E to expand macros and remove directives (if present)
+    2. Stripping _Static_assert statements (which may be introduced by macro expansion)
+
+    Args:
+        context: Raw C context that may contain incompatible features
 
     Returns:
         Tuple of (preprocessed context, success)
@@ -812,35 +893,39 @@ def _preprocess_context(context: str) -> tuple[str, bool]:
         return context, True
 
     # Check if context has preprocessor directives
-    if not any(line.strip().startswith('#') for line in context.split('\n')):
-        return context, True  # No preprocessing needed
+    has_directives = any(line.strip().startswith('#') for line in context.split('\n'))
 
-    try:
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.c', delete=False) as f:
-            f.write(context)
-            temp_path = f.name
+    if has_directives:
+        try:
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.c', delete=False) as f:
+                f.write(context)
+                temp_path = f.name
 
-        # Run gcc -E to preprocess (expand macros, remove directives)
-        # -P removes line markers, -nostdinc avoids system headers
-        result = subprocess.run(
-            ['gcc', '-E', '-P', '-nostdinc', '-x', 'c', temp_path],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
+            # Run gcc -E to preprocess (expand macros, remove directives)
+            # -P removes line markers, -nostdinc avoids system headers
+            result = subprocess.run(
+                ['gcc', '-E', '-P', '-nostdinc', '-x', 'c', temp_path],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
 
-        # Clean up temp file
-        import os
-        os.unlink(temp_path)
+            # Clean up temp file
+            import os
+            os.unlink(temp_path)
 
-        if result.returncode == 0:
-            return result.stdout, True
-        else:
-            # Preprocessing failed, return original
-            return context, False
+            if result.returncode == 0:
+                context = result.stdout
+            # If preprocessing failed, continue with original context
 
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        return context, False
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            pass  # Continue with original context
+
+    # Always strip _Static_assert AFTER macro expansion
+    # (STATIC_ASSERT macros expand to _Static_assert)
+    context = _strip_static_assert(context)
+
+    return context, True
 
 
 @scratch_app.command("decompile")

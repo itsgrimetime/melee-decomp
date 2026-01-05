@@ -237,6 +237,57 @@ int x = 5;
         assert result == context
         assert success is True
 
+    def test_static_assert_removed(self, preprocess_context):
+        """_Static_assert statements should be removed for m2c compatibility.
+
+        m2c decompiler can't parse _Static_assert which is a C11 feature.
+        This must be handled even when there are no preprocessor directives.
+
+        Regression test for: Syntax error when parsing C context at _Static_assert
+        """
+        context = """typedef struct {
+    int x;
+    int y;
+} Point;
+
+_Static_assert((sizeof(Point) == 8), "Point size mismatch");
+
+extern void foo(Point* p);
+"""
+        result, success = preprocess_context(context)
+        assert success is True
+        # _Static_assert should be removed or commented out
+        # Check that it's either not present, or inside a comment
+        if "_Static_assert" in result:
+            comment_start = result.find("/*")
+            static_assert_pos = result.find("_Static_assert")
+            assert comment_start != -1 and comment_start < static_assert_pos, \
+                f"_Static_assert should be removed or commented out, but found at position {static_assert_pos}"
+        # But the rest of the code should remain
+        assert "typedef struct" in result
+        assert "extern void foo" in result
+
+    def test_static_assert_multiline_removed(self, preprocess_context):
+        """Multi-line _Static_assert should also be removed."""
+        context = """typedef struct mnGallery_804A0B90_t {
+    char data[0x96000];
+} mnGallery_804A0B90_t;
+
+_Static_assert((sizeof(struct mnGallery_804A0B90_t) == 0x96000), "("
+"sizeof(struct mnGallery_804A0B90_t) == 0x96000" ") failed");
+
+void other_func(void);
+"""
+        result, success = preprocess_context(context)
+        assert success is True
+        # _Static_assert should be removed or commented out
+        if "_Static_assert" in result:
+            comment_start = result.find("/*")
+            static_assert_pos = result.find("_Static_assert")
+            assert comment_start != -1 and comment_start < static_assert_pos, \
+                f"_Static_assert should be removed or commented out, but found at position {static_assert_pos}"
+        assert "void other_func" in result
+
 
 class TestSlugExtraction:
     """Tests for slug extraction from URLs.

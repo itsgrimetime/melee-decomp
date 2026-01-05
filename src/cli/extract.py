@@ -129,7 +129,9 @@ def _strip_inline_functions(context: str) -> tuple[str, int]:
                 if open_braces > 0:
                     # Extract signature up to the brace
                     sig = stripped[:stripped.find('{')].rstrip()
-                    # Remove 'inline' keyword - inline declarations without bodies are invalid C
+                    # Remove 'inline' and 'static' keywords - static declarations without
+                    # bodies cause MWCC to expect '{', and inline is invalid in C89 without body
+                    sig = re.sub(r'\bstatic\s+', '', sig)
                     sig = re.sub(r'\binline\s+', '', sig)
                     filtered.append(sig + ';  // body stripped')
                     signature_lines = []
@@ -148,7 +150,9 @@ def _strip_inline_functions(context: str) -> tuple[str, int]:
                     # Found the opening brace - emit declaration
                     full_sig = ' '.join(signature_lines)
                     sig = full_sig[:full_sig.find('{')].rstrip()
-                    # Remove 'inline' keyword - inline declarations without bodies are invalid C
+                    # Remove 'inline' and 'static' keywords - static declarations without
+                    # bodies cause MWCC to expect '{', and inline is invalid in C89 without body
+                    sig = re.sub(r'\bstatic\s+', '', sig)
                     sig = re.sub(r'\binline\s+', '', sig)
                     filtered.append(sig + ';  // body stripped')
                     signature_lines = []
@@ -258,7 +262,9 @@ def _strip_all_function_bodies_regex(context: str, keep_functions: set[str] | No
                 if open_braces > 0:
                     # Found the opening brace - emit declaration and enter body
                     sig = stripped[:stripped.find('{')].rstrip()
-                    # Remove 'inline' keyword - inline declarations without bodies are invalid C
+                    # Remove 'inline' and 'static' keywords - static declarations without
+                    # bodies cause MWCC to expect '{', and inline is invalid in C89 without body
+                    sig = re.sub(r'\bstatic\s+', '', sig)
                     sig = re.sub(r'\binline\s+', '', sig)
                     filtered.append(sig + ';  /* body stripped: auto-inline prevention */')
                     in_signature = False
@@ -282,7 +288,9 @@ def _strip_all_function_bodies_regex(context: str, keep_functions: set[str] | No
                     sig = full_sig[:sig_end].rstrip()
                 else:
                     sig = full_sig.rstrip()
-                # Remove 'inline' keyword - inline declarations without bodies are invalid C
+                # Remove 'inline' and 'static' keywords - static declarations without
+                # bodies cause MWCC to expect '{', and inline is invalid in C89 without body
+                sig = re.sub(r'\bstatic\s+', '', sig)
                 sig = re.sub(r'\binline\s+', '', sig)
                 filtered.append(sig + ';  /* body stripped: auto-inline prevention */')
                 in_signature = False
@@ -629,6 +637,52 @@ def extract_list(
     console.print(f"\n[dim]Found {len(functions)} functions (from {result.total_functions} total{excluded_msg}{matching_msg}{module_msg}{subdir_msg}{file_msg})[/dim]")
 
 
+def _get_db_file_stats(func_to_file: dict[str, str]) -> dict[str, dict]:
+    """Query state DB for function status grouped by source file.
+
+    Args:
+        func_to_file: Mapping from function name to source file path
+
+    Returns dict mapping file_path -> {pending: int, committed: int, total: int}
+    - pending = in_progress or matched (has scratch work, not committed)
+    - committed = committed in some worktree (not yet in main)
+    """
+    from src.db import get_db
+
+    db = get_db()
+    stats: dict[str, dict] = {}
+
+    with db.connection() as conn:
+        # Query all tracked functions with their status
+        cursor = conn.execute("""
+            SELECT function_name, status
+            FROM functions
+            WHERE status NOT IN ('unclaimed', 'merged')
+        """)
+
+        for row in cursor.fetchall():
+            func_name = row[0]
+            status = row[1]
+
+            # Look up file path from function name
+            file_path = func_to_file.get(func_name)
+            if not file_path:
+                continue
+
+            if file_path not in stats:
+                stats[file_path] = {"pending": 0, "committed": 0, "total": 0}
+
+            stats[file_path]["total"] += 1
+
+            # Categorize by status
+            if status in ('in_progress', 'matched'):
+                stats[file_path]["pending"] += 1
+            elif status in ('committed', 'committed_needs_fix', 'in_review'):
+                stats[file_path]["committed"] += 1
+
+    return stats
+
+
 @extract_app.command("files")
 def extract_files(
     melee_root: Annotated[
@@ -641,7 +695,7 @@ def extract_files(
         Optional[str], typer.Option("--status", "-s", help="Filter by status: Matching, NonMatching, Equivalent")
     ] = None,
     sort_by: Annotated[
-        str, typer.Option("--sort", help="Sort by: name, match, unmatched, total")
+        str, typer.Option("--sort", help="Sort by: name, match, unmatched, total, pending")
     ] = "name",
     limit: Annotated[
         int, typer.Option("--limit", "-n", help="Maximum number of results (0 for all)")
@@ -649,6 +703,9 @@ def extract_files(
     show_complete: Annotated[
         bool, typer.Option("--show-complete", help="Show files that are 100% matched")
     ] = False,
+    show_db: Annotated[
+        bool, typer.Option("--show-db/--no-db", help="Show state DB columns (Pending/Committed work)")
+    ] = True,
 ):
     """List all source files with matching statistics.
 
@@ -656,9 +713,15 @@ def extract_files(
     Useful for identifying files that are close to completion or
     finding files with many unmatched functions to work on.
 
+    The --show-db flag (default on) adds columns showing work tracked in the
+    state database that may not yet be reflected in report.json:
+    - Pending: functions with scratches (in_progress/matched status)
+    - Committed: functions committed in worktrees (not yet in main)
+
     Examples:
         melee-agent extract files --module lb
         melee-agent extract files --sort unmatched --limit 20
+        melee-agent extract files --sort pending  # files with most pending work
         melee-agent extract files --status NonMatching
     """
     from collections import defaultdict
@@ -670,6 +733,12 @@ def extract_files(
 
     extractor = FunctionExtractor(melee_root)
     result = extractor.extract_all_functions(include_asm=False, include_context=False)
+
+    # Build function -> file mapping for DB lookup
+    func_to_file = {func.name: func.file_path for func in result.functions}
+
+    # Get DB stats if requested
+    db_stats = _get_db_file_stats(func_to_file) if show_db else {}
 
     # Group functions by file
     file_stats: dict[str, dict] = defaultdict(lambda: {
@@ -699,6 +768,12 @@ def extract_files(
         avg_score = (stats["match_sum"] / stats["total"] * 100) if stats["total"] > 0 else 0.0
         # Percentage of functions fully matched (100%)
         done_pct = (stats["matched"] / stats["total"] * 100) if stats["total"] > 0 else 0.0
+
+        # Get DB stats for this file
+        db_file_stats = db_stats.get(file_path, {})
+        pending = db_file_stats.get("pending", 0)
+        committed = db_file_stats.get("committed", 0)
+
         files.append({
             "file_path": file_path,
             "status": stats["status"],
@@ -708,6 +783,8 @@ def extract_files(
             "unmatched": stats["unmatched"],
             "avg_score": avg_score,
             "done_pct": done_pct,
+            "pending": pending,
+            "committed": committed,
         })
 
     # Apply filters
@@ -727,6 +804,9 @@ def extract_files(
         files = sorted(files, key=lambda f: -f["unmatched"])
     elif sort_by == "total":
         files = sorted(files, key=lambda f: -f["total"])
+    elif sort_by == "pending":
+        # Sort by pending + committed (total in-flight work)
+        files = sorted(files, key=lambda f: -(f["pending"] + f["committed"]))
     else:  # name
         files = sorted(files, key=lambda f: f["file_path"])
 
@@ -743,6 +823,9 @@ def extract_files(
     table.add_column("Matched", justify="right", style="green")
     table.add_column("Unmatched", justify="right", style="red")
     table.add_column("Total", justify="right")
+    if show_db:
+        table.add_column("Pend", justify="right", style="magenta")  # Pending scratches
+        table.add_column("Commit", justify="right", style="blue")   # Committed in worktrees
 
     for f in files:
         # Color done percentage based on progress
@@ -761,7 +844,7 @@ def extract_files(
         else:
             avg_str = f"[dim]{avg_score:.1f}%[/dim]"
 
-        table.add_row(
+        row = [
             f["file_path"],
             f["status"],
             f"[{done_style}]{done_pct:.1f}%[/{done_style}]",
@@ -769,7 +852,15 @@ def extract_files(
             str(f["matched"]),
             str(f["unmatched"]),
             str(f["total"]),
-        )
+        ]
+        if show_db:
+            # Show pending/committed counts, dim if zero
+            pending = f["pending"]
+            committed = f["committed"]
+            row.append(str(pending) if pending > 0 else "[dim]-[/dim]")
+            row.append(str(committed) if committed > 0 else "[dim]-[/dim]")
+
+        table.add_row(*row)
 
     console.print(table)
 
@@ -787,7 +878,15 @@ def extract_files(
         filter_msgs.append(f"status={status_filter}")
     filter_str = f" ({', '.join(filter_msgs)})" if filter_msgs else ""
 
-    console.print(f"\n[dim]{total_files} files{filter_str}: {total_matched}/{total_funcs} functions matched ({overall_pct:.1f}%), {total_unmatched} remaining[/dim]")
+    # DB stats summary
+    db_msg = ""
+    if show_db:
+        total_pending = sum(f["pending"] for f in files)
+        total_committed = sum(f["committed"] for f in files)
+        if total_pending > 0 or total_committed > 0:
+            db_msg = f" | DB: {total_pending} pending, {total_committed} committed"
+
+    console.print(f"\n[dim]{total_files} files{filter_str}: {total_matched}/{total_funcs} functions matched ({overall_pct:.1f}%), {total_unmatched} remaining{db_msg}[/dim]")
 
 
 @extract_app.command("get")
