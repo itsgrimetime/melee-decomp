@@ -383,6 +383,340 @@ class StateDB:
             return [dict(row) for row in cursor.fetchall()]
 
     # =========================================================================
+    # Address Tracking Operations
+    # =========================================================================
+
+    def get_function_by_address(self, address: str) -> dict | None:
+        """Look up function by canonical address.
+
+        Args:
+            address: Hex address like "0x80003100"
+
+        Returns:
+            Function record dict or None if not found
+        """
+        # Normalize address format
+        normalized = self._normalize_address(address)
+        if not normalized:
+            return None
+
+        with self.connection() as conn:
+            cursor = conn.execute(
+                "SELECT * FROM functions WHERE canonical_address = ?",
+                (normalized,)
+            )
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+    def _normalize_address(self, address: str | int | None) -> str | None:
+        """Normalize address to 0x{UPPERCASE_8_HEX} format.
+
+        Args:
+            address: Address in various formats:
+                - "0x80003100" (hex string with prefix)
+                - "80003100" (hex string without prefix, contains a-f)
+                - "2147506496" (decimal string, all digits)
+                - 2147506496 (decimal integer)
+
+        Returns:
+            Normalized string like "0x80003100" or None if invalid
+        """
+        if address is None:
+            return None
+
+        try:
+            if isinstance(address, int):
+                return f"0x{address:08X}"
+            elif isinstance(address, str):
+                addr_str = address.strip()
+                if addr_str.upper().startswith("0X"):
+                    # Explicit hex prefix
+                    addr_int = int(addr_str, 16)
+                elif any(c in addr_str.upper() for c in "ABCDEF"):
+                    # Contains hex digits a-f, must be hex
+                    addr_int = int(addr_str, 16)
+                elif addr_str.isdigit() and len(addr_str) > 8:
+                    # Long all-digit string is likely decimal (like virtual_address)
+                    addr_int = int(addr_str, 10)
+                else:
+                    # Short hex without prefix (like "80003100")
+                    addr_int = int(addr_str, 16)
+                return f"0x{addr_int:08X}"
+        except (ValueError, TypeError):
+            return None
+
+    def record_function_alias(
+        self,
+        canonical_address: str,
+        old_name: str,
+        new_name: str | None = None,
+        source: str = "report_sync",
+    ) -> None:
+        """Record a function rename (alias).
+
+        Args:
+            canonical_address: Hex address of the function
+            old_name: Previous function name
+            new_name: New function name (optional, for reference)
+            source: How detected: 'report_sync', 'manual', 'git_history', 'symbols'
+        """
+        normalized = self._normalize_address(canonical_address)
+        if not normalized:
+            return
+
+        with self.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO function_aliases (canonical_address, old_name, new_name, source)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(canonical_address, old_name) DO UPDATE SET
+                    new_name = COALESCE(excluded.new_name, new_name),
+                    source = excluded.source
+                """,
+                (normalized, old_name, new_name, source)
+            )
+
+            self.log_audit(
+                'alias', old_name, 'recorded',
+                new_value={
+                    'canonical_address': normalized,
+                    'old_name': old_name,
+                    'new_name': new_name,
+                    'source': source,
+                }
+            )
+
+    def get_aliases_for_address(self, address: str) -> list[dict]:
+        """Get all known names for an address.
+
+        Args:
+            address: Hex address like "0x80003100"
+
+        Returns:
+            List of alias records with old_name, new_name, renamed_at, source
+        """
+        normalized = self._normalize_address(address)
+        if not normalized:
+            return []
+
+        with self.connection() as conn:
+            cursor = conn.execute(
+                """
+                SELECT old_name, new_name, renamed_at, source
+                FROM function_aliases
+                WHERE canonical_address = ?
+                ORDER BY renamed_at DESC
+                """,
+                (normalized,)
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_function_by_name_or_address(
+        self,
+        name: str | None = None,
+        address: str | None = None,
+    ) -> dict | None:
+        """Look up function by name first, then by address.
+
+        This is the primary lookup method for handling renames:
+        1. Try to find by exact name match
+        2. If not found and address provided, look up by address
+        3. If found by address with different name, it's a rename
+
+        Args:
+            name: Function name to look up
+            address: Hex address as fallback
+
+        Returns:
+            Function record dict or None
+        """
+        # Try name first
+        if name:
+            func = self.get_function(name)
+            if func:
+                return func
+
+        # Fallback to address
+        if address:
+            return self.get_function_by_address(address)
+
+        return None
+
+    def bulk_update_addresses(
+        self,
+        address_map: dict[str, str],
+        agent_id: str | None = None,
+    ) -> int:
+        """Bulk update canonical_address for many functions.
+
+        Args:
+            address_map: Dict mapping function_name -> canonical_address
+            agent_id: Agent performing the update (for audit)
+
+        Returns:
+            Number of functions updated
+        """
+        if not address_map:
+            return 0
+
+        updated = 0
+        now = time.time()
+
+        with self.transaction() as conn:
+            for func_name, address in address_map.items():
+                normalized = self._normalize_address(address)
+                if not normalized:
+                    continue
+
+                cursor = conn.execute(
+                    """
+                    UPDATE functions
+                    SET canonical_address = ?, updated_at = ?
+                    WHERE function_name = ? AND (canonical_address IS NULL OR canonical_address != ?)
+                    """,
+                    (normalized, now, func_name, normalized)
+                )
+                if cursor.rowcount > 0:
+                    updated += 1
+
+            if updated > 0:
+                self.log_audit(
+                    'bulk_update', 'addresses', 'updated',
+                    agent_id=agent_id,
+                    metadata={'count': updated}
+                )
+
+        return updated
+
+    def merge_function_records(
+        self,
+        old_name: str,
+        new_name: str,
+        canonical_address: str,
+        agent_id: str | None = None,
+    ) -> bool:
+        """Merge old function record into new one, preserving history.
+
+        When a function is renamed, merge data from the old record
+        into the new one, preserving scratch slugs, PR info, etc.
+
+        Args:
+            old_name: Previous function name
+            new_name: New function name
+            canonical_address: Hex address
+            agent_id: Agent performing the merge
+
+        Returns:
+            True if merge was performed, False otherwise
+        """
+        normalized = self._normalize_address(canonical_address)
+        if not normalized:
+            return False
+
+        with self.transaction() as conn:
+            # Get both records
+            cursor = conn.execute(
+                "SELECT * FROM functions WHERE function_name IN (?, ?)",
+                (old_name, new_name)
+            )
+            rows = {row['function_name']: dict(row) for row in cursor.fetchall()}
+
+            old_record = rows.get(old_name)
+            new_record = rows.get(new_name)
+
+            if not old_record:
+                return False  # Nothing to merge from
+
+            # Record the alias
+            self.record_function_alias(normalized, old_name, new_name, source='report_sync')
+
+            # If new record exists, merge valuable data from old into new
+            if new_record:
+                # Fields to preserve from old record if new record doesn't have them
+                merge_fields = [
+                    'local_scratch_slug', 'production_scratch_slug',
+                    'commit_hash', 'branch', 'worktree_path',
+                    'pr_url', 'pr_number', 'pr_state',
+                    'notes',
+                ]
+
+                updates = []
+                params = []
+                for field in merge_fields:
+                    if old_record.get(field) and not new_record.get(field):
+                        updates.append(f"{field} = ?")
+                        params.append(old_record[field])
+
+                if updates:
+                    params.extend([time.time(), normalized, new_name])
+                    conn.execute(
+                        f"""
+                        UPDATE functions
+                        SET {', '.join(updates)}, updated_at = ?, canonical_address = ?
+                        WHERE function_name = ?
+                        """,
+                        params
+                    )
+
+                # Delete the old record
+                conn.execute(
+                    "DELETE FROM functions WHERE function_name = ?",
+                    (old_name,)
+                )
+
+                self.log_audit(
+                    'function', old_name, 'merged',
+                    agent_id=agent_id,
+                    old_value=old_record,
+                    new_value={'merged_into': new_name},
+                    metadata={'canonical_address': normalized}
+                )
+
+            else:
+                # No new record - just update the old record with new name and address
+                # This is trickier since function_name is the primary key
+                # We need to insert new and delete old
+                conn.execute(
+                    """
+                    INSERT INTO functions (
+                        function_name, match_percent, current_score, max_score, status,
+                        build_status, build_diagnosis, is_documented, documentation_status,
+                        documented_at, local_scratch_slug, production_scratch_slug,
+                        is_committed, commit_hash, branch, worktree_path,
+                        pr_url, pr_number, pr_state, claimed_by_agent, claimed_at,
+                        source_file_path, canonical_address, notes,
+                        created_at, updated_at,
+                        local_scratch_verified_at, production_scratch_verified_at, git_verified_at
+                    )
+                    SELECT
+                        ?, match_percent, current_score, max_score, status,
+                        build_status, build_diagnosis, is_documented, documentation_status,
+                        documented_at, local_scratch_slug, production_scratch_slug,
+                        is_committed, commit_hash, branch, worktree_path,
+                        pr_url, pr_number, pr_state, claimed_by_agent, claimed_at,
+                        source_file_path, ?, notes,
+                        created_at, ?,
+                        local_scratch_verified_at, production_scratch_verified_at, git_verified_at
+                    FROM functions WHERE function_name = ?
+                    """,
+                    (new_name, normalized, time.time(), old_name)
+                )
+                conn.execute(
+                    "DELETE FROM functions WHERE function_name = ?",
+                    (old_name,)
+                )
+
+                self.log_audit(
+                    'function', old_name, 'renamed',
+                    agent_id=agent_id,
+                    old_value=old_record,
+                    new_value={'new_name': new_name},
+                    metadata={'canonical_address': normalized}
+                )
+
+        return True
+
+    # =========================================================================
     # Scratch Operations
     # =========================================================================
 

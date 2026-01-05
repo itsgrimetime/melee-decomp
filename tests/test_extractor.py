@@ -441,6 +441,85 @@ class TestFunctionExtractor:
                 assert func_info.name == func_name
 
 
+class TestReportParser:
+    """Test the ReportParser class for report.json parsing."""
+
+    def test_init(self, melee_root):
+        """Test parser initialization."""
+        from src.extractor.report import ReportParser
+        parser = ReportParser(melee_root)
+        assert parser.melee_root == melee_root
+        assert parser.report_path == melee_root / "build" / "GALE01" / "report.json"
+
+    def test_get_function_matches(self, melee_root):
+        """Test getting function match data."""
+        from src.extractor.report import ReportParser
+        parser = ReportParser(melee_root)
+
+        try:
+            matches = parser.get_function_matches()
+        except FileNotFoundError:
+            pytest.skip("report.json not found - run ninja first")
+
+        # Should have functions
+        assert len(matches) > 0
+
+        # Check structure
+        for name, match in list(matches.items())[:5]:
+            assert match.name == name
+            assert 0 <= match.fuzzy_match_percent <= 100
+
+    def test_function_match_has_address(self, melee_root):
+        """Test that FunctionMatch includes address from virtual_address."""
+        from src.extractor.report import ReportParser
+        parser = ReportParser(melee_root)
+
+        try:
+            matches = parser.get_function_matches()
+        except FileNotFoundError:
+            pytest.skip("report.json not found - run ninja first")
+
+        # Find a function with an address
+        funcs_with_addr = [m for m in matches.values() if m.address]
+        assert len(funcs_with_addr) > 0, "No functions have addresses"
+
+        # Check address format
+        for match in funcs_with_addr[:5]:
+            assert match.address.startswith("0x"), f"Address should be hex: {match.address}"
+            assert len(match.address) == 10, f"Address should be 0xXXXXXXXX: {match.address}"
+
+    def test_get_function_match_single(self, melee_root):
+        """Test getting match data for a single function."""
+        from src.extractor.report import ReportParser
+        parser = ReportParser(melee_root)
+
+        try:
+            matches = parser.get_function_matches()
+        except FileNotFoundError:
+            pytest.skip("report.json not found - run ninja first")
+
+        if matches:
+            func_name = next(iter(matches.keys()))
+            match = parser.get_function_match(func_name)
+            assert match is not None
+            assert match.name == func_name
+
+    def test_get_overall_stats(self, melee_root):
+        """Test getting overall match statistics."""
+        from src.extractor.report import ReportParser
+        parser = ReportParser(melee_root)
+
+        try:
+            stats = parser.get_overall_stats()
+        except FileNotFoundError:
+            pytest.skip("report.json not found - run ninja first")
+
+        assert "total_functions" in stats
+        assert "matched_functions" in stats
+        assert "average_match" in stats
+        assert stats["total_functions"] >= 0
+
+
 class TestIntegration:
     """Integration tests combining multiple components."""
 

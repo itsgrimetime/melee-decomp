@@ -43,6 +43,10 @@ class FunctionMatch(BaseModel):
         ge=0.0,
         le=100.0
     )
+    address: Optional[str] = Field(
+        default=None,
+        description="Hex address like 0x80003100 (from virtual_address metadata)"
+    )
 
 
 class FunctionInfo(BaseModel):

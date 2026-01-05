@@ -188,9 +188,22 @@ class ReportParser:
         except (ValueError, TypeError):
             fuzzy_match = 0.0
 
+        # Extract virtual_address from metadata and convert to hex
+        address_hex = None
+        metadata = func_data.get("metadata", {})
+        virtual_address = metadata.get("virtual_address")
+        if virtual_address:
+            try:
+                # virtual_address is a decimal string like "2147506496"
+                addr_int = int(virtual_address)
+                address_hex = f"0x{addr_int:08X}"
+            except (ValueError, TypeError):
+                pass
+
         return FunctionMatch(
             name=name,
             fuzzy_match_percent=fuzzy_match,
+            address=address_hex,
         )
 
     def get_function_match(self, function_name: str) -> Optional[FunctionMatch]:

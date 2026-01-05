@@ -1,6 +1,6 @@
 """SQLite schema for agent state management."""
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 SCHEMA_SQL = """
 -- Core function tracking
@@ -37,6 +37,8 @@ CREATE TABLE IF NOT EXISTS functions (
     claimed_at REAL,
     -- File location
     source_file_path TEXT,
+    -- Address tracking (stable identifier for renames)
+    canonical_address TEXT,
     -- Metadata
     notes TEXT,
     created_at REAL DEFAULT (unixepoch('now', 'subsec')),
@@ -171,6 +173,23 @@ CREATE TABLE IF NOT EXISTS sync_state (
     synced_at REAL,
     PRIMARY KEY (local_slug, production_slug)
 );
+
+-- Function rename/alias tracking
+-- Tracks when functions get renamed (e.g., mn_80229860 -> MatchCondition)
+-- Uses canonical_address as the stable identifier
+CREATE TABLE IF NOT EXISTS function_aliases (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    canonical_address TEXT NOT NULL,
+    old_name TEXT NOT NULL,
+    new_name TEXT,
+    renamed_at REAL NOT NULL DEFAULT (unixepoch('now', 'subsec')),
+    source TEXT CHECK(source IN ('report_sync', 'manual', 'git_history', 'symbols') OR source IS NULL),
+    UNIQUE(canonical_address, old_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_aliases_address ON function_aliases(canonical_address);
+CREATE INDEX IF NOT EXISTS idx_aliases_old_name ON function_aliases(old_name);
+CREATE INDEX IF NOT EXISTS idx_functions_address ON functions(canonical_address);
 
 -- Database metadata
 CREATE TABLE IF NOT EXISTS db_meta (
@@ -698,5 +717,42 @@ def get_migrations() -> dict[int, str]:
                 updated_at
             FROM functions
             WHERE is_documented = TRUE OR documentation_status IN ('partial', 'complete');
+        """,
+        # Version 6 -> 7: Add canonical_address for stable function identification and alias tracking
+        6: """
+            -- Add canonical_address column to functions table
+            ALTER TABLE functions ADD COLUMN canonical_address TEXT;
+
+            -- Create index for address lookups
+            CREATE INDEX IF NOT EXISTS idx_functions_address ON functions(canonical_address);
+
+            -- Function rename/alias tracking table
+            CREATE TABLE IF NOT EXISTS function_aliases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                canonical_address TEXT NOT NULL,
+                old_name TEXT NOT NULL,
+                new_name TEXT,
+                renamed_at REAL NOT NULL DEFAULT (unixepoch('now', 'subsec')),
+                source TEXT CHECK(source IN ('report_sync', 'manual', 'git_history', 'symbols') OR source IS NULL),
+                UNIQUE(canonical_address, old_name)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_aliases_address ON function_aliases(canonical_address);
+            CREATE INDEX IF NOT EXISTS idx_aliases_old_name ON function_aliases(old_name);
+
+            -- View for functions with known aliases
+            CREATE VIEW IF NOT EXISTS v_function_aliases AS
+            SELECT
+                f.function_name,
+                f.canonical_address,
+                f.match_percent,
+                f.status,
+                fa.old_name as previous_name,
+                fa.renamed_at,
+                fa.source as rename_source
+            FROM functions f
+            LEFT JOIN function_aliases fa ON f.canonical_address = fa.canonical_address
+            WHERE fa.old_name IS NOT NULL
+            ORDER BY f.function_name, fa.renamed_at DESC;
         """,
     }

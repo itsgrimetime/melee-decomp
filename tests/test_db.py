@@ -327,6 +327,166 @@ class TestAuditLog:
         assert len(entries) >= 1
 
 
+class TestAddressTracking:
+    """Tests for function address tracking and rename detection.
+
+    Functions are identified by their canonical_address (hex like 0x80003100)
+    which remains stable across renames (e.g., mn_80003100 -> MyFunction).
+    """
+
+    def test_normalize_address_hex_with_prefix(self, db):
+        """Hex address with 0x prefix should normalize correctly."""
+        result = db._normalize_address("0x80003100")
+        assert result == "0x80003100"
+
+    def test_normalize_address_hex_without_prefix(self, db):
+        """Hex address without 0x prefix should normalize correctly."""
+        result = db._normalize_address("80003100")
+        assert result == "0x80003100"
+
+    def test_normalize_address_decimal_int(self, db):
+        """Decimal integer should normalize to hex."""
+        result = db._normalize_address(2147496192)  # 0x80003100
+        assert result == "0x80003100"
+
+    def test_normalize_address_decimal_string(self, db):
+        """Long decimal string should normalize to hex."""
+        result = db._normalize_address("2147496192")  # 0x80003100
+        assert result == "0x80003100"
+
+    def test_normalize_address_lowercase(self, db):
+        """Lowercase hex should normalize to uppercase."""
+        result = db._normalize_address("0x800abc00")
+        assert result == "0x800ABC00"
+
+    def test_normalize_address_none(self, db):
+        """None should return None."""
+        result = db._normalize_address(None)
+        assert result is None
+
+    def test_get_function_by_address(self, db):
+        """Should find function by canonical address."""
+        db.upsert_function("my_func", canonical_address="0x80003100")
+
+        func = db.get_function_by_address("0x80003100")
+        assert func is not None
+        assert func["function_name"] == "my_func"
+
+    def test_get_function_by_address_not_found(self, db):
+        """Should return None for unknown address."""
+        func = db.get_function_by_address("0x99999999")
+        assert func is None
+
+    def test_get_function_by_address_normalizes(self, db):
+        """Should normalize address before lookup."""
+        db.upsert_function("my_func", canonical_address="0x80003100")
+
+        # Look up with different format
+        func = db.get_function_by_address("80003100")
+        assert func is not None
+        assert func["function_name"] == "my_func"
+
+    def test_record_function_alias(self, db):
+        """Should record function rename alias."""
+        db.record_function_alias("0x80003100", "old_name", "new_name", source="manual")
+
+        aliases = db.get_aliases_for_address("0x80003100")
+        assert len(aliases) == 1
+        assert aliases[0]["old_name"] == "old_name"
+        assert aliases[0]["new_name"] == "new_name"
+        assert aliases[0]["source"] == "manual"
+
+    def test_record_multiple_aliases(self, db):
+        """Should track multiple renames for same address."""
+        db.record_function_alias("0x80003100", "name_v1", "name_v2")
+        db.record_function_alias("0x80003100", "name_v2", "name_v3")
+
+        aliases = db.get_aliases_for_address("0x80003100")
+        assert len(aliases) == 2
+
+    def test_get_function_by_name_or_address_finds_by_name(self, db):
+        """Should find function by name first."""
+        db.upsert_function("my_func", canonical_address="0x80003100")
+
+        func = db.get_function_by_name_or_address(name="my_func")
+        assert func is not None
+        assert func["function_name"] == "my_func"
+
+    def test_get_function_by_name_or_address_falls_back_to_address(self, db):
+        """Should fall back to address when name not found."""
+        db.upsert_function("my_func", canonical_address="0x80003100")
+
+        func = db.get_function_by_name_or_address(name="wrong_name", address="0x80003100")
+        assert func is not None
+        assert func["function_name"] == "my_func"
+
+    def test_bulk_update_addresses(self, db):
+        """Should update addresses for multiple functions."""
+        db.upsert_function("func1")
+        db.upsert_function("func2")
+        db.upsert_function("func3")
+
+        updated = db.bulk_update_addresses({
+            "func1": "0x80003100",
+            "func2": "0x80003200",
+        })
+
+        assert updated == 2
+
+        func1 = db.get_function("func1")
+        assert func1["canonical_address"] == "0x80003100"
+
+        func2 = db.get_function("func2")
+        assert func2["canonical_address"] == "0x80003200"
+
+        func3 = db.get_function("func3")
+        assert func3["canonical_address"] is None
+
+    def test_bulk_update_addresses_skips_unchanged(self, db):
+        """Should not count already-set addresses as updates."""
+        db.upsert_function("func1", canonical_address="0x80003100")
+
+        updated = db.bulk_update_addresses({
+            "func1": "0x80003100",  # Already set
+        })
+
+        assert updated == 0
+
+    def test_merge_function_records_both_exist(self, db):
+        """Should merge old record into new, preserving data."""
+        db.upsert_function("old_func",
+            local_scratch_slug="ABC123",
+            match_percent=95.0,
+            status="matched",
+        )
+        db.upsert_function("new_func",
+            match_percent=100.0,
+            status="matched",
+        )
+
+        result = db.merge_function_records("old_func", "new_func", "0x80003100")
+        assert result is True
+
+        # Old record should be deleted
+        old = db.get_function("old_func")
+        assert old is None
+
+        # New record should have merged data
+        new = db.get_function("new_func")
+        assert new["local_scratch_slug"] == "ABC123"
+        assert new["canonical_address"] == "0x80003100"
+
+    def test_merge_function_records_creates_alias(self, db):
+        """Merging should create an alias record."""
+        db.upsert_function("old_func")
+
+        db.merge_function_records("old_func", "new_func", "0x80003100")
+
+        aliases = db.get_aliases_for_address("0x80003100")
+        assert len(aliases) >= 1
+        assert any(a["old_name"] == "old_func" for a in aliases)
+
+
 class TestDatabaseIntegrity:
     """Tests for database schema and integrity."""
 
