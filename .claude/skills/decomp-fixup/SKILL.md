@@ -14,7 +14,7 @@ Use `/decomp-fixup` when:
 - Headers have `UNK_RET`/`UNK_PARAMS` that need real signatures
 - Callers need updates after signature changes
 - Struct definitions are causing type errors
-- `--require-protos` build is failing
+- Build is failing due to missing prototypes
 
 Use `/decomp` instead when:
 - You need to match assembly (get 100% match)
@@ -36,10 +36,10 @@ melee-agent state status <function_name>
 ### Step 1: Run the Build
 
 ```bash
-cd <worktree> && python configure.py --require-protos && ninja
+cd <worktree> && python configure.py && ninja
 ```
 
-The `--require-protos` flag is critical - it's what CI uses. Common error types:
+The build requires function prototypes by default (same as CI). Common error types:
 
 | Error Pattern | Cause | Solution |
 |--------------|-------|----------|
@@ -188,7 +188,7 @@ ninja
 
 ```bash
 # 1. Get full error list
-cd <worktree> && python configure.py --require-protos && ninja 2>&1 | tee build_errors.txt
+cd <worktree> && python configure.py && ninja 2>&1 | tee build_errors.txt
 
 # 2. Categorize errors
 grep "conflicting types" build_errors.txt
@@ -204,7 +204,7 @@ After fixing build issues:
 
 ```bash
 # Verify build passes
-cd <worktree> && python configure.py --require-protos && ninja
+cd <worktree> && python configure.py && ninja
 
 # Commit the fix (in the worktree)
 git add -A
@@ -218,7 +218,7 @@ git commit -m "Fix build: update <function> signature in header"
 
 ## Checklist Before Committing
 
-1. [ ] Build passes with `--require-protos`
+1. [ ] Build passes
 2. [ ] No merge conflict markers in files
 3. [ ] Header signatures match implementations exactly
 4. [ ] All callers updated if signature changed
@@ -247,7 +247,7 @@ Common types in Melee:
 ## What NOT to Do
 
 1. **Don't modify matched code** - The .c implementation is correct, fix the header
-2. **Don't skip `--require-protos`** - Regular build may pass but CI will fail
+2. **Always verify build passes** - Prototype requirements are enforced by default
 3. **Don't leave partial fixes** - Fix everything or nothing
 4. **Don't guess signatures** - Check the actual implementation
 5. **Don't ignore callers** - They WILL break if signature changes

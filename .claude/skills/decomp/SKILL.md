@@ -67,7 +67,7 @@ melee-agent claim list             # Shows your active claims
 ### Step 0: Automatic Build Validation
 
 When you first run a `melee-agent` command, the system automatically:
-1. Validates your worktree builds with `--require-protos`
+1. Validates your worktree builds successfully
 2. If the build fails, shows the errors (your uncommitted changes are preserved)
 3. Caches the validation result for 30 minutes
 
@@ -219,7 +219,7 @@ Before committing, you MUST ensure:
 
 3. **No pointer arithmetic/magic numbers** - don't do things like `if (((u8*)&lbl_80472D28)[0x116] == 1) {`, if you find yourself needing to do this to get a 100% match, you should investigate and update the struct definition accordingly.
 
-**Build passes with --require-protos** - The `workflow finish` command validates this. If it fails due to header mismatches or caller issues, use the `/decomp-fixup` skill to resolve them.
+**Build passes** - The `workflow finish` command validates this. If it fails due to header mismatches or caller issues, use the `/decomp-fixup` skill to resolve them.
 
 ## Human Readability
 

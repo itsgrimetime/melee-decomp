@@ -163,7 +163,7 @@ def db_get_subdirectory_lock(subdir_key: str) -> dict | None:
 
 
 def _validate_worktree_build(worktree_path: Path, max_age_minutes: int = 30) -> bool:
-    """Check if a worktree builds successfully with --require-protos."""
+    """Check if a worktree builds successfully."""
     marker_file = worktree_path / ".build_validated"
 
     if marker_file.exists():
@@ -193,7 +193,7 @@ def _validate_worktree_build(worktree_path: Path, max_age_minutes: int = 30) -> 
 
     try:
         result = subprocess.run(
-            ["python", "configure.py", "--require-protos"],
+            ["python", "configure.py"],
             cwd=worktree_path,
             capture_output=True, text=True,
             timeout=30
