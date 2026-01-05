@@ -22,7 +22,7 @@ from ._common import (
     get_subdirectory_worktree_path,
     DEFAULT_MELEE_ROOT,
 )
-from .utils import file_lock, load_json_with_expiry, save_json_atomic
+from .utils import file_lock, load_json_with_expiry
 
 # Maximum broken builds per worktree before blocking claims
 MAX_BROKEN_BUILDS_PER_WORKTREE = 3
@@ -68,8 +68,15 @@ def _load_claims() -> dict[str, Any]:
 
 
 def _save_claims(claims: dict[str, Any]) -> None:
-    """Save claims to file."""
-    save_json_atomic(Path(DECOMP_CLAIMS_FILE), claims)
+    """Save claims to file.
+
+    Note: Caller must already hold the lock on the claims file.
+    This function writes directly without acquiring a lock to avoid deadlock.
+    """
+    path = Path(DECOMP_CLAIMS_FILE)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(claims, f, indent=2)
 
 
 def _check_subdirectory_availability(source_file: str, agent_id: str) -> tuple[bool, str | None, str | None]:
@@ -183,55 +190,63 @@ def claim_add(
     claims_path = Path(DECOMP_CLAIMS_FILE)
     lock_path = claims_path.with_suffix(".json.lock")
 
-    with file_lock(lock_path, exclusive=True):
-        claims = _load_claims()
+    try:
+        with file_lock(lock_path, exclusive=True):
+            claims = _load_claims()
 
-        if function_name in claims:
-            existing = claims[function_name]
-            existing_agent = existing.get("agent_id", "unknown")
-            age_mins = (time.time() - existing["timestamp"]) / 60
-            is_self = existing_agent == agent_id
-            if output_json:
-                print(json.dumps({"success": False, "error": "already_claimed", "by": existing_agent, "age_mins": age_mins, "is_self": is_self}))
-            else:
-                if is_self:
-                    console.print(f"[yellow]Already claimed by you ({agent_id}) {age_mins:.0f}m ago - claim still active[/yellow]")
+            if function_name in claims:
+                existing = claims[function_name]
+                existing_agent = existing.get("agent_id", "unknown")
+                age_mins = (time.time() - existing["timestamp"]) / 60
+                is_self = existing_agent == agent_id
+                if output_json:
+                    print(json.dumps({"success": False, "error": "already_claimed", "by": existing_agent, "age_mins": age_mins, "is_self": is_self}))
                 else:
-                    console.print(f"[red]CLAIMED BY ANOTHER AGENT: {existing_agent} ({age_mins:.0f}m ago)[/red]")
-                    console.print(f"[red]DO NOT WORK ON THIS FUNCTION - pick a different one[/red]")
-            raise typer.Exit(1)
+                    if is_self:
+                        console.print(f"[yellow]Already claimed by you ({agent_id}) {age_mins:.0f}m ago - claim still active[/yellow]")
+                    else:
+                        console.print(f"[red]CLAIMED BY ANOTHER AGENT: {existing_agent} ({age_mins:.0f}m ago)[/red]")
+                        console.print(f"[red]DO NOT WORK ON THIS FUNCTION - pick a different one[/red]")
+                raise typer.Exit(1)
 
-        claims[function_name] = {
-            "agent_id": agent_id,
-            "timestamp": time.time(),
-            "source_file": source_file,
-            "subdirectory": subdir_key,
-        }
-        _save_claims(claims)
+            claims[function_name] = {
+                "agent_id": agent_id,
+                "timestamp": time.time(),
+                "source_file": source_file,
+                "subdirectory": subdir_key,
+            }
+            _save_claims(claims)
 
-        # Also write to state database (non-blocking)
-        db_add_claim(function_name, agent_id)
+            # Also write to state database (non-blocking)
+            db_add_claim(function_name, agent_id)
 
-        # Lock subdirectory if source file provided
-        worktree_path = None
-        if source_file and subdir_key:
-            db_lock_subdirectory(subdir_key, agent_id)
-            # Get or create the worktree (don't create yet, just get path)
-            from ._common import get_subdirectory_worktree_path
-            worktree_path = str(get_subdirectory_worktree_path(subdir_key))
+            # Lock subdirectory if source file provided
+            worktree_path = None
+            if source_file and subdir_key:
+                db_lock_subdirectory(subdir_key, agent_id)
+                # Get or create the worktree (don't create yet, just get path)
+                from ._common import get_subdirectory_worktree_path
+                worktree_path = str(get_subdirectory_worktree_path(subdir_key))
 
+            if output_json:
+                result = {"success": True, "function": function_name}
+                if subdir_key:
+                    result["subdirectory"] = subdir_key
+                if worktree_path:
+                    result["worktree"] = worktree_path
+                print(json.dumps(result))
+            else:
+                console.print(f"[green]Claimed:[/green] {function_name}")
+                if subdir_key:
+                    console.print(f"[dim]Subdirectory:[/dim] {subdir_key}")
+                    console.print(f"[dim]Worktree will be at:[/dim] melee-worktrees/dir-{subdir_key}/")
+    except TimeoutError as e:
         if output_json:
-            result = {"success": True, "function": function_name}
-            if subdir_key:
-                result["subdirectory"] = subdir_key
-            if worktree_path:
-                result["worktree"] = worktree_path
-            print(json.dumps(result))
+            print(json.dumps({"success": False, "error": "lock_timeout", "message": str(e)}))
         else:
-            console.print(f"[green]Claimed:[/green] {function_name}")
-            if subdir_key:
-                console.print(f"[dim]Subdirectory:[/dim] {subdir_key}")
-                console.print(f"[dim]Worktree will be at:[/dim] melee-worktrees/dir-{subdir_key}/")
+            console.print(f"[red]Lock timeout: {e}[/red]")
+            console.print("[yellow]Try again in a few seconds, or check for stuck processes.[/yellow]")
+        raise typer.Exit(1)
 
 
 def _release_claim(function_name: str, release_subdirectory: bool = False) -> tuple[bool, str | None]:
@@ -292,7 +307,15 @@ def claim_release(
     Use --release-subdir to also release the subdirectory lock,
     allowing other agents to work on that subdirectory.
     """
-    released, subdir_key = _release_claim(function_name, release_subdirectory)
+    try:
+        released, subdir_key = _release_claim(function_name, release_subdirectory)
+    except TimeoutError as e:
+        if output_json:
+            print(json.dumps({"success": False, "error": "lock_timeout", "message": str(e)}))
+        else:
+            console.print(f"[red]Lock timeout: {e}[/red]")
+            console.print("[yellow]Try again in a few seconds, or check for stuck processes.[/yellow]")
+        raise typer.Exit(1)
 
     if not released:
         if output_json:

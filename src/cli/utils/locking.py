@@ -14,6 +14,8 @@ from typing import Generator, Literal
 def file_lock(
     lock_path: Path,
     exclusive: bool = True,
+    timeout: float = 30.0,
+    retry_interval: float = 0.1,
 ) -> Generator[None, None, None]:
     """Context manager for file-based locking.
 
@@ -24,20 +26,40 @@ def file_lock(
         lock_path: Path to the lock file (will be created if needed)
         exclusive: If True, acquire exclusive lock (LOCK_EX).
                    If False, acquire shared lock (LOCK_SH).
+        timeout: Maximum time to wait for the lock (default: 30 seconds).
+        retry_interval: Time between retry attempts (default: 0.1 seconds).
+
+    Raises:
+        TimeoutError: If lock cannot be acquired within timeout.
 
     Example:
         with file_lock(Path("/tmp/my_resource.lock")):
             # Critical section - only one process can be here at a time
             do_something()
     """
+    import time
+
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     lock_path.touch(exist_ok=True)
 
     lock_type = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
 
     with open(lock_path, "r") as lock_file:
+        start_time = time.monotonic()
+        while True:
+            try:
+                fcntl.flock(lock_file.fileno(), lock_type | fcntl.LOCK_NB)
+                break  # Lock acquired
+            except BlockingIOError:
+                elapsed = time.monotonic() - start_time
+                if elapsed >= timeout:
+                    raise TimeoutError(
+                        f"Could not acquire lock on {lock_path} after {timeout}s. "
+                        f"Another process may be holding the lock. "
+                        f"Check with: lsof {lock_path}"
+                    )
+                time.sleep(retry_interval)
         try:
-            fcntl.flock(lock_file.fileno(), lock_type)
             yield
         finally:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
