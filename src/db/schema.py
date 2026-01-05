@@ -1,6 +1,6 @@
 """SQLite schema for agent state management."""
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 SCHEMA_SQL = """
 -- Core function tracking
@@ -160,10 +160,13 @@ CREATE TABLE IF NOT EXISTS match_history (
     score INTEGER NOT NULL,
     max_score INTEGER NOT NULL,
     match_percent REAL NOT NULL,
+    worktree_path TEXT,
+    branch TEXT,
     timestamp REAL DEFAULT (unixepoch('now', 'subsec'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_match_history_slug ON match_history(scratch_slug);
+CREATE INDEX IF NOT EXISTS idx_match_history_branch ON match_history(branch);
 
 -- Local to production sync tracking
 CREATE TABLE IF NOT EXISTS sync_state (
@@ -754,5 +757,14 @@ def get_migrations() -> dict[int, str]:
             LEFT JOIN function_aliases fa ON f.canonical_address = fa.canonical_address
             WHERE fa.old_name IS NOT NULL
             ORDER BY f.function_name, fa.renamed_at DESC;
+        """,
+        # Version 7 -> 8: Add worktree_path and branch to match_history for tracing work location
+        7: """
+            -- Add worktree tracking columns to match_history
+            ALTER TABLE match_history ADD COLUMN worktree_path TEXT;
+            ALTER TABLE match_history ADD COLUMN branch TEXT;
+
+            -- Create index for branch-based queries
+            CREATE INDEX IF NOT EXISTS idx_match_history_branch ON match_history(branch);
         """,
     }

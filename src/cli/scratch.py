@@ -542,8 +542,18 @@ def scratch_compile(
         # Record match score for history tracking
         record_match_score(slug, result.diff_output.current_score, result.diff_output.max_score)
 
-        # Also record to state database (non-blocking)
-        db_record_match_score(slug, result.diff_output.current_score, result.diff_output.max_score)
+        # Detect current worktree and branch for tracking
+        current_worktree = str(Path.cwd())
+        current_branch = _get_current_branch()
+
+        # Also record to state database (non-blocking) with worktree/branch info
+        db_record_match_score(
+            slug,
+            result.diff_output.current_score,
+            result.diff_output.max_score,
+            worktree_path=current_worktree,
+            branch=current_branch,
+        )
 
         console.print(f"[green]Compiled successfully![/green]")
         console.print(f"Match: {match_pct:.1f}%")

@@ -777,8 +777,18 @@ class StateDB:
         scratch_slug: str,
         score: int,
         max_score: int,
+        worktree_path: str | None = None,
+        branch: str | None = None,
     ) -> None:
-        """Record a match score for a scratch in history."""
+        """Record a match score for a scratch in history.
+
+        Args:
+            scratch_slug: The scratch identifier
+            score: Current diff score (0 = perfect match)
+            max_score: Maximum possible score
+            worktree_path: Path to the worktree where work was done
+            branch: Git branch name where work was done
+        """
         match_percent = 100.0 if score == 0 else (
             (1.0 - score / max_score) * 100 if max_score > 0 else 0.0
         )
@@ -799,10 +809,10 @@ class StateDB:
 
             conn.execute(
                 """
-                INSERT INTO match_history (scratch_slug, score, max_score, match_percent)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO match_history (scratch_slug, score, max_score, match_percent, worktree_path, branch)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (scratch_slug, score, max_score, match_percent)
+                (scratch_slug, score, max_score, match_percent, worktree_path, branch)
             )
 
             # Update scratch record

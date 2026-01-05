@@ -290,6 +290,63 @@ class TestMatchScoring:
 
         assert count == 1
 
+    def test_record_match_score_with_worktree(self, db):
+        """Recording score with worktree info should store it."""
+        db.upsert_scratch("ABC123", "local", "http://localhost:8000")
+
+        db.record_match_score(
+            "ABC123", 50, 100,
+            worktree_path="/path/to/worktree",
+            branch="subdirs/lb"
+        )
+
+        with db.connection() as conn:
+            cursor = conn.execute(
+                "SELECT worktree_path, branch FROM match_history WHERE scratch_slug = ?",
+                ("ABC123",)
+            )
+            row = cursor.fetchone()
+
+        assert row["worktree_path"] == "/path/to/worktree"
+        assert row["branch"] == "subdirs/lb"
+
+    def test_record_match_score_worktree_optional(self, db):
+        """Worktree info should be optional (NULL allowed)."""
+        db.upsert_scratch("ABC123", "local", "http://localhost:8000")
+
+        # Record without worktree info
+        db.record_match_score("ABC123", 50, 100)
+
+        with db.connection() as conn:
+            cursor = conn.execute(
+                "SELECT worktree_path, branch FROM match_history WHERE scratch_slug = ?",
+                ("ABC123",)
+            )
+            row = cursor.fetchone()
+
+        assert row["worktree_path"] is None
+        assert row["branch"] is None
+
+    def test_match_history_tracks_branch_changes(self, db):
+        """History should track when work moves between branches."""
+        db.upsert_scratch("ABC123", "local", "http://localhost:8000")
+
+        # Work in first branch
+        db.record_match_score("ABC123", 80, 100, branch="subdirs/lb")
+        # Improve in same branch
+        db.record_match_score("ABC123", 50, 100, branch="subdirs/lb")
+        # Continue in different branch
+        db.record_match_score("ABC123", 25, 100, branch="subdirs/ef")
+
+        with db.connection() as conn:
+            cursor = conn.execute(
+                "SELECT branch FROM match_history WHERE scratch_slug = ? ORDER BY timestamp",
+                ("ABC123",)
+            )
+            branches = [row["branch"] for row in cursor.fetchall()]
+
+        assert branches == ["subdirs/lb", "subdirs/lb", "subdirs/ef"]
+
 
 class TestAuditLog:
     """Tests for audit logging.
@@ -485,6 +542,61 @@ class TestAddressTracking:
         aliases = db.get_aliases_for_address("0x80003100")
         assert len(aliases) >= 1
         assert any(a["old_name"] == "old_func" for a in aliases)
+
+
+class TestSchemaMigration:
+    """Tests for schema migrations."""
+
+    def test_migration_v7_to_v8_adds_worktree_columns(self, tmp_path):
+        """Migration from v7 to v8 should add worktree_path and branch columns."""
+        from src.db import StateDB
+        from src.db.schema import get_migrations
+
+        # Create a v7 database manually
+        db_path = tmp_path / "v7_db.db"
+        import sqlite3
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+
+        # Create v7 match_history table (without worktree columns)
+        conn.execute("""
+            CREATE TABLE match_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scratch_slug TEXT NOT NULL,
+                score INTEGER NOT NULL,
+                max_score INTEGER NOT NULL,
+                match_percent REAL NOT NULL,
+                timestamp REAL DEFAULT (unixepoch('now', 'subsec'))
+            )
+        """)
+        conn.execute("CREATE TABLE db_meta (key TEXT PRIMARY KEY, value TEXT)")
+        conn.execute("INSERT INTO db_meta (key, value) VALUES ('schema_version', '7')")
+        conn.execute("INSERT INTO match_history (scratch_slug, score, max_score, match_percent) VALUES ('test', 50, 100, 50.0)")
+        conn.commit()
+        conn.close()
+
+        # Apply migration
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        migrations = get_migrations()
+        conn.executescript(migrations[7])
+        conn.execute("UPDATE db_meta SET value = '8' WHERE key = 'schema_version'")
+        conn.commit()
+
+        # Check columns exist
+        cursor = conn.execute("PRAGMA table_info(match_history)")
+        columns = {row[1] for row in cursor.fetchall()}
+        assert "worktree_path" in columns
+        assert "branch" in columns
+
+        # Check existing data preserved
+        cursor = conn.execute("SELECT * FROM match_history WHERE scratch_slug = 'test'")
+        row = cursor.fetchone()
+        assert row is not None
+        assert row[1] == "test"  # scratch_slug
+        assert row[2] == 50  # score
+
+        conn.close()
 
 
 class TestDatabaseIntegrity:

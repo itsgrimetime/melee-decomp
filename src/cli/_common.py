@@ -318,14 +318,28 @@ def db_upsert_scratch(slug: str, instance: str, base_url: str, **fields) -> bool
         return False
 
 
-def db_record_match_score(scratch_slug: str, score: int, max_score: int) -> bool:
-    """Record match score in state database (non-blocking)."""
+def db_record_match_score(
+    scratch_slug: str,
+    score: int,
+    max_score: int,
+    worktree_path: str | None = None,
+    branch: str | None = None,
+) -> bool:
+    """Record match score in state database (non-blocking).
+
+    Args:
+        scratch_slug: The scratch identifier
+        score: Current diff score (0 = perfect match)
+        max_score: Maximum possible score
+        worktree_path: Path to the worktree where work was done
+        branch: Git branch name where work was done
+    """
     db = get_state_db()
     if db is None:
         return False
 
     try:
-        db.record_match_score(scratch_slug, score, max_score)
+        db.record_match_score(scratch_slug, score, max_score, worktree_path, branch)
         return True
     except Exception:
         return False
