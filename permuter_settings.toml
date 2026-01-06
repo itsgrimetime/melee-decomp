@@ -1,0 +1,28 @@
+# decomp-permuter settings for Melee decompilation
+# See ~/code/decomp-permuter/README.md for documentation
+
+# NOTE: Don't set build_system when also setting compiler/assembler commands
+# build_system = "ninja"
+compiler_type = "mwcc"
+
+# Pattern for auto-detecting assembly files from C source paths
+# src/melee/path/file.c -> build/GALE01/asm/melee/path/file.s
+asm_pattern = "src/ -> build/GALE01/asm/"
+
+# Compiler command - extracted from `ninja -t commands` output
+# Note: Use placeholder $INPUT and $OUTPUT, wrapped by import.py's finalize_compile_command
+compiler_command = """wine build/compilers/GC/1.2.5n/mwcceppc.exe \
+    -Cpp_exceptions off -proc gekko -fp hard -fp_contract on -O4,p \
+    -enum int -nodefaults -inline auto -c \
+    -i src -i src/MSL -i src/Runtime -i extern/dolphin/include \
+    -i src/melee -i src/melee/ft/chara -i src/sysdolphin \
+    -DBUILD_VERSION=0 -DVERSION_GALE01"""
+
+# Assembler command - PowerPC/Gekko assembler from devkitPPC
+assembler_command = "/opt/devkitpro/devkitPPC/bin/powerpc-eabi-as -mgekko -I build/GALE01/include"
+
+# Objdump command for disassembling object files (used for diffing)
+objdump_command = "/opt/devkitpro/devkitPPC/bin/powerpc-eabi-objdump -dr -EB -mpowerpc -M broadway"
+
+# Prelude file with macros (.fn, .endfn, etc.)
+asm_prelude_file = "build/GALE01/include/macros.inc"
