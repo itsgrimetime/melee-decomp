@@ -36,6 +36,7 @@ from .worktree import worktree_app
 from .workflow import workflow_app
 from .state import state_app
 from .analytics import analytics_app
+from .setup import setup_app
 from .compilers import list_compilers
 
 # Import common utilities for backward compatibility
@@ -67,6 +68,7 @@ app.add_typer(worktree_app, name="worktree")
 app.add_typer(workflow_app, name="workflow")
 app.add_typer(state_app, name="state")
 app.add_typer(analytics_app, name="analytics")
+app.add_typer(setup_app, name="setup")
 
 # Register standalone commands
 app.command("compilers")(list_compilers)

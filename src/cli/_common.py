@@ -17,6 +17,43 @@ console = Console()
 DECOMP_CONFIG_DIR = Path.home() / ".config" / "decomp-me"
 DECOMP_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
+# Central location for the base DOL file (gitignored, must be provided by user)
+BASE_DOL_PATH = DECOMP_CONFIG_DIR / "orig" / "GALE01" / "main.dol"
+
+
+def get_base_dol_path() -> Path | None:
+    """Get the path to the base DOL file, or None if not configured."""
+    if BASE_DOL_PATH.exists():
+        return BASE_DOL_PATH
+    return None
+
+
+def ensure_dol_in_worktree(worktree_path: Path) -> bool:
+    """Ensure the base DOL exists in a worktree. Returns True if successful."""
+    import shutil
+
+    dol_dst = worktree_path / "orig" / "GALE01" / "sys" / "main.dol"
+    if dol_dst.exists():
+        return True
+
+    # Try central location first
+    if BASE_DOL_PATH.exists():
+        dol_dst.parent.mkdir(parents=True, exist_ok=True)
+        dol_dst.symlink_to(BASE_DOL_PATH)
+        return True
+
+    # Fallback: search existing worktrees
+    if MELEE_WORKTREES_DIR.exists():
+        for wt in MELEE_WORKTREES_DIR.iterdir():
+            dol_src = wt / "orig" / "GALE01" / "sys" / "main.dol"
+            if dol_src.exists() and not dol_src.is_symlink():
+                dol_dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(dol_src, dol_dst)
+                return True
+
+    return False
+
+
 # Get agent ID for worktree AND session isolation
 AGENT_ID = _get_agent_id()
 PRODUCTION_COOKIES_FILE = DECOMP_CONFIG_DIR / "production_cookies.json"

@@ -19,6 +19,7 @@ from pathlib import Path
 from rich.console import Console
 
 from src.client.api import _get_agent_id
+from src.cli._common import ensure_dol_in_worktree
 
 # Console for rich output
 console = Console()
@@ -293,6 +294,10 @@ def _create_subdirectory_worktree(subdir_key: str, worktree_path: Path) -> Path:
                 shutil.rmtree(orig_dst)
             if not orig_dst.exists():
                 orig_dst.symlink_to(orig_src.resolve())
+
+        # Ensure base DOL exists (required for builds)
+        if not ensure_dol_in_worktree(worktree_path):
+            console.print("[yellow]Warning: Base DOL not found. Run 'melee-agent setup dol --auto' to configure.[/yellow]")
 
         # Copy ctx.c from main melee
         main_ctx = DEFAULT_MELEE_ROOT / "build" / "ctx.c"
