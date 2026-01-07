@@ -630,6 +630,163 @@ def worktree_unlock(
         raise typer.Exit(1)
 
 
+@worktree_app.command("rebase")
+def worktree_rebase(
+    subdirectory_key: Annotated[
+        Optional[str], typer.Argument(help="Subdirectory key to rebase (e.g., 'lb', 'cm'). If omitted, rebases all.")
+    ] = None,
+    melee_root: Annotated[
+        Path, typer.Option("--melee-root", "-r", help="Path to melee project root")
+    ] = DEFAULT_MELEE_ROOT,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", "-n", help="Show what would happen")
+    ] = False,
+    onto: Annotated[
+        str, typer.Option("--onto", help="Branch to rebase onto")
+    ] = "upstream/master",
+):
+    """Rebase worktree branches onto latest upstream/master.
+
+    This updates worktree branches to incorporate the latest changes from
+    upstream, which helps prevent build conflicts. Use before starting work
+    on a function to ensure you have the latest code.
+
+    If conflicts occur during rebase, the command will abort and you'll need
+    to resolve manually.
+    """
+    worktrees = _get_worktree_info(melee_root)
+
+    # Filter to specific subdirectory if provided
+    if subdirectory_key:
+        worktrees = [wt for wt in worktrees if wt["subdir_key"] == subdirectory_key]
+        if not worktrees:
+            console.print(f"[red]Worktree '{subdirectory_key}' not found[/red]")
+            raise typer.Exit(1)
+
+    # Only rebase worktrees that are behind
+    to_rebase = [wt for wt in worktrees if wt["commits_behind"] > 0]
+
+    if not to_rebase:
+        console.print("[green]All worktrees are up to date[/green]")
+        return
+
+    console.print(f"Found {len(to_rebase)} worktrees behind {onto}:\n")
+    for wt in to_rebase:
+        console.print(f"  [cyan]{wt['subdir_key']}[/cyan]: {wt['commits_behind']} behind, {wt['commits_ahead']} ahead")
+
+    if dry_run:
+        console.print(f"\n[yellow]DRY RUN[/yellow]: Would rebase {len(to_rebase)} worktrees onto {onto}")
+        return
+
+    console.print()
+
+    success_count = 0
+    failed = []
+    for wt in to_rebase:
+        branch = wt["branch"]
+        console.print(f"Rebasing [cyan]{wt['subdir_key']}[/cyan] ({branch})...")
+
+        # Stash any uncommitted changes
+        ret, stash_out, _ = _run_git(["stash"], wt["path"])
+        has_stash = "No local changes" not in stash_out and ret == 0
+
+        # Try rebase
+        ret, out, err = _run_git(["rebase", onto], wt["path"])
+        if ret != 0:
+            # Abort the failed rebase
+            _run_git(["rebase", "--abort"], wt["path"])
+            if has_stash:
+                _run_git(["stash", "pop"], wt["path"])
+            failed.append((wt["subdir_key"], err or out))
+            console.print(f"  [red]Failed - conflicts[/red]")
+            continue
+
+        # Pop stash if we had one
+        if has_stash:
+            _run_git(["stash", "pop"], wt["path"])
+
+        success_count += 1
+        console.print(f"  [green]Success[/green]")
+
+    console.print(f"\n[green]Rebased {success_count}/{len(to_rebase)} worktrees[/green]")
+
+    if failed:
+        console.print(f"\n[yellow]Failed worktrees ({len(failed)}):[/yellow]")
+        for subdir_key, error in failed:
+            console.print(f"  [cyan]{subdir_key}[/cyan]: {error[:100]}")
+        console.print("\n[dim]Manual resolution needed for failed worktrees.[/dim]")
+        console.print("[dim]cd to worktree and run: git rebase upstream/master[/dim]")
+
+
+@worktree_app.command("repair")
+def worktree_repair(
+    melee_root: Annotated[
+        Path, typer.Option("--melee-root", "-r", help="Path to melee project root")
+    ] = DEFAULT_MELEE_ROOT,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", "-n", help="Show what would be fixed")
+    ] = False,
+):
+    """Repair worktrees with missing or broken orig/ symlinks.
+
+    This fixes worktrees that can't build because they're missing the
+    original game files (main.dol). The fix is to symlink orig/ to the
+    main melee repo's orig/ directory.
+    """
+    import shutil
+
+    if not MELEE_WORKTREES_DIR.exists():
+        console.print("[yellow]No worktrees directory found[/yellow]")
+        return
+
+    orig_src = melee_root / "orig"
+    if not orig_src.exists():
+        console.print(f"[red]Source orig/ not found at {orig_src}[/red]")
+        return
+
+    # Check if source has the actual DOL file
+    main_dol = orig_src / "GALE01" / "sys" / "main.dol"
+    if not main_dol.exists():
+        console.print(f"[red]main.dol not found at {main_dol}[/red]")
+        console.print("[dim]Run the game extraction first[/dim]")
+        return
+
+    fixed = 0
+    already_ok = 0
+    for wt_path in sorted(MELEE_WORKTREES_DIR.iterdir()):
+        if not wt_path.is_dir() or not wt_path.name.startswith("dir-"):
+            continue
+
+        orig_dst = wt_path / "orig"
+
+        # Check if it's already a correct symlink
+        if orig_dst.is_symlink():
+            target = orig_dst.resolve()
+            if target == orig_src.resolve():
+                already_ok += 1
+                continue
+            console.print(f"  [yellow]{wt_path.name}:[/yellow] symlink points to wrong target")
+            if not dry_run:
+                orig_dst.unlink()
+        elif orig_dst.exists():
+            # It's a real directory - needs to be replaced
+            console.print(f"  [yellow]{wt_path.name}:[/yellow] orig/ is directory, needs symlink")
+            if not dry_run:
+                shutil.rmtree(orig_dst)
+        else:
+            console.print(f"  [yellow]{wt_path.name}:[/yellow] orig/ missing")
+
+        if not dry_run:
+            orig_dst.symlink_to(orig_src.resolve())
+            console.print(f"  [green]{wt_path.name}:[/green] fixed ✓")
+        fixed += 1
+
+    if dry_run:
+        console.print(f"\n[yellow]DRY RUN[/yellow]: Would fix {fixed} worktrees ({already_ok} already OK)")
+    else:
+        console.print(f"\n[green]Fixed {fixed} worktrees[/green] ({already_ok} already OK)")
+
+
 @worktree_app.command("status")
 def worktree_status(
     subdirectory_key: Annotated[

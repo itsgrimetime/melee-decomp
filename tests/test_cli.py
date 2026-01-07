@@ -124,13 +124,13 @@ class TestExtractCommands:
 
         # Should succeed
         assert result.exit_code == 0
-        # Should show table headers
+        # Should show table headers (some may be truncated due to terminal width)
         assert "Source Files" in result.stdout
         assert "File" in result.stdout
         assert "Status" in result.stdout
-        assert "Match" in result.stdout
+        assert "Done" in result.stdout  # Done % column
         assert "Matched" in result.stdout
-        assert "Unmatched" in result.stdout
+        assert "Unmat" in result.stdout  # May be truncated to "Unmat…"
 
     def test_extract_files_with_module_filter(self, melee_root_exists):
         """Test extract files with module filter."""
