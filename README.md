@@ -15,7 +15,7 @@ This project provides tooling to enable AI agents (and humans) to:
 
 ```
 melee-decomp/
-├── melee/                    # Submodule: main decompilation repo (doldecomp/melee)
+├── melee/                    # Symlink to ~/code/melee (doldecomp/melee fork)
 │   ├── src/melee/            # Decompiled C source files
 │   ├── asm/                   # PowerPC assembly files
 │   ├── include/               # Header files
@@ -72,9 +72,16 @@ melee-decomp/
 ### Setup
 
 ```bash
-# Clone with submodules
-git clone --recursive https://github.com/your-username/melee-decomp
+# Clone melee-decomp
+git clone https://github.com/your-username/melee-decomp
 cd melee-decomp
+
+# Clone the melee repo separately and create symlink
+git clone https://github.com/doldecomp/melee ~/code/melee
+ln -s ~/code/melee melee
+
+# Initialize remaining submodules (decomp.me, etc.)
+git submodule update --init
 
 # Install Python package
 pip install -e .
@@ -302,7 +309,7 @@ When running multiple Claude instances in parallel:
 
 ## Building Melee
 
-The melee submodule must be built to generate required files:
+The melee repo must be built to generate required files:
 
 ```bash
 cd melee

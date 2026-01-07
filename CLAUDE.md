@@ -6,7 +6,7 @@ Reverse-engineering Super Smash Bros. Melee (GameCube) to matching C code using 
 
 ```
 melee-decomp/
-├── melee/                    # Submodule: main decompilation repo
+├── melee/                    # Symlink to ~/code/melee (main decompilation repo)
 │   ├── src/melee/            # Decompiled C source files
 │   ├── config/GALE01/        # Build config
 │   └── tools/                # Build tools (ninja, dtk)

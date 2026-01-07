@@ -84,6 +84,34 @@ def hook_validate(
     console.print("\n[green]✓ Validation passed[/green]")
 
 
+def _get_melee_hooks_dir(project_root: Path) -> Path | None:
+    """Find the melee repo's hooks directory.
+
+    Handles both:
+    - Standalone repo (symlink to external repo with .git directory)
+    - Submodule (has .git file pointing to .git/modules/melee)
+    """
+    melee_path = project_root / "melee"
+    if not melee_path.exists():
+        return None
+
+    # Resolve symlink to get real path
+    melee_real = melee_path.resolve()
+    git_path = melee_real / ".git"
+
+    if git_path.is_dir():
+        # Standalone repo - .git is a directory
+        return git_path / "hooks"
+    elif git_path.is_file():
+        # Submodule - .git is a file with gitdir pointer
+        # Fall back to .git/modules/melee/hooks
+        submodule_hooks = project_root / ".git" / "modules" / "melee" / "hooks"
+        if submodule_hooks.exists():
+            return submodule_hooks
+
+    return None
+
+
 @hook_app.command("install")
 def hook_install(
     force: Annotated[
@@ -93,8 +121,8 @@ def hook_install(
     """Install git pre-commit hooks for validation.
 
     Installs two hooks:
-    1. melee-decomp repo: Runs pytest tests, plus melee validation if submodule changes
-    2. melee submodule: Runs melee validation (shared by all worktrees)
+    1. melee-decomp repo: Runs pytest tests, plus melee validation if melee changes
+    2. melee repo: Runs melee validation (shared by all worktrees)
     """
     project_root = Path(__file__).parent.parent.parent
 
@@ -119,13 +147,6 @@ if [ $TEST_EXIT -ne 0 ]; then
     exit 1
 fi
 
-# Only run melee validation if there are melee/ submodule changes staged
-if git diff --cached --name-only | grep -q "^melee/"; then
-    echo "Melee submodule changes detected - running validation..."
-    python -m src.hooks.validate_commit --verbose
-    exit $?
-fi
-
 echo "\\033[32m✓ Tests passed\\033[0m"
 exit 0
 '''
@@ -139,17 +160,17 @@ exit 0
     repo_pre_commit.chmod(repo_pre_commit.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     console.print(f"[green]✓ Installed melee-decomp pre-commit hook[/green]")
 
-    # 2. Install hook for melee submodule
-    submodule_hooks_dir = project_root / ".git" / "modules" / "melee" / "hooks"
+    # 2. Install hook for melee repo
+    melee_hooks_dir = _get_melee_hooks_dir(project_root)
 
-    if not submodule_hooks_dir.exists():
-        console.print("[yellow]Melee submodule hooks dir not found - skipping submodule hook[/yellow]")
-        console.print("[dim]Run 'git submodule update --init' to initialize[/dim]")
+    if melee_hooks_dir is None:
+        console.print("[yellow]Melee repo hooks dir not found - skipping melee hook[/yellow]")
+        console.print("[dim]Ensure melee directory exists (symlink or submodule)[/dim]")
         return
 
-    submodule_pre_commit = submodule_hooks_dir / "pre-commit"
+    melee_pre_commit = melee_hooks_dir / "pre-commit"
 
-    submodule_hook_content = f'''#!/bin/sh
+    melee_hook_content = f'''#!/bin/sh
 # Pre-commit hook for melee decompilation
 # Installed by: melee-agent hook install
 # All worktrees share this hook automatically.
@@ -167,9 +188,9 @@ python -m src.hooks.validate_commit --worktree "$WORKTREE_ROOT"
 exit $?
 '''
 
-    submodule_pre_commit.write_text(submodule_hook_content)
-    submodule_pre_commit.chmod(submodule_pre_commit.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    console.print(f"[green]✓ Installed melee submodule pre-commit hook[/green]")
+    melee_pre_commit.write_text(melee_hook_content)
+    melee_pre_commit.chmod(melee_pre_commit.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    console.print(f"[green]✓ Installed melee repo pre-commit hook[/green]")
 
 
 @hook_app.command("uninstall")
@@ -189,16 +210,18 @@ def hook_uninstall():
         else:
             console.print("[yellow]melee-decomp hook exists but wasn't installed by melee-agent[/yellow]")
 
-    # 2. Remove melee submodule hook
-    submodule_pre_commit = project_root / ".git" / "modules" / "melee" / "hooks" / "pre-commit"
-    if submodule_pre_commit.exists():
-        content = submodule_pre_commit.read_text()
-        if "melee-agent" in content or "validate_commit" in content:
-            submodule_pre_commit.unlink()
-            console.print("[green]✓ Removed melee submodule pre-commit hook[/green]")
-            removed_any = True
-        else:
-            console.print("[yellow]melee submodule hook exists but wasn't installed by melee-agent[/yellow]")
+    # 2. Remove melee repo hook
+    melee_hooks_dir = _get_melee_hooks_dir(project_root)
+    if melee_hooks_dir:
+        melee_pre_commit = melee_hooks_dir / "pre-commit"
+        if melee_pre_commit.exists():
+            content = melee_pre_commit.read_text()
+            if "melee-agent" in content or "validate_commit" in content:
+                melee_pre_commit.unlink()
+                console.print("[green]✓ Removed melee repo pre-commit hook[/green]")
+                removed_any = True
+            else:
+                console.print("[yellow]melee hook exists but wasn't installed by melee-agent[/yellow]")
 
     if not removed_any:
         console.print("[yellow]No melee-agent hooks found to remove[/yellow]")
