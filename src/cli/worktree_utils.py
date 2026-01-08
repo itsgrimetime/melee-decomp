@@ -11,6 +11,7 @@ Mapping examples:
 """
 
 import json
+import os
 import shutil
 import subprocess
 import time
@@ -32,6 +33,9 @@ MELEE_WORKTREES_DIR = PROJECT_ROOT / "melee-worktrees"
 
 # Agent ID for isolation
 AGENT_ID = _get_agent_id()
+
+# Claim timeout (3 hours, consistent with claim.py)
+DECOMP_CLAIM_TIMEOUT = int(os.environ.get("DECOMP_CLAIM_TIMEOUT", "10800"))
 
 
 def _get_state_db():
@@ -456,22 +460,40 @@ def resolve_melee_root(
 
 
 def get_source_file_from_claim(function_name: str) -> str | None:
-    """Look up the source file from a function's claim."""
+    """Look up the source file from a function's claim.
+
+    Checks in order:
+    1. Active claim in claims file
+    2. Database function record
+
+    Returns:
+        Source file path (e.g., "melee/lb/lbcollision.c") or None if not found.
+    """
+    # First try the claims file
     claims_file = Path("/tmp/decomp_claims.json")
-    if not claims_file.exists():
-        return None
+    if claims_file.exists():
+        try:
+            with open(claims_file, 'r') as f:
+                claims = json.load(f)
 
-    try:
-        with open(claims_file, 'r') as f:
-            claims = json.load(f)
+            if function_name in claims:
+                claim = claims[function_name]
+                # Use configured timeout instead of hardcoded value
+                if time.time() - claim.get("timestamp", 0) < DECOMP_CLAIM_TIMEOUT:
+                    source_file = claim.get("source_file")
+                    if source_file:
+                        return source_file
+        except (json.JSONDecodeError, IOError):
+            pass  # Fall through to database check
 
-        if function_name not in claims:
-            return None
+    # Fallback: check database for source file
+    db = _get_state_db()
+    if db:
+        try:
+            func_info = db.get_function(function_name)
+            if func_info and func_info.get('source_file'):
+                return func_info['source_file']
+        except Exception:
+            pass  # Non-blocking - don't fail if DB unavailable
 
-        claim = claims[function_name]
-        if time.time() - claim.get("timestamp", 0) >= 3600:
-            return None
-
-        return claim.get("source_file")
-    except (json.JSONDecodeError, IOError):
-        return None
+    return None

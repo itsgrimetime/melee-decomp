@@ -1,8 +1,10 @@
 """Common utilities and constants for CLI commands."""
 
 import json
+import os
 import re
 import subprocess
+import time
 from pathlib import Path
 
 import typer
@@ -392,4 +394,63 @@ def db_record_sync(local_slug: str, production_slug: str, function_name: str | N
         db.record_sync(local_slug, production_slug, function_name)
         return True
     except Exception:
+        return False
+
+
+# Claim renewal for auto-extending claims on activity
+DECOMP_CLAIMS_FILE = os.environ.get("DECOMP_CLAIMS_FILE", "/tmp/decomp_claims.json")
+DECOMP_CLAIM_TIMEOUT = int(os.environ.get("DECOMP_CLAIM_TIMEOUT", "10800"))  # 3 hours
+
+
+def renew_claim_on_activity(function_name: str, agent_id: str | None = None) -> bool:
+    """Silently renew a claim if owned by this agent.
+
+    This is called automatically during scratch compile and other activity
+    to prevent claims from expiring during long sessions.
+
+    Args:
+        function_name: Function to renew claim for
+        agent_id: Agent ID (defaults to current agent)
+
+    Returns:
+        True if claim was renewed, False if not (not owned or not claimed)
+    """
+    from .utils import file_lock, load_json_safe
+
+    agent_id = agent_id or AGENT_ID
+    claims_path = Path(DECOMP_CLAIMS_FILE)
+    lock_path = claims_path.with_suffix(".json.lock")
+
+    if not claims_path.exists():
+        return False
+
+    try:
+        with file_lock(lock_path, exclusive=True, timeout=5):
+            claims = load_json_safe(claims_path)
+
+            if function_name not in claims:
+                return False
+
+            claim = claims[function_name]
+            if claim.get("agent_id") != agent_id:
+                return False
+
+            # Renew the claim by updating timestamp
+            claim["timestamp"] = time.time()
+
+            # Save updated claims
+            with open(claims_path, "w") as f:
+                json.dump(claims, f, indent=2)
+
+            # Also renew subdirectory lock if applicable
+            subdir_key = claim.get("subdirectory")
+            if subdir_key:
+                db_lock_subdirectory(subdir_key, agent_id)
+
+            # Renew in database too
+            db_add_claim(function_name, agent_id)
+
+            return True
+    except (TimeoutError, Exception):
+        # Non-blocking - don't fail if lock unavailable
         return False

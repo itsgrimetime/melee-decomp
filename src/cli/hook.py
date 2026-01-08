@@ -181,11 +181,19 @@ WORKTREE_ROOT="$(git rev-parse --show-toplevel)"
 
 cd "{project_root}"
 
-# Run validation, passing the worktree root so it can check staged files correctly
-python -m src.hooks.validate_commit --worktree "$WORKTREE_ROOT"
+# Run validation with a 5-minute timeout
+# The --timeout flag provides Python-level timeout (more reliable than shell timeout)
+# --skip-regressions makes it faster for iterative development
+python -m src.hooks.validate_commit --worktree "$WORKTREE_ROOT" --timeout 300
 
-# Exit with validation result
-exit $?
+EXIT_CODE=$?
+
+# Clean up any stray ninja processes on timeout (exit code 124)
+if [ $EXIT_CODE -eq 124 ]; then
+    pkill -f "ninja.*GALE01" 2>/dev/null || true
+fi
+
+exit $EXIT_CODE
 '''
 
     melee_pre_commit.write_text(melee_hook_content)

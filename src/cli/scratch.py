@@ -26,6 +26,7 @@ from ._common import (
     db_record_match_score,
     db_upsert_function,
     get_compiler_for_source,
+    renew_claim_on_activity,
     AGENT_ID,
 )
 from .complete import _get_current_branch
@@ -565,6 +566,20 @@ def scratch_compile(
         history_str = format_match_history(slug)
         if history_str:
             console.print(f"[dim]History: {history_str}[/dim]")
+
+        # Renew claim to prevent expiry during long sessions
+        try:
+            from src.db import get_db
+            db = get_db()
+            # Query function name from scratches table
+            cursor = db.conn.execute(
+                "SELECT function_name FROM scratches WHERE slug = ?", (slug,)
+            )
+            row = cursor.fetchone()
+            if row and row[0]:
+                renew_claim_on_activity(row[0])
+        except Exception:
+            pass  # Non-blocking - don't fail compile for renewal issues
 
         if show_diff and result.diff_output:
             _format_diff_output(result.diff_output, max_lines)

@@ -16,11 +16,29 @@ Usage:
 
 import argparse
 import json
+import os
 import re
+import signal
 import subprocess
 import sys
 from pathlib import Path
 from typing import Optional
+
+
+# Default timeout for validation (5 minutes)
+DEFAULT_VALIDATION_TIMEOUT = 300
+
+
+def _timeout_handler(signum, frame):
+    """Signal handler for validation timeout."""
+    print("\n\033[31m✗ Validation timed out\033[0m")
+    print("  The pre-commit hook took too long to complete.")
+    print("  This may indicate a hanging process or very slow build.")
+    print("\n  Options:")
+    print("    - Check for hung processes: ps aux | grep ninja")
+    print("    - Increase timeout: --timeout 600")
+    print("    - Skip slow checks: --skip-regressions")
+    sys.exit(124)  # Standard timeout exit code
 
 # Try to import tree-sitter based analyzer for better detection
 try:
@@ -1129,7 +1147,14 @@ def main():
                         help="Only show errors, not check status")
     parser.add_argument("--worktree", type=str, default=None,
                         help="Path to the git worktree (for running git commands in correct context)")
+    parser.add_argument("--timeout", type=int, default=DEFAULT_VALIDATION_TIMEOUT,
+                        help=f"Timeout in seconds (default: {DEFAULT_VALIDATION_TIMEOUT})")
     args = parser.parse_args()
+
+    # Set up timeout signal handler (Unix only)
+    if hasattr(signal, 'SIGALRM') and args.timeout > 0:
+        signal.signal(signal.SIGALRM, _timeout_handler)
+        signal.alarm(args.timeout)
 
     # Determine the melee root - use worktree if provided, otherwise default
     if args.worktree:
@@ -1179,6 +1204,11 @@ def main():
         print(f"\n\033[32m✓ All checks passed ({passed} passed, {skipped} skipped)\033[0m")
     else:
         print("\033[32m✓ Validation passed\033[0m")
+
+    # Cancel the alarm on successful completion
+    if hasattr(signal, 'SIGALRM'):
+        signal.alarm(0)
+
     sys.exit(0)
 
 

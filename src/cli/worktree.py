@@ -1,6 +1,9 @@
 """Worktree commands - manage subdirectory worktrees and batch commits."""
 
+import json
+import os
 import subprocess
+import time
 from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -20,6 +23,11 @@ from ._common import (
     get_subdirectory_worktree_path,
 )
 from src.db import get_db
+from .utils import load_json_with_expiry
+
+# Claims file location and timeout (matches claim.py)
+DECOMP_CLAIMS_FILE = os.environ.get("DECOMP_CLAIMS_FILE", "/tmp/decomp_claims.json")
+DECOMP_CLAIM_TIMEOUT = int(os.environ.get("DECOMP_CLAIM_TIMEOUT", "10800"))  # 3 hours
 
 
 worktree_app = typer.Typer(help="Manage subdirectory worktrees and batch commits")
@@ -630,6 +638,128 @@ def worktree_unlock(
         raise typer.Exit(1)
 
 
+@worktree_app.command("current")
+def worktree_current(
+    output_json: Annotated[
+        bool, typer.Option("--json", help="Output as JSON for programmatic use")
+    ] = False,
+):
+    """Show current agent context for session recovery.
+
+    Displays your active function claims, their scratches, and locked worktrees.
+    Use this FIRST after a context reset to recover your state.
+
+    Example:
+        melee-agent worktree current
+    """
+    # Load claims from JSON file
+    claims_path = Path(DECOMP_CLAIMS_FILE)
+    if claims_path.exists():
+        all_claims = load_json_with_expiry(
+            claims_path,
+            timeout_seconds=DECOMP_CLAIM_TIMEOUT,
+            timestamp_field="timestamp",
+        )
+    else:
+        all_claims = {}
+
+    # Filter to this agent's claims
+    my_claims = {
+        func_name: info
+        for func_name, info in all_claims.items()
+        if info.get("agent_id") == AGENT_ID
+    }
+
+    # Get scratch info from database for each claimed function
+    db = get_db()
+    claim_details = []
+    for func_name, claim_info in my_claims.items():
+        func_data = db.get_function(func_name) if db else None
+        slug = func_data.get("local_scratch_slug") if func_data else None
+        match_pct = func_data.get("match_percent", 0) if func_data else 0
+
+        age_secs = time.time() - claim_info.get("timestamp", 0)
+        remaining_secs = DECOMP_CLAIM_TIMEOUT - age_secs
+
+        claim_details.append({
+            "function": func_name,
+            "subdirectory": claim_info.get("subdirectory"),
+            "scratch": slug,
+            "match_percent": match_pct,
+            "claimed_ago_mins": int(age_secs / 60),
+            "remaining_mins": int(remaining_secs / 60),
+        })
+
+    # Find locked worktrees for this agent
+    locked_worktrees = []
+    seen_subdirs = set()
+    for claim in claim_details:
+        subdir = claim.get("subdirectory")
+        if subdir and subdir not in seen_subdirs:
+            seen_subdirs.add(subdir)
+            lock_info = db_get_subdirectory_lock(subdir)
+            if lock_info and lock_info.get("locked_by_agent") == AGENT_ID:
+                wt_path = get_subdirectory_worktree_path(subdir)
+                locked_worktrees.append({
+                    "subdirectory": subdir,
+                    "path": str(wt_path),
+                    "branch": f"subdirs/{subdir}",
+                })
+
+    if output_json:
+        print(json.dumps({
+            "agent_id": AGENT_ID,
+            "claims": claim_details,
+            "locked_worktrees": locked_worktrees,
+        }, indent=2))
+        return
+
+    # Rich output
+    console.print("\n[bold]Current Agent Context[/bold]")
+    console.print("=" * 60)
+    console.print(f"\n[dim]Agent ID:[/dim] {AGENT_ID}\n")
+
+    if not claim_details:
+        console.print("[yellow]No active claims[/yellow]")
+        console.print("[dim]Use 'melee-agent claim list' to see all claims[/dim]")
+        console.print("[dim]Use 'melee-agent claim add <func>' to claim a function[/dim]")
+    else:
+        console.print("[bold]Active Claims:[/bold]")
+        table = Table(show_header=True)
+        table.add_column("Function", style="cyan")
+        table.add_column("Subdirectory")
+        table.add_column("Scratch", style="green")
+        table.add_column("Match%", justify="right")
+        table.add_column("Remaining", justify="right")
+
+        for claim in claim_details:
+            table.add_row(
+                claim["function"],
+                claim.get("subdirectory") or "-",
+                claim.get("scratch") or "-",
+                f"{claim.get('match_percent', 0):.0f}%" if claim.get("match_percent") else "-",
+                f"{claim.get('remaining_mins', 0)}m",
+            )
+        console.print(table)
+
+    if locked_worktrees:
+        console.print("\n[bold]Locked Worktrees:[/bold]")
+        for wt in locked_worktrees:
+            console.print(f"  [cyan]{wt['subdirectory']}[/cyan]: {wt['path']}")
+
+        # Recovery commands
+        console.print("\n[bold]Recovery Commands:[/bold]")
+        primary_wt = locked_worktrees[0]
+        console.print(f"  [green]cd {primary_wt['path']}[/green]")
+
+        if claim_details and claim_details[0].get("scratch"):
+            slug = claim_details[0]["scratch"]
+            console.print(f"  [green]melee-agent scratch get {slug}[/green]")
+    elif claim_details:
+        console.print("\n[dim]No locked worktrees found.[/dim]")
+        console.print("[dim]The subdirectory lock may have expired. Re-claim to lock.[/dim]")
+
+
 @worktree_app.command("rebase")
 def worktree_rebase(
     subdirectory_key: Annotated[
@@ -825,3 +955,114 @@ def worktree_status(
                 console.print(f"  [dim]Expires:[/dim]   [yellow]expired[/yellow]")
     else:
         console.print(f"\n  [dim]Lock status:[/dim] not tracked")
+
+
+@worktree_app.command("health")
+def worktree_health(
+    subdirectory_key: Annotated[
+        Optional[str], typer.Argument(help="Subdirectory key to check (e.g., 'lb'). If omitted, shows all worktrees.")
+    ] = None,
+    output_json: Annotated[
+        bool, typer.Option("--json", help="Output as JSON")
+    ] = False,
+):
+    """Show build health status for worktrees.
+
+    Shows broken build count, affected functions, and whether the worktree
+    can accept new claims (blocked when >= 3 broken builds).
+
+    Examples:
+        melee-agent worktree health           # Show all worktrees
+        melee-agent worktree health lb        # Show specific worktree
+        melee-agent worktree health --json    # JSON output for automation
+    """
+    from src.db import get_db
+
+    db = get_db()
+    max_broken = 3  # From claim.py MAX_BROKEN_BUILDS_PER_WORKTREE
+
+    if subdirectory_key:
+        # Single worktree
+        wt_path = get_subdirectory_worktree_path(subdirectory_key)
+        broken_count, broken_funcs = db.get_worktree_broken_count(str(wt_path))
+
+        if output_json:
+            print(json.dumps({
+                "subdirectory": subdirectory_key,
+                "worktree_path": str(wt_path),
+                "broken_count": broken_count,
+                "max_allowed": max_broken,
+                "healthy": broken_count < max_broken,
+                "can_accept_claims": broken_count < max_broken,
+                "broken_functions": broken_funcs,
+            }, indent=2))
+            return
+
+        console.print(f"\n[bold]Worktree Health: {subdirectory_key}[/bold]\n")
+        console.print(f"  [dim]Path:[/dim] {wt_path}")
+
+        if broken_count == 0:
+            console.print(f"  [dim]Status:[/dim] [green]Healthy[/green] - no broken builds")
+            console.print(f"  [dim]Claims:[/dim] [green]Can accept new claims[/green]")
+        elif broken_count < max_broken:
+            console.print(f"  [dim]Status:[/dim] [yellow]Warning[/yellow] - {broken_count} broken build(s)")
+            console.print(f"  [dim]Claims:[/dim] [green]Can accept new claims[/green] ({max_broken - broken_count} more allowed)")
+            console.print(f"\n  [dim]Functions needing fixes:[/dim]")
+            for func in broken_funcs:
+                console.print(f"    - {func}")
+        else:
+            console.print(f"  [dim]Status:[/dim] [red]Unhealthy[/red] - {broken_count} broken builds")
+            console.print(f"  [dim]Claims:[/dim] [red]Blocked[/red] - fix existing issues first")
+            console.print(f"\n  [dim]Functions needing fixes:[/dim]")
+            for func in broken_funcs:
+                console.print(f"    - {func}")
+            console.print(f"\n[yellow]Run /decomp-fixup to resolve these issues[/yellow]")
+    else:
+        # All worktrees
+        results = []
+
+        if MELEE_WORKTREES_DIR.exists():
+            for wt in MELEE_WORKTREES_DIR.iterdir():
+                if wt.is_dir() and wt.name.startswith("dir-"):
+                    subdir_key = wt.name[4:]  # Strip "dir-" prefix
+                    broken_count, broken_funcs = db.get_worktree_broken_count(str(wt))
+                    results.append({
+                        "subdirectory": subdir_key,
+                        "worktree_path": str(wt),
+                        "broken_count": broken_count,
+                        "healthy": broken_count < max_broken,
+                        "broken_functions": broken_funcs,
+                    })
+
+        if output_json:
+            print(json.dumps({
+                "worktrees": results,
+                "max_allowed_per_worktree": max_broken,
+            }, indent=2))
+            return
+
+        if not results:
+            console.print("[dim]No worktrees found[/dim]")
+            return
+
+        console.print(f"\n[bold]Worktree Health Summary[/bold]\n")
+
+        healthy = [r for r in results if r["broken_count"] == 0]
+        warning = [r for r in results if 0 < r["broken_count"] < max_broken]
+        blocked = [r for r in results if r["broken_count"] >= max_broken]
+
+        if healthy:
+            console.print(f"[green]Healthy ({len(healthy)}):[/green]")
+            for r in healthy:
+                console.print(f"  {r['subdirectory']}")
+
+        if warning:
+            console.print(f"\n[yellow]Warning ({len(warning)}):[/yellow]")
+            for r in warning:
+                console.print(f"  {r['subdirectory']} - {r['broken_count']} broken: {', '.join(r['broken_functions'])}")
+
+        if blocked:
+            console.print(f"\n[red]Blocked ({len(blocked)}):[/red]")
+            for r in blocked:
+                console.print(f"  {r['subdirectory']} - {r['broken_count']} broken: {', '.join(r['broken_functions'])}")
+            console.print(f"\n[yellow]Run /decomp-fixup <func> to fix broken builds[/yellow]")
