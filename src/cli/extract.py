@@ -14,7 +14,6 @@ from ._common import (
     DEFAULT_MELEE_ROOT,
     get_context_file,
     resolve_melee_root,
-    load_completed_functions,
     detect_local_api_url,
     AGENT_ID,
     db_upsert_function,
@@ -514,14 +513,17 @@ def extract_list(
     file_filter: Annotated[
         Optional[str], typer.Option("--file", "-f", help="Filter by filename (partial match, e.g., 'lbfile.c' or 'lb/')")
     ] = None,
+    show_excluded: Annotated[
+        bool, typer.Option("--show-excluded", help="Show diagnostic info about excluded functions")
+    ] = False,
 ):
     """List unmatched functions from the melee project.
 
     Match percentages are read from the authoritative report.json which reflects
     the actual compiled state of decompiled code in the repository.
 
-    By default, excludes functions already tracked as completed/attempted.
-    Use --include-completed to show all functions.
+    By default, excludes only functions marked as 'merged' in the database.
+    Use --include-completed to also include merged functions.
 
     Use --matching-only to only show functions in files already marked as Matching.
     These are the only functions that can be safely committed without linker errors
@@ -550,10 +552,19 @@ def extract_list(
     # Don't load ASM for listing - it's not needed and adds significant overhead
     result = asyncio.run(extract_unmatched_functions(melee_root, include_asm=False))
 
-    # Load completed functions to exclude
-    completed = set()
+    # Load merged functions to exclude (only truly completed ones)
+    # Other statuses (in_progress, matched, committed) should still show
+    # because they may need more work or verification
+    merged = set()
     if not include_completed:
-        completed = set(load_completed_functions().keys())
+        from src.db import get_db
+        db = get_db()
+        with db.connection() as conn:
+            cursor = conn.execute("""
+                SELECT function_name FROM functions
+                WHERE status = 'merged'
+            """)
+            merged = {row[0] for row in cursor.fetchall()}
 
     # Build subdirectory exclusion check
     def _is_excluded_subdir(file_path: str) -> bool:
@@ -579,7 +590,7 @@ def extract_list(
         f for f in result.functions
         if min_match <= f.current_match <= max_match
         and min_size <= f.size_bytes <= max_size
-        and f.name not in completed
+        and f.name not in merged
         and (not matching_only or f.object_status == "Matching")
         and (not module or f"/{module}/" in f.file_path.lower())
         and not _is_excluded_subdir(f.file_path)
@@ -629,12 +640,99 @@ def extract_list(
         table.add_row(*row)
 
     console.print(table)
-    excluded_msg = f", {len(completed)} completed excluded" if completed else ""
+    excluded_msg = f", {len(merged)} merged excluded" if merged else ""
     matching_msg = ", Matching files only" if matching_only else ""
     module_msg = f", {module}/ only" if module else ""
     subdir_msg = f", excluding {', '.join(exclude_subdir)}" if exclude_subdir else ""
     file_msg = f", file='{file_filter}'" if file_filter else ""
     console.print(f"\n[dim]Found {len(functions)} functions (from {result.total_functions} total{excluded_msg}{matching_msg}{module_msg}{subdir_msg}{file_msg})[/dim]")
+
+    # Warn if no results but filters might be hiding functions
+    if len(functions) == 0 and result.total_functions > 0:
+        # Check if there are non-merged functions in the DB that might be incorrectly hiding results
+        from src.db import get_db
+        db = get_db()
+        with db.connection() as conn:
+            # Check for functions in range that have DB status but aren't merged
+            cursor = conn.execute("""
+                SELECT COUNT(*) FROM functions
+                WHERE status NOT IN ('merged', 'unclaimed')
+            """)
+            tracked_count = cursor.fetchone()[0]
+            if tracked_count > 0:
+                console.print(f"[yellow]Note: {tracked_count} functions are tracked in DB (not merged). Use 'melee-agent state status' to review.[/yellow]")
+
+    # Show detailed exclusion diagnostics if requested
+    if show_excluded:
+        from src.db import get_db
+        db = get_db()
+
+        console.print("\n[bold]Exclusion Diagnostics:[/bold]")
+
+        # Count reasons for exclusion
+        excluded_by_match = 0
+        excluded_by_size = 0
+        excluded_by_merged = 0
+        excluded_by_matching_only = 0
+        excluded_by_module = 0
+        excluded_by_subdir = 0
+        excluded_by_file = 0
+
+        for f in result.functions:
+            # Check each filter in order
+            if not (min_match <= f.current_match <= max_match):
+                excluded_by_match += 1
+                continue
+            if not (min_size <= f.size_bytes <= max_size):
+                excluded_by_size += 1
+                continue
+            if f.name in merged:
+                excluded_by_merged += 1
+                continue
+            if matching_only and f.object_status != "Matching":
+                excluded_by_matching_only += 1
+                continue
+            if module and f"/{module}/" not in f.file_path.lower():
+                excluded_by_module += 1
+                continue
+            if _is_excluded_subdir(f.file_path):
+                excluded_by_subdir += 1
+                continue
+            if not _matches_file_filter(f.file_path):
+                excluded_by_file += 1
+                continue
+
+        if excluded_by_match > 0:
+            console.print(f"  Match range ({min_match*100:.0f}%-{max_match*100:.0f}%): [yellow]{excluded_by_match}[/yellow] excluded")
+        if excluded_by_size > 0:
+            console.print(f"  Size range ({min_size}-{max_size}): [yellow]{excluded_by_size}[/yellow] excluded")
+        if excluded_by_merged > 0:
+            console.print(f"  Merged (status='merged'): [green]{excluded_by_merged}[/green] excluded")
+        if excluded_by_matching_only > 0:
+            console.print(f"  Matching files only: [yellow]{excluded_by_matching_only}[/yellow] excluded")
+        if excluded_by_module > 0:
+            console.print(f"  Module filter ({module}/): [yellow]{excluded_by_module}[/yellow] excluded")
+        if excluded_by_subdir > 0:
+            console.print(f"  Subdirectory exclusion: [yellow]{excluded_by_subdir}[/yellow] excluded")
+        if excluded_by_file > 0:
+            console.print(f"  File filter: [yellow]{excluded_by_file}[/yellow] excluded")
+
+        # Show functions in DB that match the module but aren't merged
+        if module:
+            with db.connection() as conn:
+                cursor = conn.execute("""
+                    SELECT function_name, match_percent, status
+                    FROM functions
+                    WHERE source_file_path LIKE ?
+                    AND status != 'merged'
+                    ORDER BY match_percent DESC
+                    LIMIT 10
+                """, (f"%/{module}/%",))
+                rows = cursor.fetchall()
+                if rows:
+                    console.print(f"\n  [bold]DB-tracked functions in {module}/ (not merged):[/bold]")
+                    for row in rows:
+                        console.print(f"    {row[0]}: {row[1]:.1f}% ({row[2]})")
 
 
 def _get_db_file_stats(func_to_file: dict[str, str]) -> dict[str, dict]:

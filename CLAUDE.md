@@ -43,7 +43,9 @@ melee-agent scratch decompile <slug>  # Re-run m2c decompiler on scratch
 melee-agent scratch update-context <slug>  # Rebuild context from repo headers
 
 # Function discovery
-melee-agent extract list --max-match 0.50  # Find unmatched functions
+melee-agent extract list --max-match 0.50  # Find unmatched functions (excludes merged only)
+melee-agent extract list --module vi       # Filter by module
+melee-agent extract list --show-excluded   # Debug: show why functions are filtered
 melee-agent extract get <func>             # Get ASM + metadata
 
 # Commit workflow

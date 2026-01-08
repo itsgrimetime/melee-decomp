@@ -104,6 +104,60 @@ class TestExtractCommands:
         assert "--file" in result.stdout or "-f" in result.stdout
         assert "filename" in result.stdout.lower() or "filter" in result.stdout.lower()
 
+    def test_extract_list_show_excluded_help(self):
+        """Test that --show-excluded option is documented."""
+        result = runner.invoke(app, ["extract", "list", "--help"])
+        assert result.exit_code == 0
+        assert "--show-excluded" in result.stdout
+        assert "diagnostic" in result.stdout.lower() or "excluded" in result.stdout.lower()
+
+    def test_extract_list_show_excluded(self, melee_root_exists):
+        """Test extract list with --show-excluded flag."""
+        result = runner.invoke(app, [
+            "extract", "list",
+            "--melee-root", str(melee_root_exists),
+            "--module", "lb",
+            "--limit", "3",
+            "--show-excluded"
+        ])
+
+        # Should run without crashing
+        assert result.exit_code == 0
+        # Should show exclusion diagnostics section
+        assert "Exclusion Diagnostics" in result.stdout
+
+    def test_extract_list_only_excludes_merged(self, melee_root_exists):
+        """Test that extract list only excludes merged functions, not all tracked.
+
+        This is a regression test for the bug where extract list would exclude
+        ALL functions in the database, not just those with status='merged'.
+        """
+        result = runner.invoke(app, [
+            "extract", "list",
+            "--melee-root", str(melee_root_exists),
+            "--limit", "5"
+        ])
+
+        # Should succeed
+        assert result.exit_code == 0
+        # Summary should say "merged excluded" not "completed excluded"
+        if "excluded" in result.stdout:
+            assert "merged excluded" in result.stdout
+
+    def test_extract_list_include_completed_flag(self, melee_root_exists):
+        """Test that --include-completed includes merged functions."""
+        result = runner.invoke(app, [
+            "extract", "list",
+            "--melee-root", str(melee_root_exists),
+            "--include-completed",
+            "--limit", "5"
+        ])
+
+        # Should succeed
+        assert result.exit_code == 0
+        # Should NOT show "merged excluded" when include-completed is set
+        assert "merged excluded" not in result.stdout
+
     def test_extract_files_help(self):
         """Test extract files command help output."""
         result = runner.invoke(app, ["extract", "files", "--help"])
