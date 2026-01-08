@@ -100,10 +100,24 @@ def get_pr_checks(repo: str, pr_number: int) -> list[dict]:
     try:
         result = subprocess.run(
             ["gh", "pr", "checks", str(pr_number), "--repo", repo, "--json",
-             "name,state,conclusion,startedAt,completedAt,workflowName,detailsUrl,databaseId"],
+             "name,state,startedAt,completedAt,link,workflow"],
             capture_output=True, text=True, check=True
         )
-        return json.loads(result.stdout)
+        checks = json.loads(result.stdout)
+        # Normalize field names to match expected format in consumers
+        for check in checks:
+            # Map 'state' to 'conclusion' for backward compatibility
+            # gh uses state: SUCCESS, FAILURE, SKIPPED, PENDING, etc.
+            state = check.get('state', '').upper()
+            if state == 'SUCCESS':
+                check['conclusion'] = 'success'
+            elif state == 'FAILURE':
+                check['conclusion'] = 'failure'
+            elif state in ('PENDING', 'IN_PROGRESS', 'QUEUED'):
+                check['conclusion'] = None  # Not finished
+            else:
+                check['conclusion'] = state.lower() if state else None
+        return checks
     except (subprocess.CalledProcessError, json.JSONDecodeError, FileNotFoundError):
         return []
 
@@ -192,25 +206,78 @@ def get_pr_review_comments(repo: str, pr_number: int) -> list[dict]:
 
 
 def parse_decomp_dev_report(body: str) -> dict | None:
-    """Parse decomp.dev report from PR body."""
+    """Parse decomp.dev report from PR body or comment.
+
+    Supports both the old "## decomp.dev Report" format in PR bodies
+    and the new bot comment format with "### Report for GALE01".
+    """
     if not body:
         return None
 
-    # Look for decomp.dev report section
+    result = {
+        'matching_functions': 0,
+        'matching_bytes': 0,
+        'total_bytes': 0,
+        'completion_percent': 0.0,
+        'delta_percent': 0.0,
+        'delta_bytes': 0,
+        'broken_matches': [],
+        'regressions': [],
+        'improvements': [],
+        'new_matches': [],
+        'raw_text': '',
+    }
+
+    # Try new bot comment format first: "### Report for GALE01"
+    bot_report_match = re.search(r'### Report for (\w+)', body)
+    if bot_report_match:
+        result['raw_text'] = body
+
+        # Parse: "📈 **Matched code**: 48.62% (+0.01%, +512 bytes)"
+        # or: "📉 **Matched code**: 48.54% (-0.06%, -2268 bytes)"
+        matched_pattern = r'\*\*Matched code\*\*:\s*([\d.]+)%\s*\(([+-][\d.]+)%,\s*([+-][\d,]+)\s*bytes\)'
+        matched = re.search(matched_pattern, body)
+        if matched:
+            result['completion_percent'] = float(matched.group(1))
+            result['delta_percent'] = float(matched.group(2))
+            result['delta_bytes'] = int(matched.group(3).replace(',', ''))
+
+        # Count broken matches (100% -> 0%)
+        broken_section = re.search(r'💔\s*(\d+)\s*broken match', body)
+        if broken_section:
+            result['broken_matches_count'] = int(broken_section.group(1))
+            # Extract function names from the broken matches table
+            broken_funcs = re.findall(r'\|\s*`[^`]+`\s*\|\s*`([^`]+)`\s*\|[^|]+\|\s*100\.00%\s*\|\s*0\.00%', body)
+            result['broken_matches'] = broken_funcs
+
+        # Count regressions
+        regression_section = re.search(r'📉\s*(\d+)\s*regression', body)
+        if regression_section:
+            result['regressions_count'] = int(regression_section.group(1))
+            # Extract function names
+            regression_funcs = re.findall(r'\|\s*`[^`]+`\s*\|\s*`([^`]+)`\s*\|[^|]+\|[^|]+\|\s*0\.00%', body)
+            result['regressions'] = regression_funcs
+
+        # Count improvements
+        improvement_section = re.search(r'📈\s*(\d+)\s*improvement', body)
+        if improvement_section:
+            result['improvements_count'] = int(improvement_section.group(1))
+
+        # Count new matches
+        new_match_section = re.search(r'✅\s*(\d+)\s*new match', body)
+        if new_match_section:
+            result['new_matches_count'] = int(new_match_section.group(1))
+
+        return result
+
+    # Fall back to old "## decomp.dev Report" format in PR bodies
     report_pattern = r'## decomp\.dev Report\s*\n(.*?)(?:\n##|\Z)'
     match = re.search(report_pattern, body, re.DOTALL | re.IGNORECASE)
     if not match:
         return None
 
     report_text = match.group(1)
-
-    # Extract metrics
-    result = {
-        'matching_functions': 0,
-        'matching_bytes': 0,
-        'total_bytes': 0,
-        'completion_percent': 0.0,
-    }
+    result['raw_text'] = report_text
 
     # Pattern: "Matching functions: 123"
     func_match = re.search(r'Matching functions?:\s*(\d+)', report_text, re.IGNORECASE)
@@ -230,14 +297,46 @@ def parse_decomp_dev_report(body: str) -> dict | None:
     return result
 
 
+def get_pr_issue_comments(repo: str, pr_number: int) -> list[dict]:
+    """Get issue comments (including bot comments) on a PR."""
+    try:
+        result = subprocess.run(
+            ["gh", "api", f"repos/{repo}/issues/{pr_number}/comments",
+             "--jq", "[.[] | {body, user: .user.login, created_at, updated_at}]"],
+            capture_output=True, text=True, check=True
+        )
+        return json.loads(result.stdout) if result.stdout.strip() else []
+    except (subprocess.CalledProcessError, json.JSONDecodeError, FileNotFoundError):
+        return []
+
+
 def get_decomp_dev_report(repo: str, pr_number: int) -> dict | None:
-    """Get decomp.dev report from PR body."""
+    """Get decomp.dev report from PR comments or body.
+
+    First checks issue comments for bot-generated reports, then falls
+    back to checking the PR body for embedded reports.
+    """
+    # First check issue comments for bot reports
+    comments = get_pr_issue_comments(repo, pr_number)
+    for comment in reversed(comments):  # Most recent first
+        body = comment.get('body', '')
+        if '### Report for' in body or 'Matched code' in body:
+            report = parse_decomp_dev_report(body)
+            if report:
+                report['source'] = 'comment'
+                report['author'] = comment.get('user', 'unknown')
+                return report
+
+    # Fall back to PR body
     info = get_extended_pr_info(repo, pr_number)
     if not info:
         return None
 
     body = info.get('body', '')
-    return parse_decomp_dev_report(body)
+    report = parse_decomp_dev_report(body)
+    if report:
+        report['source'] = 'body'
+    return report
 
 
 def get_pr_merge_status(repo: str, pr_number: int) -> dict:

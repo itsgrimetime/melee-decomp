@@ -168,20 +168,97 @@ def _feedback_single_pr(repo: str, pr_number: int, include_logs: bool, output_js
     # decomp.dev report
     if decomp_report:
         console.print(f"\n[bold]decomp.dev Report:[/bold]")
-        console.print(f"  Matching functions: {decomp_report.get('matching_functions', 0)}")
-        console.print(f"  Matching bytes: {decomp_report.get('matching_bytes', 0):,} / {decomp_report.get('total_bytes', 0):,}")
-        console.print(f"  Completion: {decomp_report.get('completion_percent', 0):.2f}%")
 
-    # Merge status
-    if merge_status:
-        console.print(f"\n[bold]Merge Status:[/bold]")
-        if merge_status.get('state') == 'MERGED':
-            console.print(f"  [green]Merged by {merge_status.get('merged_by', 'unknown')}[/green]")
-        elif merge_status.get('mergeable') == 'CONFLICTING':
-            console.print("  [red]Has conflicts - needs rebase[/red]")
-        elif merge_status.get('mergeable') == 'MERGEABLE':
-            console.print("  [green]Ready to merge[/green]")
+        # New bot format with delta
+        if decomp_report.get('delta_bytes') is not None:
+            delta_bytes = decomp_report.get('delta_bytes', 0)
+            delta_pct = decomp_report.get('delta_percent', 0)
+            completion = decomp_report.get('completion_percent', 0)
+
+            # Color based on positive/negative delta
+            if delta_bytes > 0:
+                console.print(f"  [green]Matched code: {completion:.2f}% (+{delta_pct:.2f}%, +{delta_bytes:,} bytes)[/green]")
+            elif delta_bytes < 0:
+                console.print(f"  [red]Matched code: {completion:.2f}% ({delta_pct:.2f}%, {delta_bytes:,} bytes)[/red]")
+            else:
+                console.print(f"  Matched code: {completion:.2f}% (no change)")
+
+            # Show broken matches prominently
+            broken_count = decomp_report.get('broken_matches_count', 0)
+            if broken_count > 0:
+                console.print(f"  [bold red]💔 {broken_count} broken matches[/bold red]")
+                broken_funcs = decomp_report.get('broken_matches', [])
+                for func in broken_funcs[:5]:
+                    console.print(f"    - {func}")
+                if len(broken_funcs) > 5:
+                    console.print(f"    [dim]... and {len(broken_funcs) - 5} more[/dim]")
+
+            # Show regressions
+            regression_count = decomp_report.get('regressions_count', 0)
+            if regression_count > 0:
+                console.print(f"  [yellow]📉 {regression_count} regressions[/yellow]")
+                regression_funcs = decomp_report.get('regressions', [])
+                for func in regression_funcs[:5]:
+                    console.print(f"    - {func}")
+                if len(regression_funcs) > 5:
+                    console.print(f"    [dim]... and {len(regression_funcs) - 5} more[/dim]")
+
+            # Show new matches
+            new_count = decomp_report.get('new_matches_count', 0)
+            if new_count > 0:
+                console.print(f"  [green]✅ {new_count} new match{'es' if new_count > 1 else ''}[/green]")
+
+            # Show improvements
+            improvement_count = decomp_report.get('improvements_count', 0)
+            if improvement_count > 0:
+                console.print(f"  [cyan]📈 {improvement_count} improvement{'s' if improvement_count > 1 else ''}[/cyan]")
+
         else:
-            console.print(f"  Mergeable: {merge_status.get('mergeable', 'unknown')}")
+            # Old format (from PR body)
+            console.print(f"  Matching functions: {decomp_report.get('matching_functions', 0)}")
+            console.print(f"  Matching bytes: {decomp_report.get('matching_bytes', 0):,} / {decomp_report.get('total_bytes', 0):,}")
+            console.print(f"  Completion: {decomp_report.get('completion_percent', 0):.2f}%")
+
+    # Merge status (considering checks and regressions)
+    console.print(f"\n[bold]Merge Status:[/bold]")
+    if merge_status and merge_status.get('state') == 'MERGED':
+        console.print(f"  [green]Merged by {merge_status.get('merged_by', 'unknown')}[/green]")
+    else:
+        blockers = []
+        warnings_list = []
+
+        # Check for conflicts
+        if merge_status and merge_status.get('mergeable') == 'CONFLICTING':
+            blockers.append("Has conflicts - needs rebase")
+
+        # Check for failed CI
+        if failed_checks:
+            blockers.append(f"{len(failed_checks)} CI check(s) failing")
+
+        # Check for broken matches
+        if decomp_report:
+            broken_count = decomp_report.get('broken_matches_count', 0)
+            if broken_count > 0:
+                blockers.append(f"{broken_count} broken match(es)")
+
+            regression_count = decomp_report.get('regressions_count', 0)
+            if regression_count > 0:
+                warnings_list.append(f"{regression_count} regression(s)")
+
+            if decomp_report.get('delta_bytes', 0) < 0:
+                warnings_list.append("Net negative progress")
+
+        if blockers:
+            console.print(f"  [bold red]🚫 NOT ready to merge:[/bold red]")
+            for blocker in blockers:
+                console.print(f"    - {blocker}")
+        elif warnings_list:
+            console.print(f"  [yellow]⚠ Mergeable with warnings:[/yellow]")
+            for warning in warnings_list:
+                console.print(f"    - {warning}")
+        elif merge_status and merge_status.get('mergeable') == 'MERGEABLE':
+            console.print("  [green]✓ Ready to merge[/green]")
+        else:
+            console.print(f"  Mergeable: {merge_status.get('mergeable', 'unknown') if merge_status else 'unknown'}")
 
     return None
