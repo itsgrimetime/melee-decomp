@@ -50,9 +50,9 @@ def _lookup_source_file(function_name: str) -> str | None:
         pass  # Silently fail - auto-detection is optional
     return None
 
-# Claims are SHARED and ephemeral (1-hour expiry) - ok in /tmp
+# Claims are SHARED and ephemeral (3-hour expiry) - ok in /tmp
 DECOMP_CLAIMS_FILE = os.environ.get("DECOMP_CLAIMS_FILE", "/tmp/decomp_claims.json")
-DECOMP_CLAIM_TIMEOUT = int(os.environ.get("DECOMP_CLAIM_TIMEOUT", "3600"))  # 1 hour
+DECOMP_CLAIM_TIMEOUT = int(os.environ.get("DECOMP_CLAIM_TIMEOUT", "10800"))  # 3 hours
 
 
 claim_app = typer.Typer(help="Manage function claims for parallel agents")
@@ -139,7 +139,7 @@ def claim_add(
         str, typer.Option("--agent-id", help="Agent identifier")
     ] = AGENT_ID,
     source_file: Annotated[
-        str | None, typer.Option("--source-file", "-f", help="Source file path (auto-detected if not provided)")
+        str | None, typer.Option("--source-file", "-f", "--source", help="Source file path (auto-detected if not provided)")
     ] = None,
     output_json: Annotated[
         bool, typer.Option("--json", help="Output as JSON")

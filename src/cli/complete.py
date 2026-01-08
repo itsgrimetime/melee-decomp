@@ -15,7 +15,7 @@ from .utils import file_lock, load_json_with_expiry, save_json_atomic
 
 # File paths
 DECOMP_CLAIMS_FILE = os.environ.get("DECOMP_CLAIMS_FILE", "/tmp/decomp_claims.json")
-DECOMP_CLAIM_TIMEOUT = int(os.environ.get("DECOMP_CLAIM_TIMEOUT", "3600"))
+DECOMP_CLAIM_TIMEOUT = int(os.environ.get("DECOMP_CLAIM_TIMEOUT", "10800"))  # 3 hours
 
 complete_app = typer.Typer(help="Track completed/attempted functions")
 

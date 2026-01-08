@@ -91,7 +91,7 @@ melee-agent extract list --min-match 0 --max-match 0.50 --sort score --show-scor
 melee-agent extract list --module lb --sort score --show-score
 melee-agent extract list --module ft --sort score --show-score
 
-melee-agent claim add <function_name>  # Claims expire after 1 hour
+melee-agent claim add <function_name>  # Claims expire after 3 hours
 ```
 
 > **CRITICAL:** Once you claim a function, you MUST work on THAT function until completion.
@@ -580,6 +580,45 @@ melee-agent state urls <func_name>        # Show all URLs (scratch, PR)
 ## Server Unreachable
 
 If the decomp.me server is unreachable, **STOP and report the issue to the user**. Do NOT attempt to work around it with local-only workflows. The server should always be available - if it's not, something is wrong that needs to be fixed.
+
+## CLI Quick Reference
+
+### Getting Help
+```bash
+melee-agent --help                    # List all commands
+melee-agent scratch --help            # List scratch subcommands
+melee-agent scratch compile --help    # Show all flags for compile
+```
+
+### Common Flags by Command
+
+| Command | Short | Long | Description |
+|---------|-------|------|-------------|
+| `scratch compile` | `-s` | `--source` | Source file to compile |
+| `scratch compile` | `-d` | `--diff` | Show instruction diff |
+| `scratch compile` | `-r` | `--refresh-context` | Rebuild context from repo first |
+| `scratch compile` | | `--stdin` | Read source from stdin (use with heredoc) |
+| `scratch get` | `-c` | `--context` | Show scratch context |
+| `scratch get` | `-d` | `--diff` | Show instruction diff |
+| `scratch get` | `-g` | `--grep` | Search context for pattern |
+| `scratch update-context` | `-s` | `--source` | Source file for context |
+| `scratch update-context` | | `--compile` | Compile after updating |
+| `claim add` | `-f` | `--source-file` or `--source` | Source file (auto-detected) |
+| `extract list` | | `--module` | Filter by module (e.g., `lb`, `ft`) |
+| `extract list` | | `--sort score` | Sort by recommendation score |
+| `extract get` | | `--create-scratch` | Create scratch after extracting |
+| `extract get` | | `--full` | Show full output including ASM |
+| `workflow finish` | | `--force` | Commit even if build has issues |
+| `workflow finish` | | `--diagnosis` | Required with `--force` - explain why |
+
+### Heredoc Pattern (Recommended)
+```bash
+cat << 'EOF' | melee-agent scratch compile <slug> --stdin --diff
+void func(void) {
+    if (!flag) return;  # Note: quotes around EOF prevent ! escaping
+}
+EOF
+```
 
 ## Note on objdiff-cli
 

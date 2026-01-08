@@ -459,7 +459,9 @@ def scratch_compile(
         import sys
         source_code = sys.stdin.read()
     elif code is not None:
-        source_code = code
+        # Fix common shell escaping issues from --code flag
+        # Bash history expansion can turn ! into \!
+        source_code = code.replace(r'\!', '!').replace(r'\=', '=')
 
     async def compile_scratch():
         async with DecompMeAPIClient(base_url=api_url) as client:
